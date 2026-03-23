@@ -9,8 +9,10 @@ import android.net.VpnService as AndroidVpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
+import com.netproxy.gateway.connection.AuthSessionStore
 import com.netproxy.gateway.ui.MainActivity
 import com.netproxy.gateway.proxy.Socks5ProxyService
+import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -20,13 +22,13 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.io.FileInputStream
-import java.io.FileOutputStream
+import java.net.DatagramPacket
+import java.net.DatagramSocket
 import java.net.InetAddress
-import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
-import java.io.OutputStream
-import java.io.InputStream
+import java.net.InetSocketAddress
 import java.net.Socket
+import javax.inject.Inject
 
 enum class VpnState {
     STOPPED,
@@ -41,12 +43,15 @@ data class VpnStatus(
     val connectedClients: Int = 0
 )
 
+@AndroidEntryPoint
 class GatewayVpnService : AndroidVpnService() {
 
     companion object {
         private const val TAG = "VpnService"
         private const val NOTIFICATION_CHANNEL_ID = "vpn_service_channel"
         private const val NOTIFICATION_ID = 100
+        private const val PACKET_BUFFER_SIZE = 32 * 1024
+        private const val CONNECTION_TIMEOUT_MS = 30_000L
         
         const val VPN_ADDRESS = "10.0.0.2"
         const val VPN_ROUTE = "0.0.0.0"
@@ -75,10 +80,14 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    @Inject
+    lateinit var authSessionStore: AuthSessionStore
     private var vpnInterface: ParcelFileDescriptor? = null
     
     // 活跃的代理连接映射
     private val activeConnections = ConcurrentHashMap<String, ConnectionInfo>()
+    private val packetBuffer = ByteArray(PACKET_BUFFER_SIZE)
     
     private val _status = MutableStateFlow(VpnStatus())
     val status: StateFlow<VpnStatus> = _status.asStateFlow()
@@ -149,17 +158,18 @@ class GatewayVpnService : AndroidVpnService() {
     private suspend fun processVpnTraffic() {
         val vpnFd = vpnInterface ?: return
         val inputStream = FileInputStream(vpnFd.fileDescriptor)
-        val packet = ByteArray(32767)
 
         try {
             while (_status.value.state == VpnState.RUNNING) {
-                val length = inputStream.read(packet)
+                val length = inputStream.read(packetBuffer)
                 if (length > 0) {
-                    processPacket(packet, length)
+                    processPacket(packetBuffer, length)
+                    cleanupStaleConnections()
                 }
             }
         } catch (e: Exception) {
             if (_status.value.state == VpnState.RUNNING) {
+                android.util.Log.e(TAG, "VPN traffic loop failed", e)
                 _status.value = VpnStatus(
                     state = VpnState.ERROR,
                     errorMessage = e.message
@@ -169,6 +179,8 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     private fun processPacket(packet: ByteArray, length: Int) {
+        if (length <= 0) return
+
         // 解析 IP 包获取目标地址
         val destinationIp = parseDestinationIp(packet, length) ?: return
         
@@ -178,7 +190,6 @@ class GatewayVpnService : AndroidVpnService() {
         when (routeType) {
             RouteType.LOCAL_NETWORK -> {
                 // 内网流量：通过 WiFi 网卡直连
-                // 在实际实现中，需要绕过 VPN 直接发送
                 forwardViaWifi(packet, length, destinationIp)
             }
             RouteType.DNS -> {
@@ -243,22 +254,16 @@ class GatewayVpnService : AndroidVpnService() {
         try {
             val parts = ip.split(".").map { it.toInt() }
             if (parts.size != 4) return false
-            
-            val ipInt = (parts[0] shl 24) or (parts[1] shl 16) or (parts[2] shl 8) or parts[3]
-            
+
             // 10.0.0.0/8
-            val range10 = (10 shl 24) // 10.0.0.0
-            if ((ipInt and (0xFF shl 24)) == range10) return true
-            
+            if (parts[0] == 10) return true
+
             // 172.16.0.0/12
-            val range172 = (172 shl 24) or (16 shl 16)
-            val range172End = (172 shl 24) or (31 shl 16)
-            if (ipInt >= range172 && ipInt < range172End) return true
-            
+            if (parts[0] == 172 && parts[1] in 16..31) return true
+
             // 192.168.0.0/16
-            val range192 = (192 shl 24) or (168 shl 16)
-            if ((ipInt and 0xFFFF0000.toInt()) == range192) return true
-            
+            if (parts[0] == 192 && parts[1] == 168) return true
+
             return false
         } catch (e: Exception) {
             return false
@@ -271,25 +276,188 @@ class GatewayVpnService : AndroidVpnService() {
      * 或者配置 excludeRoute 来绕过 VPN
      */
     private fun forwardViaWifi(packet: ByteArray, length: Int, destinationIp: String) {
-        // TODO: 实现通过 WiFi 直连
-        // 方法1: 使用 Network.bindSocket() 绑定到特定网络
-        // 方法2: 在 Android 13+ 使用 excludeRoute 排除内网段
-        
-        // 当前为存根实现，日志记录
-        android.util.Log.d(TAG, "Forward to WiFi: $destinationIp")
+        try {
+            val protocol = parseProtocol(packet)
+            val destinationPort = parseDestinationPort(packet, length) ?: return
+            val payload = extractTransportPayload(packet, length)
+
+            when (protocol) {
+                17 -> {
+                    // UDP
+                    DatagramSocket().use { socket ->
+                        protect(socket)
+                        val datagram = DatagramPacket(payload, payload.size, InetAddress.getByName(destinationIp), destinationPort)
+                        socket.send(datagram)
+                    }
+                }
+                6 -> {
+                    // TCP best-effort forwarding
+                    Socket().use { socket ->
+                        protect(socket)
+                        socket.connect(InetSocketAddress(destinationIp, destinationPort), 3000)
+                        socket.getOutputStream().write(payload)
+                        socket.getOutputStream().flush()
+                    }
+                }
+                else -> {
+                    android.util.Log.d(TAG, "Skip unsupported protocol=$protocol for WiFi route")
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "Forward via WiFi failed for $destinationIp", e)
+        }
     }
     
     /**
      * 通过本地 SOCKS5 代理转发
      */
     private fun forwardViaSocks5(packet: ByteArray, length: Int, destinationIp: String) {
-        // TODO: 实现 SOCKS5 代理转发
-        // 1. 解析 TCP/UDP 头获取端口
-        // 2. 建立到 SOCKS5 代理的连接
-        // 3. 转发数据包
-        
-        // 当前为存根实现
-        android.util.Log.d(TAG, "Forward to SOCKS5 proxy: $destinationIp")
+        val destinationPort = parseDestinationPort(packet, length) ?: return
+        val payload = extractTransportPayload(packet, length)
+        val session = authSessionStore.getCurrentSession() ?: return
+        val connectionKey = "$destinationIp:$destinationPort"
+
+        try {
+            val connection = activeConnections[connectionKey]
+            val socket = if (connection?.localSocket?.isConnected == true) {
+                connection.localSocket
+            } else {
+                createSocks5Tunnel(
+                    destinationIp = destinationIp,
+                    destinationPort = destinationPort,
+                    username = session.deviceId,
+                    password = session.authToken
+                ).also {
+                    activeConnections[connectionKey] = ConnectionInfo(
+                        remoteAddress = destinationIp,
+                        remotePort = destinationPort,
+                        localSocket = it
+                    )
+                }
+            }
+
+            socket?.getOutputStream()?.write(payload)
+            socket?.getOutputStream()?.flush()
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "Forward via SOCKS5 failed for $destinationIp:$destinationPort", e)
+            activeConnections.remove(connectionKey)?.localSocket?.close()
+        }
+    }
+
+    private fun createSocks5Tunnel(
+        destinationIp: String,
+        destinationPort: Int,
+        username: String,
+        password: String
+    ): Socket {
+        val socket = Socket().apply {
+            protect(this)
+            connect(InetSocketAddress(SOCKS5_PROXY_HOST, SOCKS5_PROXY_PORT), 3000)
+            soTimeout = 3000
+        }
+
+        val output = socket.getOutputStream()
+        val input = socket.getInputStream()
+
+        // auth method negotiation
+        output.write(byteArrayOf(0x05, 0x01, 0x02))
+        output.flush()
+        val methodResponse = ByteArray(2)
+        readFully(input, methodResponse)
+        require(methodResponse[0].toInt() == 0x05 && methodResponse[1].toInt() == 0x02) {
+            "SOCKS5 password auth negotiation failed"
+        }
+
+        // username/password auth
+        val userBytes = username.toByteArray(Charsets.UTF_8)
+        val passBytes = password.toByteArray(Charsets.UTF_8)
+        require(userBytes.size <= 255 && passBytes.size <= 255) { "SOCKS5 credentials too long" }
+        output.write(byteArrayOf(0x01, userBytes.size.toByte()))
+        output.write(userBytes)
+        output.write(byteArrayOf(passBytes.size.toByte()))
+        output.write(passBytes)
+        output.flush()
+        val authResponse = ByteArray(2)
+        readFully(input, authResponse)
+        require(authResponse[1].toInt() == 0x00) { "SOCKS5 authentication failed" }
+
+        // connect to destination
+        val addressBytes = InetAddress.getByName(destinationIp).address
+        output.write(byteArrayOf(0x05, 0x01, 0x00, 0x01))
+        output.write(addressBytes)
+        output.write(byteArrayOf((destinationPort shr 8).toByte(), (destinationPort and 0xFF).toByte()))
+        output.flush()
+
+        val connectHeader = ByteArray(4)
+        readFully(input, connectHeader)
+        require(connectHeader[1].toInt() == 0x00) { "SOCKS5 connect failed: ${connectHeader[1].toInt()}" }
+
+        val boundAddressLength = when (connectHeader[3].toInt()) {
+            0x01 -> 4
+            0x03 -> {
+                val lenBuffer = ByteArray(1)
+                readFully(input, lenBuffer)
+                lenBuffer[0].toInt() and 0xFF
+            }
+            0x04 -> 16
+            else -> throw IllegalStateException("Unsupported SOCKS5 ATYP ${connectHeader[3].toInt()}")
+        }
+        readFully(input, ByteArray(boundAddressLength + 2))
+
+        return socket
+    }
+
+    private fun readFully(input: java.io.InputStream, target: ByteArray) {
+        var offset = 0
+        while (offset < target.size) {
+            val read = input.read(target, offset, target.size - offset)
+            if (read < 0) {
+                throw IllegalStateException("Unexpected EOF while reading SOCKS5 stream")
+            }
+            offset += read
+        }
+    }
+
+    private fun cleanupStaleConnections() {
+        val now = System.currentTimeMillis()
+        activeConnections.entries.removeIf { entry ->
+            val isExpired = now - entry.value.createdAt > CONNECTION_TIMEOUT_MS
+            if (isExpired) {
+                try {
+                    entry.value.localSocket?.close()
+                } catch (_: Exception) {
+                }
+            }
+            isExpired
+        }
+    }
+
+    private fun parseProtocol(packet: ByteArray): Int {
+        return packet[9].toInt() and 0xFF
+    }
+
+    private fun parseDestinationPort(packet: ByteArray, length: Int): Int? {
+        if (length < 20) return null
+        val headerLength = (packet[0].toInt() and 0x0F) * 4
+        if (length < headerLength + 4) return null
+        return ((packet[headerLength + 2].toInt() and 0xFF) shl 8) or (packet[headerLength + 3].toInt() and 0xFF)
+    }
+
+    private fun extractTransportPayload(packet: ByteArray, length: Int): ByteArray {
+        if (length < 20) return ByteArray(0)
+        val ipHeaderLength = (packet[0].toInt() and 0x0F) * 4
+        val protocol = parseProtocol(packet)
+        val transportHeaderLength = when (protocol) {
+            6 -> {
+                if (length < ipHeaderLength + 13) return ByteArray(0)
+                ((packet[ipHeaderLength + 12].toInt() shr 4) and 0x0F) * 4
+            }
+            17 -> 8
+            else -> 0
+        }
+        val payloadStart = ipHeaderLength + transportHeaderLength
+        if (payloadStart >= length) return ByteArray(0)
+        return packet.copyOfRange(payloadStart, length)
     }
     
     /**
@@ -357,8 +525,16 @@ class GatewayVpnService : AndroidVpnService() {
             vpnInterface?.close()
             vpnInterface = null
         } catch (e: Exception) {
-            // Handle cleanup
+            android.util.Log.w(TAG, "Failed to close VPN interface", e)
         }
+
+        activeConnections.values.forEach { info ->
+            try {
+                info.localSocket?.close()
+            } catch (_: Exception) {
+            }
+        }
+        activeConnections.clear()
         
         stopProxyService()
         stopForeground(STOP_FOREGROUND_REMOVE)

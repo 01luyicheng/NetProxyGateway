@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.netproxy.gateway.connection.AuthSessionStore
 import com.netproxy.gateway.ui.MainActivity
@@ -97,7 +98,8 @@ class Socks5ProxyService : Service() {
                 serverChannel?.closeFuture()?.sync()
 
             } catch (e: Exception) {
-                e.printStackTrace()
+                Log.e(TAG, "SOCKS5 server failed to start", e)
+                stopSelf()
             }
         }
     }

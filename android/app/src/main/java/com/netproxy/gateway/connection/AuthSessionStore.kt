@@ -1,27 +1,94 @@
 package com.netproxy.gateway.connection
 
+import android.content.Context
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
+import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
-class AuthSessionStore @Inject constructor() {
+class AuthSessionStore @Inject constructor(
+    @ApplicationContext private val context: Context
+) {
 
-    private var currentSession: ProxyAuthSession? = null
+    companion object {
+        private const val PREF_NAME = "auth_session_store"
+        private const val KEY_DEVICE_ID = "device_id"
+        private const val KEY_AUTH_TOKEN = "auth_token"
+    }
+
+    private val encryptedPrefs by lazy {
+        val masterKey = MasterKey.Builder(context)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+
+        EncryptedSharedPreferences.create(
+            context,
+            PREF_NAME,
+            masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+    }
+
+    private var inMemoryToken: CharArray? = null
+    private var inMemoryDeviceId: String? = null
 
     @Synchronized
     fun update(deviceId: String, authToken: String) {
-        currentSession = ProxyAuthSession(deviceId = deviceId, authToken = authToken)
+        inMemoryToken?.fill('\u0000')
+        inMemoryToken = authToken.toCharArray()
+        inMemoryDeviceId = deviceId
+
+        encryptedPrefs.edit()
+            .putString(KEY_DEVICE_ID, deviceId)
+            .putString(KEY_AUTH_TOKEN, authToken)
+            .apply()
     }
 
     @Synchronized
     fun clear() {
-        currentSession = null
+        inMemoryToken?.fill('\u0000')
+        inMemoryToken = null
+        inMemoryDeviceId = null
+        encryptedPrefs.edit().clear().apply()
     }
 
     @Synchronized
     fun isValid(username: String, password: String): Boolean {
-        val session = currentSession ?: return false
-        return session.deviceId == username && session.authToken == password
+        val session = loadSession() ?: return false
+        if (session.deviceId != username) return false
+        return constantTimeEquals(session.authToken.toCharArray(), password.toCharArray())
+    }
+
+    @Synchronized
+    fun getCurrentSession(): ProxyAuthSession? {
+        return loadSession()
+    }
+
+    @Synchronized
+    private fun loadSession(): ProxyAuthSession? {
+        val cachedToken = inMemoryToken
+        val cachedDeviceId = inMemoryDeviceId
+        if (cachedToken != null && cachedDeviceId != null) {
+            return ProxyAuthSession(cachedDeviceId, String(cachedToken))
+        }
+
+        val storedDeviceId = encryptedPrefs.getString(KEY_DEVICE_ID, null) ?: return null
+        val storedToken = encryptedPrefs.getString(KEY_AUTH_TOKEN, null) ?: return null
+        inMemoryDeviceId = storedDeviceId
+        inMemoryToken = storedToken.toCharArray()
+        return ProxyAuthSession(storedDeviceId, storedToken)
+    }
+
+    private fun constantTimeEquals(left: CharArray, right: CharArray): Boolean {
+        if (left.size != right.size) return false
+        var diff = 0
+        for (i in left.indices) {
+            diff = diff or (left[i].code xor right[i].code)
+        }
+        return diff == 0
     }
 }
 

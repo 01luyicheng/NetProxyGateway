@@ -6,6 +6,19 @@ plugins {
     id("org.jetbrains.kotlin.kapt")
 }
 
+val mqttBrokerUrlTlsDebug = providers.gradleProperty("MQTT_BROKER_URL_TLS_DEBUG")
+    .orElse("ssl://localhost:8883")
+    .get()
+val mqttBrokerUrlPlainDebug = providers.gradleProperty("MQTT_BROKER_URL_PLAIN_DEBUG")
+    .orElse("tcp://localhost:1883")
+    .get()
+val mqttBrokerUrlTlsRelease = providers.gradleProperty("MQTT_BROKER_URL_TLS_RELEASE")
+    .orElse("ssl://localhost:8883")
+    .get()
+val mqttBrokerUrlPlainRelease = providers.gradleProperty("MQTT_BROKER_URL_PLAIN_RELEASE")
+    .orElse("")
+    .get()
+
 android {
     namespace = "com.netproxy.gateway"
     compileSdk = 34
@@ -18,6 +31,10 @@ android {
         versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        buildConfigField("Boolean", "MQTT_USE_TLS", "false")
+        buildConfigField("String", "MQTT_BROKER_URL_TLS", "\"${mqttBrokerUrlTlsDebug}\"")
+        buildConfigField("String", "MQTT_BROKER_URL_PLAIN", "\"${mqttBrokerUrlPlainDebug}\"")
     }
 
     buildTypes {
@@ -27,6 +44,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            buildConfigField("Boolean", "MQTT_USE_TLS", "true")
+            buildConfigField("String", "MQTT_BROKER_URL_TLS", "\"${mqttBrokerUrlTlsRelease}\"")
+            buildConfigField("String", "MQTT_BROKER_URL_PLAIN", "\"${mqttBrokerUrlPlainRelease}\"")
         }
         debug {
             isMinifyEnabled = false
@@ -44,6 +64,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     composeOptions {
@@ -83,6 +104,7 @@ dependencies {
     implementation("io.netty:netty-codec-socks:4.1.108.Final")
 
     implementation("org.slf4j:slf4j-api:2.0.13")
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("io.mockk:mockk:1.13.11")

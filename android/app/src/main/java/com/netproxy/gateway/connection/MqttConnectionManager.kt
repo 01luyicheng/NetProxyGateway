@@ -2,6 +2,7 @@ package com.netproxy.gateway.connection
 
 import android.content.Context
 import android.util.Log
+import com.netproxy.gateway.BuildConfig
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -22,7 +23,13 @@ import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence
 import javax.inject.Inject
 import javax.inject.Singleton
 import javax.net.ssl.SSLContext
+import java.security.KeyStore
+import java.security.SecureRandom
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicLong
+import javax.net.ssl.SSLSocketFactory
+import javax.net.ssl.TrustManagerFactory
 
 sealed class MqttConnectionState {
     object Disconnected : MqttConnectionState()
@@ -37,18 +44,10 @@ class MqttConnectionManager @Inject constructor(
 ) {
     companion object {
         private const val TAG = "MqttConnectionManager"
-        
-        // MQTT Broker 配置 - 使用 TLS 加密
-        // 生产环境应使用实际服务器地址
-        private const val BROKER_URL = "ssl://your-server:8883"
-        private const val BROKER_URL_PLAIN = "tcp://your-server:1883"  // 开发环境使用
-        
+
         private const val CLIENT_ID = "NetProxyGateway"
         private const val HEARTBEAT_INTERVAL = 30000L
         private const val MAX_RECONNECT_DELAY = 60000L
-        
-        // 是否启用 TLS（生产环境应为 true）
-        const val USE_TLS = true
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -64,6 +63,32 @@ class MqttConnectionManager @Inject constructor(
 
     private val _messages = MutableStateFlow<String?>(null)
     val messages: StateFlow<String?> = _messages.asStateFlow()
+    private val topicCallbacks = ConcurrentHashMap<String, CopyOnWriteArrayList<(String) -> Unit>>()
+
+    private fun isTlsEnabled(): Boolean = BuildConfig.MQTT_USE_TLS
+
+    private fun brokerUrl(): String = if (isTlsEnabled()) {
+        BuildConfig.MQTT_BROKER_URL_TLS
+    } else {
+        BuildConfig.MQTT_BROKER_URL_PLAIN
+    }
+
+    private fun validateBrokerUrl(url: String) {
+        val normalized = url.trim().lowercase()
+        require(!normalized.contains("your-server")) { "MQTT broker URL must not use placeholder host" }
+        if (isTlsEnabled()) {
+            require(normalized.startsWith("ssl://")) { "TLS-enabled MQTT must use ssl:// URL" }
+        }
+    }
+
+    private fun createSecureSocketFactory(): SSLSocketFactory {
+        val trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
+        trustManagerFactory.init(null as KeyStore?)
+
+        val sslContext = SSLContext.getInstance("TLS")
+        sslContext.init(null, trustManagerFactory.trustManagers, SecureRandom())
+        return sslContext.socketFactory
+    }
 
     fun connect(deviceId: String, authToken: String) {
         shouldStayConnected = true
@@ -74,7 +99,8 @@ class MqttConnectionManager @Inject constructor(
                 _connectionState.value = MqttConnectionState.Connecting
 
                 // 根据配置选择 MQTT 连接 URL
-                val brokerUrl = if (USE_TLS) BROKER_URL else BROKER_URL_PLAIN
+                val brokerUrl = brokerUrl()
+                validateBrokerUrl(brokerUrl)
                 val clientId = "${CLIENT_ID}_$deviceId"
                 mqttClient?.close()
                 mqttClient = MqttClient(brokerUrl, clientId, MemoryPersistence())
@@ -86,13 +112,9 @@ class MqttConnectionManager @Inject constructor(
                     userName = deviceId
                     password = authToken.toCharArray()
                     setAutomaticReconnect(false) // We handle reconnection manually
-                    
-                    // TLS 配置 (生产环境使用)
-                    if (USE_TLS) {
-                        // 使用默认 TrustManager 的 SSLContext
-                        val sslContext = SSLContext.getInstance("TLSv1.2")
-                        sslContext.init(null, null, null)
-                        socketFactory = sslContext.socketFactory
+
+                    if (isTlsEnabled()) {
+                        socketFactory = createSecureSocketFactory()
                     }
                 }
 
@@ -110,8 +132,14 @@ class MqttConnectionManager @Inject constructor(
 
                     override fun messageArrived(topic: String?, message: MqttMessage?) {
                         message?.let {
-                            _messages.value = String(it.payload)
-                            Log.d(TAG, "Message received: $topic - ${String(it.payload)}")
+                            val payload = String(it.payload)
+                            _messages.value = payload
+                            Log.d(TAG, "Message received: $topic - $payload")
+                            if (topic != null) {
+                                topicCallbacks[topic]?.forEach { callback ->
+                                    callback(payload)
+                                }
+                            }
                         }
                     }
 
@@ -180,8 +208,11 @@ class MqttConnectionManager @Inject constructor(
         }
     }
 
-    fun subscribe(topic: String, qos: Int = 0) {
+    fun subscribe(topic: String, qos: Int = 0, callback: ((String) -> Unit)? = null) {
         try {
+            callback?.let {
+                topicCallbacks.computeIfAbsent(topic) { CopyOnWriteArrayList() }.add(it)
+            }
             mqttClient?.subscribe(topic, qos)
         } catch (e: MqttException) {
             Log.e(TAG, "Subscribe error: ${e.message}")

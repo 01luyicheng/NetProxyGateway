@@ -21,8 +21,13 @@ import org.junit.Test
 
 class Socks5ProxyHandlerTest {
 
+    companion object {
+        private const val TEST_USERNAME = "test_user"
+        private const val TEST_PASSWORD = "test_password_only"
+    }
+
     private val testValidator: (String, String) -> Boolean = { username, password ->
-        username == "user123" && password == "password12345"
+        username == TEST_USERNAME && password == TEST_PASSWORD
     }
 
     @Test
@@ -44,7 +49,7 @@ class Socks5ProxyHandlerTest {
         val channel = EmbeddedChannel(Socks5ProxyHandler(credentialValidator = testValidator))
         try {
             negotiatePasswordAuth(channel)
-            channel.writeInbound(DefaultSocks5PasswordAuthRequest("user123", "password12345"))
+            channel.writeInbound(DefaultSocks5PasswordAuthRequest(TEST_USERNAME, TEST_PASSWORD))
 
             val response = channel.readOutbound<Socks5PasswordAuthResponse>()
             assertNotNull(response)
@@ -157,7 +162,7 @@ class Socks5ProxyHandlerTest {
     fun authRequest_withoutNegotiation_returnsFailure() {
         val channel = EmbeddedChannel(Socks5ProxyHandler(credentialValidator = testValidator))
         try {
-            channel.writeInbound(DefaultSocks5PasswordAuthRequest("user123", "password12345"))
+            channel.writeInbound(DefaultSocks5PasswordAuthRequest(TEST_USERNAME, TEST_PASSWORD))
 
             val response = channel.readOutbound<Socks5PasswordAuthResponse>()
             assertNotNull(response)
@@ -176,7 +181,7 @@ class Socks5ProxyHandlerTest {
 
     private fun authenticate(channel: EmbeddedChannel) {
         negotiatePasswordAuth(channel)
-        channel.writeInbound(DefaultSocks5PasswordAuthRequest("user123", "password12345"))
+        channel.writeInbound(DefaultSocks5PasswordAuthRequest(TEST_USERNAME, TEST_PASSWORD))
         val response = channel.readOutbound<Socks5PasswordAuthResponse>()
         assertNotNull(response)
         assertEquals(Socks5PasswordAuthStatus.SUCCESS, response.status())
