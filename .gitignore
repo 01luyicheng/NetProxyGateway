@@ -1,0 +1,20 @@
+# Gradle
+.gradle/
+**/build/
+
+# Android local config
+android/local.properties
+
+# IDE
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Tooling
+.sisyphus/

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">NetProxyGateway</string>
+    <string name="pairing_hint">输入6位识别码配对</string>
+    <string name="generate_code">生成识别码</string>
+    <string name="pair">配对</string>
+    <string name="disconnect">断开连接</string>
+    <string name="start_vpn">启动VPN</string>
+    <string name="stop_vpn">停止VPN</string>
+    <string name="scan_wifi">扫描WiFi</string>
+    <string name="wifi_status">WiFi状态</string>
+    <string name="cellular_status">蜂窝网络状态</string>
+    <string name="connected">已连接</string>
+    <string name="disconnected">未连接</string>
+    <string name="vpn_running">VPN运行中</string>
+    <string name="vpn_stopped">VPN已停止</string>
+    <string name="error_permission">需要相关权限</string>
+    <string name="error_network">网络连接错误</string>
+</resources>
