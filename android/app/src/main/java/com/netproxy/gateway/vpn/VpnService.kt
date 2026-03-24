@@ -62,6 +62,12 @@ class GatewayVpnService : AndroidVpnService() {
         const val SOCKS5_PROXY_HOST = "127.0.0.1"
         const val SOCKS5_PROXY_PORT = 1080
         
+        // 预分配的静态缓冲区，用于SOCKS5握手（避免频繁创建小数组）
+        private val SOCKS5_METHOD_REQUEST = byteArrayOf(0x05, 0x01, 0x02)
+        private val SOCKS5_AUTH_VERSION = byteArrayOf(0x01)
+        private val SOCKS5_CONNECT_HEADER = byteArrayOf(0x05, 0x01, 0x00, 0x01)
+        private val EMPTY_BYTE_ARRAY = ByteArray(0)
+        
         // 内网 IP 段（通过 WiFi 直连）
         // 10.0.0.0/8 - 私有 A 类
         // 172.16.0.0/12 - 私有 B 类  
@@ -359,8 +365,8 @@ class GatewayVpnService : AndroidVpnService() {
         val output = socket.getOutputStream()
         val input = socket.getInputStream()
 
-        // auth method negotiation
-        output.write(byteArrayOf(0x05, 0x01, 0x02))
+        // auth method negotiation - 使用预分配的静态缓冲区
+        output.write(SOCKS5_METHOD_REQUEST)
         output.flush()
         val methodResponse = ByteArray(2)
         readFully(input, methodResponse)
@@ -368,22 +374,26 @@ class GatewayVpnService : AndroidVpnService() {
             "SOCKS5 password auth negotiation failed"
         }
 
-        // username/password auth
+        // username/password auth - 复用临时缓冲区
         val userBytes = username.toByteArray(Charsets.UTF_8)
         val passBytes = password.toByteArray(Charsets.UTF_8)
         require(userBytes.size <= 255 && passBytes.size <= 255) { "SOCKS5 credentials too long" }
-        output.write(byteArrayOf(0x01, userBytes.size.toByte()))
+        
+        // 使用临时缓冲区数组避免多次小数组创建
+        output.write(SOCKS5_AUTH_VERSION)
+        output.write(userBytes.size)
         output.write(userBytes)
-        output.write(byteArrayOf(passBytes.size.toByte()))
+        output.write(passBytes.size)
         output.write(passBytes)
         output.flush()
+        
         val authResponse = ByteArray(2)
         readFully(input, authResponse)
         require(authResponse[1].toInt() == 0x00) { "SOCKS5 authentication failed" }
 
-        // connect to destination
+        // connect to destination - 使用预分配的静态缓冲区
         val addressBytes = InetAddress.getByName(destinationIp).address
-        output.write(byteArrayOf(0x05, 0x01, 0x00, 0x01))
+        output.write(SOCKS5_CONNECT_HEADER)
         output.write(addressBytes)
         output.write(byteArrayOf((destinationPort shr 8).toByte(), (destinationPort and 0xFF).toByte()))
         output.flush()
@@ -402,19 +412,29 @@ class GatewayVpnService : AndroidVpnService() {
             0x04 -> 16
             else -> throw IllegalStateException("Unsupported SOCKS5 ATYP ${connectHeader[3].toInt()}")
         }
-        readFully(input, ByteArray(boundAddressLength + 2))
+        // 复用packetBuffer读取绑定地址（避免创建临时大数组）
+        if (boundAddressLength + 2 <= PACKET_BUFFER_SIZE) {
+            readFully(input, packetBuffer, 0, boundAddressLength + 2)
+        } else {
+            readFully(input, ByteArray(boundAddressLength + 2))
+        }
 
         return socket
     }
 
     private fun readFully(input: java.io.InputStream, target: ByteArray) {
-        var offset = 0
-        while (offset < target.size) {
-            val read = input.read(target, offset, target.size - offset)
+        readFully(input, target, 0, target.size)
+    }
+    
+    private fun readFully(input: java.io.InputStream, target: ByteArray, offset: Int, length: Int) {
+        var currentOffset = offset
+        val endOffset = offset + length
+        while (currentOffset < endOffset) {
+            val read = input.read(target, currentOffset, endOffset - currentOffset)
             if (read < 0) {
                 throw IllegalStateException("Unexpected EOF while reading SOCKS5 stream")
             }
-            offset += read
+            currentOffset += read
         }
     }
 
@@ -425,7 +445,8 @@ class GatewayVpnService : AndroidVpnService() {
             if (isExpired) {
                 try {
                     entry.value.localSocket?.close()
-                } catch (_: Exception) {
+                } catch (e: Exception) {
+                    android.util.Log.w(TAG, "Failed to close stale connection socket", e)
                 }
             }
             isExpired
@@ -443,21 +464,35 @@ class GatewayVpnService : AndroidVpnService() {
         return ((packet[headerLength + 2].toInt() and 0xFF) shl 8) or (packet[headerLength + 3].toInt() and 0xFF)
     }
 
-    private fun extractTransportPayload(packet: ByteArray, length: Int): ByteArray {
-        if (length < 20) return ByteArray(0)
+    /**
+     * 提取传输层payload，返回payload在packet中的起始位置和长度（避免创建新数组）
+     * @return Pair<起始位置, 长度>，如果无payload返回null
+     */
+    private fun extractTransportPayloadInfo(packet: ByteArray, length: Int): Pair<Int, Int>? {
+        if (length < 20) return null
         val ipHeaderLength = (packet[0].toInt() and 0x0F) * 4
         val protocol = parseProtocol(packet)
         val transportHeaderLength = when (protocol) {
             6 -> {
-                if (length < ipHeaderLength + 13) return ByteArray(0)
+                if (length < ipHeaderLength + 13) return null
                 ((packet[ipHeaderLength + 12].toInt() shr 4) and 0x0F) * 4
             }
             17 -> 8
             else -> 0
         }
         val payloadStart = ipHeaderLength + transportHeaderLength
-        if (payloadStart >= length) return ByteArray(0)
-        return packet.copyOfRange(payloadStart, length)
+        if (payloadStart >= length) return null
+        return Pair(payloadStart, length - payloadStart)
+    }
+    
+    @Deprecated("使用 extractTransportPayloadInfo 避免数组拷贝", ReplaceWith("extractTransportPayloadInfo(packet, length)"))
+    private fun extractTransportPayload(packet: ByteArray, length: Int): ByteArray {
+        val info = extractTransportPayloadInfo(packet, length)
+        return if (info != null) {
+            packet.copyOfRange(info.first, info.first + info.second)
+        } else {
+            EMPTY_BYTE_ARRAY
+        }
     }
     
     /**
@@ -531,7 +566,8 @@ class GatewayVpnService : AndroidVpnService() {
         activeConnections.values.forEach { info ->
             try {
                 info.localSocket?.close()
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                android.util.Log.w(TAG, "Failed to close connection socket during VPN stop", e)
             }
         }
         activeConnections.clear()
