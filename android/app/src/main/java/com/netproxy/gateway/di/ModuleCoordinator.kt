@@ -7,8 +7,6 @@ import com.netproxy.gateway.wifi.WifiNetwork
 import com.netproxy.gateway.wifi.WifiConnectionInfo
 import com.netproxy.gateway.ui.viewmodel.UiState
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -24,9 +22,9 @@ import javax.inject.Singleton
  * 负责模块间通信和状态同步
  */
 @Singleton
-class ModuleCoordinator @Inject constructor() {
-    
-    private val coordinatorScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+class ModuleCoordinator @Inject constructor(
+    @ApplicationScope private val coordinatorScope: CoroutineScope
+) {
     
     // ==================== Event Bus ====================
     private val _events = MutableSharedFlow<AppEvent>()

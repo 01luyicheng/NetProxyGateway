@@ -12,11 +12,6 @@
   - `Socks5ProxyService.kt` 第55行
 - **修复**: 单例类使用applicationScope，Service使用lifecycleScope
 
-### ISSUE-007: 依赖注入匿名实现
-- **问题**: AppModule中使用匿名对象实现接口，无法被Hilt正确管理
-- **位置**: `AppModule.kt` 第35-213行
-- **修复**: 将匿名对象改为具体的类实现
-
 ### ISSUE-012: 过时WiFi API
 - **问题**: 使用Android 10+弃用的WifiConfiguration和addNetwork() API
 - **位置**: `WifiManager.kt` 第10行、第122-154行
@@ -40,18 +35,6 @@
 ---
 
 ## 中优先级
-
-### ISSUE-020: IP地址验证逻辑重复
-- **问题**: 两处代码包含几乎相同的私有IP判断逻辑
-- **位置**: 
-  - `Socks5ProxyHandler.kt` 第142-155行
-  - `VpnService.kt` 第289-307行
-- **修复**: 提取到共享工具类IpAddressUtils
-
-### ISSUE-024: EncryptedSharedPreferences主线程初始化
-- **问题**: 使用by lazy在主线程初始化，可能触发主线程I/O
-- **位置**: `AuthSessionStore.kt` 第21-33行
-- **修复**: 使用协程在IO线程预热初始化
 
 ### ISSUE-025: 模块接口混合关注点
 - **问题**: 模块接口混合命令和查询操作，违反CQRS原则

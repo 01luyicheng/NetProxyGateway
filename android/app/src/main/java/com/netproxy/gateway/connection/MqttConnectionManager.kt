@@ -3,11 +3,10 @@ package com.netproxy.gateway.connection
 import android.content.Context
 import android.util.Log
 import com.netproxy.gateway.BuildConfig
+import com.netproxy.gateway.di.ApplicationScope
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -43,7 +42,8 @@ sealed class MqttConnectionState {
 
 @Singleton
 class MqttConnectionManager @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    @ApplicationScope private val scope: CoroutineScope
 ) {
     companion object {
         private const val TAG = "MqttConnectionManager"
@@ -54,7 +54,6 @@ class MqttConnectionManager @Inject constructor(
         private const val MAX_RECONNECT_DELAY = 60000L
     }
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var mqttClient: MqttClient? = null
     private var reconnectDelay = 5000L
     private var reconnectJob: Job? = null

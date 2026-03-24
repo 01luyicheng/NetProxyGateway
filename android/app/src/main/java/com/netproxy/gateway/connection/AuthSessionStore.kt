@@ -1,18 +1,24 @@
 package com.netproxy.gateway.connection
 
 import android.content.Context
+import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import com.netproxy.gateway.di.ApplicationScope
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
 class AuthSessionStore @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    @ApplicationScope private val appScope: CoroutineScope
 ) {
 
     companion object {
+        private const val TAG = "AuthSessionStore"
         private const val PREF_NAME = "auth_session_store"
         private const val KEY_DEVICE_ID = "device_id"
         private const val KEY_AUTH_TOKEN = "auth_token"
@@ -34,6 +40,14 @@ class AuthSessionStore @Inject constructor(
 
     private var inMemoryToken: CharArray? = null
     private var inMemoryDeviceId: String? = null
+
+    init {
+        // Pre-warm encrypted storage off the main thread to avoid first-use UI jank.
+        appScope.launch {
+            runCatching { encryptedPrefs }
+                .onFailure { error -> Log.w(TAG, "Encrypted prefs pre-warm failed", error) }
+        }
+    }
 
     @Synchronized
     fun update(deviceId: String, authToken: String) {
