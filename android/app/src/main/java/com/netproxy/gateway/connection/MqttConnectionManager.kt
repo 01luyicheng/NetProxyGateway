@@ -23,8 +23,11 @@ import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence
 import javax.inject.Inject
 import javax.inject.Singleton
 import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
 import java.security.KeyStore
 import java.security.SecureRandom
+import java.security.cert.X509Certificate
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicLong
@@ -82,12 +85,52 @@ class MqttConnectionManager @Inject constructor(
         }
     }
 
+    /**
+     * 创建SSLSocketFactory
+     * 根据BuildConfig配置决定使用哪种证书验证方式：
+     * - 生产环境：使用系统默认CA证书（验证服务器证书）
+     * - 开发环境：信任所有证书（仅用于开发测试自签名证书）
+     * TODO: 上线前将BuildConfig.MQTT_TRUST_ALL_CERTS改为false
+     */
     private fun createSecureSocketFactory(): SSLSocketFactory {
+        return if (BuildConfig.MQTT_TRUST_ALL_CERTS) {
+            // 开发模式：信任所有证书（支持自签名证书）
+            createDevSocketFactory()
+        } else {
+            // 生产模式：使用系统默认CA证书
+            createProductionSocketFactory()
+        }
+    }
+
+    /**
+     * 生产环境：使用系统默认CA证书验证
+     */
+    private fun createProductionSocketFactory(): SSLSocketFactory {
         val trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
         trustManagerFactory.init(null as KeyStore?)
 
         val sslContext = SSLContext.getInstance("TLS")
         sslContext.init(null, trustManagerFactory.trustManagers, SecureRandom())
+        return sslContext.socketFactory
+    }
+
+    /**
+     * 开发环境：信任所有证书（仅用于开发测试）
+     * 警告：此方式不安全，仅用于开发环境连接自签名证书服务器
+     */
+    private fun createDevSocketFactory(): SSLSocketFactory {
+        Log.w(TAG, "Using development SSL socket factory - trusts all certificates!")
+        val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
+            override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {
+                // 开发环境：信任所有客户端证书
+            }
+            override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {
+                // 开发环境：信任所有服务器证书（包括自签名）
+            }
+            override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+        })
+        val sslContext = SSLContext.getInstance("TLS")
+        sslContext.init(null, trustAllCerts, SecureRandom())
         return sslContext.socketFactory
     }
 

@@ -24,11 +24,13 @@ If docs conflict with code, trust code and update this file.
 ## 4) Allowed and Forbidden Actions
 
 Allowed:
+
 - Fix Android defects.
 - Add or update Android unit tests.
 - Refactor Android internals when behavior is preserved or covered by tests.
 
 Forbidden:
+
 - Fabricating non-existent modules, files, or server status.
 - Writing speculative architecture docs.
 - Keeping duplicate design docs that are not required for next implementation steps.
@@ -67,6 +69,7 @@ Delete stale, duplicate, or aspirational documents to reduce context noise.
 ## 10) Multi-Agent Collaboration Standards
 
 When multiple AI agents work in parallel or sequentially:
+
 - Each agent must read this CLAUDE.md before starting work
 - No inter-agent communication; all constraints flow downward via this document
 - On conflicts between agents' changes, most recent commit to this file wins
@@ -76,24 +79,22 @@ When multiple AI agents work in parallel or sequentially:
 ## 11) Annual Documentation Audit (Maintenance Protocol)
 
 Every 12 months, perform a health review:
+
 1. Remove resolved Technical Risks (section 5) once verified complete in production
 2. Verify Objective still aligns with product reality; update if pivoting
 3. Update Reality Constraints with new Android OS restrictions or deprecated APIs
 4. Archive completed priority queue items to git commit history only (no living docs)
 5. Enforce CLAUDE.md ceiling: keep under 400 lines total
 
-Rule: Anything older than 6 months and already resolved should live in code comments 
-or test files, not in this living document. This ensures context stays focused on 
+Rule: Anything older than 6 months and already resolved should live in code comments
+or test files, not in this living document. This ensures context stays focused on
 current work only.
 
 ## 12) Verification Tracking (For Continuity)
 
 To maintain agent continuity across sessions:
+
 - Each merged commit that passes verification must note the agent name and date
 - Before starting work, agent must verify: `android\gradlew.bat -p android :app:testDebugUnitTest` passes
 - If main branch tests fail, unblock by filing clear blockers in section 5 (Technical Risks)
 
-**Last Verified**:
-- Date: 2026-03-23
-- Verifier: [Initial AI Documentation Refactor]
-- Status: ✅ Green (build and unit tests passing)

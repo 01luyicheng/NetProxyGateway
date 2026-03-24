@@ -21,18 +21,19 @@ val mqttBrokerUrlPlainRelease = providers.gradleProperty("MQTT_BROKER_URL_PLAIN_
 
 android {
     namespace = "com.netproxy.gateway"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.netproxy.gateway"
         minSdk = 26
-        targetSdk = 34
+        targetSdk = 35
         versionCode = 1
         versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField("Boolean", "MQTT_USE_TLS", "true")
+        buildConfigField("Boolean", "MQTT_TRUST_ALL_CERTS", "true") // 开发环境：信任所有证书（支持自签名）
         buildConfigField("String", "MQTT_BROKER_URL_TLS", "\"${mqttBrokerUrlTlsDebug}\"")
         buildConfigField("String", "MQTT_BROKER_URL_PLAIN", "\"${mqttBrokerUrlPlainDebug}\"")
     }
@@ -45,6 +46,7 @@ android {
                 "proguard-rules.pro"
             )
             buildConfigField("Boolean", "MQTT_USE_TLS", "true")
+            buildConfigField("Boolean", "MQTT_TRUST_ALL_CERTS", "false") // 生产环境：验证服务器证书
             buildConfigField("String", "MQTT_BROKER_URL_TLS", "\"${mqttBrokerUrlTlsRelease}\"")
             buildConfigField("String", "MQTT_BROKER_URL_PLAIN", "\"${mqttBrokerUrlPlainRelease}\"")
         }
@@ -81,41 +83,41 @@ android {
 }
 
 dependencies {
-    implementation("androidx.core:core-ktx:1.12.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
-    implementation("androidx.activity:activity-compose:1.8.2")
+    implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
+    implementation("androidx.activity:activity-compose:1.10.0")
 
-    implementation(platform("androidx.compose:compose-bom:2024.01.00"))
+    implementation(platform("androidx.compose:compose-bom:2025.03.01"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
 
-    implementation("com.google.dagger:hilt-android:2.50")
-    kapt("com.google.dagger:hilt-android-compiler:2.50")
+    implementation("com.google.dagger:hilt-android:2.56")
+    kapt("com.google.dagger:hilt-android-compiler:2.56")
     implementation("androidx.hilt:hilt-navigation-compose:1.1.0")
 
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1")
 
     implementation("org.eclipse.paho:org.eclipse.paho.client.mqttv3:1.2.5")
 
-    implementation("io.netty:netty-all:4.1.108.Final")
-    implementation("io.netty:netty-codec-socks:4.1.108.Final")
+    implementation("io.netty:netty-all:4.1.118.Final")
+    implementation("io.netty:netty-codec-socks:4.1.118.Final")
 
-    implementation("org.slf4j:slf4j-api:2.0.13")
-    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    implementation("org.slf4j:slf4j-api:2.0.17")
+    implementation("androidx.security:security-crypto:1.1.0")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("io.mockk:mockk:1.13.11")
-    testImplementation("io.netty:netty-transport:4.1.108.Final")
-    testImplementation("io.netty:netty-handler:4.1.108.Final")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
-    testImplementation("org.slf4j:slf4j-simple:2.0.13")
+    testImplementation("io.netty:netty-transport:4.1.118.Final")
+    testImplementation("io.netty:netty-handler:4.1.118.Final")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.1")
+    testImplementation("org.slf4j:slf4j-simple:2.0.17")
 
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
-    androidTestImplementation(platform("androidx.compose:compose-bom:2024.01.00"))
+    androidTestImplementation(platform("androidx.compose:compose-bom:2025.03.01"))
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
 
     debugImplementation("androidx.compose.ui:ui-tooling")

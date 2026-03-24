@@ -22,7 +22,7 @@ android/                          # Gradle Android project
 │   ├── src/test/                # Unit tests
 │   └── build.gradle.kts         # App-level config
 ├── build.gradle.kts             # Project-level config
-└── gradle/wrapper/              # Gradle 9.2.1 (pinned)
+└── gradle/wrapper/              # Gradle 8.13 (pinned)
 
 docs/
 ├── CLAUDE.md                    # Execution contract (required reading)
