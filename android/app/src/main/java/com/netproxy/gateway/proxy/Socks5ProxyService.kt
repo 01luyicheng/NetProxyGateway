@@ -49,6 +49,7 @@ class Socks5ProxyService : Service() {
         private const val TAG = "Socks5ProxyService"
         const val PROXY_PORT = 1080
         const val CHANNEL_ID = "proxy_service_channel"
+        private const val MAX_WORKER_THREADS = 2
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -74,7 +75,8 @@ class Socks5ProxyService : Service() {
         serviceScope.launch {
             try {
                 bossGroup = NioEventLoopGroup(1)
-                workerGroup = NioEventLoopGroup()
+                val workerThreads = minOf(MAX_WORKER_THREADS, Runtime.getRuntime().availableProcessors().coerceAtLeast(1))
+                workerGroup = NioEventLoopGroup(workerThreads)
 
                 val bootstrap = ServerBootstrap()
                     .group(bossGroup, workerGroup)

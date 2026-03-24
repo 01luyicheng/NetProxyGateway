@@ -47,6 +47,7 @@ class MqttConnectionManager @Inject constructor(
 
         private const val CLIENT_ID = "NetProxyGateway"
         private const val HEARTBEAT_INTERVAL = 30000L
+        private const val CONNECTION_TIMEOUT_SECONDS = 10
         private const val MAX_RECONNECT_DELAY = 60000L
     }
 
@@ -107,7 +108,7 @@ class MqttConnectionManager @Inject constructor(
 
                 val options = MqttConnectOptions().apply {
                     isCleanSession = true
-                    connectionTimeout = 30
+                    connectionTimeout = CONNECTION_TIMEOUT_SECONDS
                     keepAliveInterval = 30
                     userName = deviceId
                     password = authToken.toCharArray()
@@ -198,24 +199,38 @@ class MqttConnectionManager @Inject constructor(
     }
 
     fun publish(topic: String, payload: String, qos: Int = 0) {
+        publishWithResult(topic, payload, qos)
+    }
+
+    fun publishWithResult(topic: String, payload: String, qos: Int = 0): Result<Unit> {
         try {
+            val client = mqttClient ?: return Result.failure(IllegalStateException("MQTT client is not connected"))
             val message = MqttMessage(payload.toByteArray()).apply {
                 this.qos = qos
             }
-            mqttClient?.publish(topic, message)
+            client.publish(topic, message)
+            return Result.success(Unit)
         } catch (e: MqttException) {
             Log.e(TAG, "Publish error: ${e.message}")
+            return Result.failure(e)
         }
     }
 
     fun subscribe(topic: String, qos: Int = 0, callback: ((String) -> Unit)? = null) {
+        subscribeWithResult(topic, qos, callback)
+    }
+
+    fun subscribeWithResult(topic: String, qos: Int = 0, callback: ((String) -> Unit)? = null): Result<Unit> {
         try {
+            val client = mqttClient ?: return Result.failure(IllegalStateException("MQTT client is not connected"))
             callback?.let {
                 topicCallbacks.computeIfAbsent(topic) { CopyOnWriteArrayList() }.add(it)
             }
-            mqttClient?.subscribe(topic, qos)
+            client.subscribe(topic, qos)
+            return Result.success(Unit)
         } catch (e: MqttException) {
             Log.e(TAG, "Subscribe error: ${e.message}")
+            return Result.failure(e)
         }
     }
 

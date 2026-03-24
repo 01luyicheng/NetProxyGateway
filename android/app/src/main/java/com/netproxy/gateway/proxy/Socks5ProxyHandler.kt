@@ -104,9 +104,16 @@ class Socks5ProxyHandler(
     }
 
     private fun validateTargetAddress(host: String, port: Int): Boolean {
+        if (port !in 1..65535) {
+            return false
+        }
         return try {
             val inetAddr = java.net.InetAddress.getByName(host)
             val ip = inetAddr.hostAddress ?: return false
+
+            if (ip.contains(":")) {
+                return isPrivateIpv6Address(ip)
+            }
             
             // Reject loopback, link-local metadata, broadcast, and reserved ranges
             if (ip.startsWith("127.") || ip.startsWith("169.254.") ||
@@ -120,6 +127,16 @@ class Socks5ProxyHandler(
         } catch (e: Exception) {
             false
         }
+    }
+
+    private fun isPrivateIpv6Address(ip: String): Boolean {
+        val normalized = ip.lowercase()
+        if (normalized == "::1") return false
+        if (normalized.startsWith("fe8") || normalized.startsWith("fe9") || normalized.startsWith("fea") || normalized.startsWith("feb")) {
+            return false
+        }
+        if (normalized.startsWith("ff")) return false
+        return normalized.startsWith("fc") || normalized.startsWith("fd")
     }
 
     private fun isPrivateRfc1918(ip: String): Boolean {

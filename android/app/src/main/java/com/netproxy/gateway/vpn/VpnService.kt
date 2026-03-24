@@ -9,6 +9,7 @@ import android.net.VpnService as AndroidVpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
+import com.netproxy.gateway.BuildConfig
 import com.netproxy.gateway.connection.AuthSessionStore
 import com.netproxy.gateway.ui.MainActivity
 import com.netproxy.gateway.proxy.Socks5ProxyService
@@ -33,6 +34,7 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.ByteBuffer
 import javax.inject.Inject
+import java.util.concurrent.atomic.AtomicLong
 
 enum class VpnState {
     STOPPED,
@@ -56,6 +58,8 @@ class GatewayVpnService : AndroidVpnService() {
         private const val NOTIFICATION_ID = 100
         private const val PACKET_BUFFER_SIZE = 32 * 1024
         private const val CONNECTION_TIMEOUT_MS = 30_000L
+        private const val MAX_RETURN_TRAFFIC_IDLE_DELAY_MS = 20L
+        private const val SESSION_MISSING_LOG_INTERVAL_MS = 5_000L
         
         const val VPN_ADDRESS = "10.0.0.2"
         const val VPN_ROUTE = "0.0.0.0"
@@ -106,7 +110,8 @@ class GatewayVpnService : AndroidVpnService() {
     // 虚拟IP分配（用于回包构造）
     private val virtualIpPool = ConcurrentHashMap<String, String>() // realDstIp -> virtualSrcIp
     private val reverseIpMap = ConcurrentHashMap<String, String>() // virtualSrcIp -> realDstIp
-    private var nextVirtualIp = 1 // 10.0.0.x
+    private val nextVirtualIp = AtomicInteger(1) // 10.0.0.x
+    private val lastMissingSessionLogAt = AtomicLong(0L)
     
     private val _status = MutableStateFlow(VpnStatus())
     val status: StateFlow<VpnStatus> = _status.asStateFlow()
@@ -200,7 +205,7 @@ class GatewayVpnService : AndroidVpnService() {
             }
         } catch (e: Exception) {
             if (_status.value.state == VpnState.RUNNING) {
-                android.util.Log.e(TAG, "VPN traffic loop failed", e)
+                    android.util.Log.e(TAG, "VPN traffic loop failed", e)
                 _status.value = VpnStatus(
                     state = VpnState.ERROR,
                     errorMessage = e.message
@@ -331,11 +336,11 @@ class GatewayVpnService : AndroidVpnService() {
                     }
                 }
                 else -> {
-                    android.util.Log.d(TAG, "Skip unsupported protocol=$protocol for WiFi route")
+                    logDebug("Skip unsupported protocol=$protocol for WiFi route")
                 }
             }
         } catch (e: Exception) {
-            android.util.Log.w(TAG, "Forward via WiFi failed for $destinationIp", e)
+            android.util.Log.w(TAG, "Forward via WiFi failed for ${redactIp(destinationIp)}", e)
         }
     }
     
@@ -349,7 +354,11 @@ class GatewayVpnService : AndroidVpnService() {
         val srcIp = parseSourceIp(packet, length) ?: return
         val srcPort = parseSourcePort(packet, length) ?: return
         
-        val session = authSessionStore.getCurrentSession() ?: return
+        val session = authSessionStore.getCurrentSession()
+        if (session == null) {
+            logMissingSession(destinationIp)
+            return
+        }
         // 使用四元组作为会话key
         val connectionKey = "$srcIp:$srcPort-$destinationIp:$destinationPort"
 
@@ -376,7 +385,7 @@ class GatewayVpnService : AndroidVpnService() {
                         localSocket = it,
                         virtualSrcIp = virtualSrcIp
                     )
-                    android.util.Log.d(TAG, "Created new connection session: $connectionKey -> virtualIP: $virtualSrcIp")
+                    logDebug("Created new connection session: ${redactConnectionKey(connectionKey)} -> virtualIP: ${redactIp(virtualSrcIp)}")
                 }
             }
 
@@ -387,7 +396,7 @@ class GatewayVpnService : AndroidVpnService() {
             // 更新会话活动状态
             activeConnections[connectionKey]?.updateActivity()
         } catch (e: Exception) {
-            android.util.Log.w(TAG, "Forward via SOCKS5 failed for $connectionKey", e)
+            android.util.Log.w(TAG, "Forward via SOCKS5 failed for ${redactConnectionKey(connectionKey)}", e)
             activeConnections.remove(connectionKey)?.localSocket?.close()
         }
     }
@@ -523,18 +532,25 @@ class GatewayVpnService : AndroidVpnService() {
      * 处理回包（从远程服务器读取响应并注入TUN）
      */
     private suspend fun processReturnTraffic() {
+        var idleRounds = 0
         while (_status.value.state == VpnState.RUNNING) {
             try {
+                var hadData = false
                 // 遍历所有活跃连接，检查是否有数据可读
                 activeConnections.forEach { (key, session) ->
                     if (session.protocol == 6) { // TCP
-                        processTcpReturn(session, key)
+                        hadData = processTcpReturn(session, key) || hadData
                     } else if (session.protocol == 17) { // UDP
                         processUdpReturn(session, key)
                     }
                 }
-                // 短暂休眠避免CPU占用过高
-                kotlinx.coroutines.delay(1)
+                if (hadData) {
+                    idleRounds = 0
+                } else {
+                    idleRounds = (idleRounds + 1).coerceAtMost(31)
+                }
+                val idleDelay = if (idleRounds == 0) 1L else minOf(1L shl minOf(idleRounds, 4), MAX_RETURN_TRAFFIC_IDLE_DELAY_MS)
+                kotlinx.coroutines.delay(idleDelay)
             } catch (e: Exception) {
                 if (_status.value.state == VpnState.RUNNING) {
                     android.util.Log.e(TAG, "Error processing return traffic", e)
@@ -546,11 +562,11 @@ class GatewayVpnService : AndroidVpnService() {
     /**
      * 处理TCP回包
      */
-    private fun processTcpReturn(session: ConnectionSession, sessionKey: String) {
-        val socket = session.localSocket ?: return
+    private fun processTcpReturn(session: ConnectionSession, sessionKey: String): Boolean {
+        val socket = session.localSocket ?: return false
         if (socket.isClosed) {
             activeConnections.remove(sessionKey)
-            return
+            return false
         }
         
         try {
@@ -565,12 +581,15 @@ class GatewayVpnService : AndroidVpnService() {
                     // 注入TUN
                     injectPacket(buffer, packetLen)
                     session.updateActivity()
+                    return true
                 }
             }
+            return false
         } catch (e: Exception) {
-            android.util.Log.w(TAG, "TCP return traffic error for $sessionKey: ${e.message}")
+            android.util.Log.w(TAG, "TCP return traffic error for ${redactConnectionKey(sessionKey)}: ${e.message}")
             try { socket.close() } catch (_: Exception) {}
             activeConnections.remove(sessionKey)
+            return false
         }
     }
     
@@ -740,11 +759,43 @@ class GatewayVpnService : AndroidVpnService() {
      */
     private fun getOrAllocateVirtualIp(realDstIp: String): String {
         return virtualIpPool.getOrPut(realDstIp) {
-            val ip = "10.0.0.${nextVirtualIp++}"
+            val ip = "10.0.0.${nextVirtualIp.getAndIncrement()}"
             reverseIpMap[ip] = realDstIp
-            android.util.Log.d(TAG, "Allocated virtual IP $ip for $realDstIp")
+            logDebug("Allocated virtual IP ${redactIp(ip)} for ${redactIp(realDstIp)}")
             ip
         }
+    }
+
+    private fun logMissingSession(destinationIp: String) {
+        val nowMs = System.currentTimeMillis()
+        val lastMs = lastMissingSessionLogAt.get()
+        if (nowMs - lastMs >= SESSION_MISSING_LOG_INTERVAL_MS &&
+            lastMissingSessionLogAt.compareAndSet(lastMs, nowMs)
+        ) {
+            android.util.Log.w(TAG, "Skip SOCKS5 forward: missing auth session for ${redactIp(destinationIp)}")
+        }
+    }
+
+    private fun logDebug(message: String) {
+        if (BuildConfig.DEBUG) {
+            android.util.Log.d(TAG, message)
+        }
+    }
+
+    private fun redactIp(ip: String): String {
+        val parts = ip.split(".")
+        if (parts.size == 4) {
+            return "${parts[0]}.${parts[1]}.*.*"
+        }
+        return if (ip.length > 6) "${ip.take(6)}***" else "***"
+    }
+
+    private fun redactConnectionKey(key: String): String {
+        val segments = key.split("-")
+        if (segments.size != 2) return "***"
+        val left = segments[0].substringBefore(":")
+        val right = segments[1].substringBefore(":")
+        return "${redactIp(left)}- ${redactIp(right)}"
     }
 
     private fun parseProtocol(packet: ByteArray): Int {

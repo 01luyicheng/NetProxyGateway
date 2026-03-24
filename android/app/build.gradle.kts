@@ -32,7 +32,7 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        buildConfigField("Boolean", "MQTT_USE_TLS", "false")
+        buildConfigField("Boolean", "MQTT_USE_TLS", "true")
         buildConfigField("String", "MQTT_BROKER_URL_TLS", "\"${mqttBrokerUrlTlsDebug}\"")
         buildConfigField("String", "MQTT_BROKER_URL_PLAIN", "\"${mqttBrokerUrlPlainDebug}\"")
     }

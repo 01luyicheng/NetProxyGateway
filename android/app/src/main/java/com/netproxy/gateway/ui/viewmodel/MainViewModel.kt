@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.security.SecureRandom
 import java.util.UUID
 import javax.inject.Inject
 
@@ -44,6 +45,8 @@ class MainViewModel @Inject constructor(
     private val wifiManager: GatewayWifiManager,
     private val authSessionStore: AuthSessionStore
 ) : ViewModel() {
+
+    private val secureRandom = SecureRandom()
 
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
@@ -104,7 +107,7 @@ class MainViewModel @Inject constructor(
 
     fun generatePairingCode() {
         viewModelScope.launch {
-            val code = (100000..999999).random().toString()
+            val code = (secureRandom.nextInt(900_000) + 100_000).toString()
             _uiState.value = _uiState.value.copy(peerId = code)
         }
     }

@@ -7,8 +7,11 @@
 -keepattributes Signature
 -keepattributes InnerClasses
 
-# Keep data classes
--keep class com.netproxy.gateway.** { *; }
+# Keep entry points used via reflection or Android framework
+-keep class com.netproxy.gateway.NetProxyApp { *; }
+-keep class com.netproxy.gateway.ui.MainActivity { *; }
+-keep class com.netproxy.gateway.vpn.GatewayVpnService { *; }
+-keep class com.netproxy.gateway.proxy.Socks5ProxyService { *; }
 
 # Netty
 -keep class io.netty.** { *; }
