@@ -21,13 +21,17 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.isActive
 import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.nio.ByteBuffer
 import javax.inject.Inject
 
 enum class VpnState {
@@ -91,12 +95,24 @@ class GatewayVpnService : AndroidVpnService() {
     lateinit var authSessionStore: AuthSessionStore
     private var vpnInterface: ParcelFileDescriptor? = null
     
-    // 活跃的代理连接映射
-    private val activeConnections = ConcurrentHashMap<String, ConnectionInfo>()
+    // 活跃的代理连接映射（四元组 -> 连接会话）
+    private val activeConnections = ConcurrentHashMap<String, ConnectionSession>()
+    // TUN读取缓冲区
     private val packetBuffer = ByteArray(PACKET_BUFFER_SIZE)
+    // 回包写入缓冲区池
+    private val writeBufferPool = Array(4) { ByteArray(PACKET_BUFFER_SIZE) }
+    private val writeBufferIndex = AtomicInteger(0)
+    
+    // 虚拟IP分配（用于回包构造）
+    private val virtualIpPool = ConcurrentHashMap<String, String>() // realDstIp -> virtualSrcIp
+    private val reverseIpMap = ConcurrentHashMap<String, String>() // virtualSrcIp -> realDstIp
+    private var nextVirtualIp = 1 // 10.0.0.x
     
     private val _status = MutableStateFlow(VpnStatus())
     val status: StateFlow<VpnStatus> = _status.asStateFlow()
+    
+    // TUN输出流（用于回包注入）
+    private var vpnOutputStream: FileOutputStream? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -142,8 +158,17 @@ class GatewayVpnService : AndroidVpnService() {
             if (vpnInterface != null) {
                 _status.value = VpnStatus(state = VpnState.RUNNING)
                 
+                // 初始化TUN输出流用于回包注入
+                vpnOutputStream = FileOutputStream(vpnInterface!!.fileDescriptor)
+                
+                // 启动TUN读取协程
                 serviceScope.launch {
                     processVpnTraffic()
+                }
+                
+                // 启动回包处理协程
+                serviceScope.launch {
+                    processReturnTraffic()
                 }
                 
                 startProxyService()
@@ -319,35 +344,74 @@ class GatewayVpnService : AndroidVpnService() {
      */
     private fun forwardViaSocks5(packet: ByteArray, length: Int, destinationIp: String) {
         val destinationPort = parseDestinationPort(packet, length) ?: return
-        val payload = extractTransportPayload(packet, length)
+        val protocol = parseProtocol(packet)
+        val payloadInfo = extractTransportPayloadInfo(packet, length) ?: return
+        val srcIp = parseSourceIp(packet, length) ?: return
+        val srcPort = parseSourcePort(packet, length) ?: return
+        
         val session = authSessionStore.getCurrentSession() ?: return
-        val connectionKey = "$destinationIp:$destinationPort"
+        // 使用四元组作为会话key
+        val connectionKey = "$srcIp:$srcPort-$destinationIp:$destinationPort"
 
         try {
-            val connection = activeConnections[connectionKey]
-            val socket = if (connection?.localSocket?.isConnected == true) {
-                connection.localSocket
+            val existingSession = activeConnections[connectionKey]
+            val socket = if (existingSession?.localSocket?.isConnected == true) {
+                existingSession.localSocket
             } else {
+                // 分配虚拟IP用于回包
+                val virtualSrcIp = getOrAllocateVirtualIp(destinationIp)
+                
                 createSocks5Tunnel(
                     destinationIp = destinationIp,
                     destinationPort = destinationPort,
                     username = session.deviceId,
                     password = session.authToken
                 ).also {
-                    activeConnections[connectionKey] = ConnectionInfo(
-                        remoteAddress = destinationIp,
-                        remotePort = destinationPort,
-                        localSocket = it
+                    activeConnections[connectionKey] = ConnectionSession(
+                        srcIp = srcIp,
+                        srcPort = srcPort,
+                        dstIp = destinationIp,
+                        dstPort = destinationPort,
+                        protocol = protocol,
+                        localSocket = it,
+                        virtualSrcIp = virtualSrcIp
                     )
+                    android.util.Log.d(TAG, "Created new connection session: $connectionKey -> virtualIP: $virtualSrcIp")
                 }
             }
 
-            socket?.getOutputStream()?.write(payload)
+            // 写入payload（不拷贝数组）
+            socket?.getOutputStream()?.write(packet, payloadInfo.first, payloadInfo.second)
             socket?.getOutputStream()?.flush()
+            
+            // 更新会话活动状态
+            activeConnections[connectionKey]?.updateActivity()
         } catch (e: Exception) {
-            android.util.Log.w(TAG, "Forward via SOCKS5 failed for $destinationIp:$destinationPort", e)
+            android.util.Log.w(TAG, "Forward via SOCKS5 failed for $connectionKey", e)
             activeConnections.remove(connectionKey)?.localSocket?.close()
         }
+    }
+    
+    /**
+     * 解析源IP地址
+     */
+    private fun parseSourceIp(packet: ByteArray, length: Int): String? {
+        if (length < 20) return null
+        val version = (packet[0].toInt() shr 4) and 0x0F
+        if (version != 4) return null
+        // 源IP在第12-15字节
+        return "${packet[12].toInt() and 0xFF}.${packet[13].toInt() and 0xFF}.${packet[14].toInt() and 0xFF}.${packet[15].toInt() and 0xFF}"
+    }
+    
+    /**
+     * 解析源端口
+     */
+    private fun parseSourcePort(packet: ByteArray, length: Int): Int? {
+        if (length < 20) return null
+        val headerLength = (packet[0].toInt() and 0x0F) * 4
+        if (length < headerLength + 2) return null
+        // 源端口在传输层头的前2字节
+        return ((packet[headerLength].toInt() and 0xFF) shl 8) or (packet[headerLength + 1].toInt() and 0xFF)
     }
 
     private fun createSocks5Tunnel(
@@ -441,15 +505,245 @@ class GatewayVpnService : AndroidVpnService() {
     private fun cleanupStaleConnections() {
         val now = System.currentTimeMillis()
         activeConnections.entries.removeIf { entry ->
-            val isExpired = now - entry.value.createdAt > CONNECTION_TIMEOUT_MS
+            val session = entry.value
+            val isExpired = now - session.lastActivity > CONNECTION_TIMEOUT_MS
             if (isExpired) {
                 try {
-                    entry.value.localSocket?.close()
+                    session.localSocket?.close()
+                    android.util.Log.d(TAG, "Closed stale connection: ${entry.key}")
                 } catch (e: Exception) {
                     android.util.Log.w(TAG, "Failed to close stale connection socket", e)
                 }
             }
             isExpired
+        }
+    }
+    
+    /**
+     * 处理回包（从远程服务器读取响应并注入TUN）
+     */
+    private suspend fun processReturnTraffic() {
+        while (_status.value.state == VpnState.RUNNING) {
+            try {
+                // 遍历所有活跃连接，检查是否有数据可读
+                activeConnections.forEach { (key, session) ->
+                    if (session.protocol == 6) { // TCP
+                        processTcpReturn(session, key)
+                    } else if (session.protocol == 17) { // UDP
+                        processUdpReturn(session, key)
+                    }
+                }
+                // 短暂休眠避免CPU占用过高
+                kotlinx.coroutines.delay(1)
+            } catch (e: Exception) {
+                if (_status.value.state == VpnState.RUNNING) {
+                    android.util.Log.e(TAG, "Error processing return traffic", e)
+                }
+            }
+        }
+    }
+    
+    /**
+     * 处理TCP回包
+     */
+    private fun processTcpReturn(session: ConnectionSession, sessionKey: String) {
+        val socket = session.localSocket ?: return
+        if (socket.isClosed) {
+            activeConnections.remove(sessionKey)
+            return
+        }
+        
+        try {
+            val input = socket.getInputStream()
+            val available = input.available()
+            if (available > 0) {
+                val buffer = getWriteBuffer()
+                val read = input.read(buffer, 28, minOf(available, buffer.size - 28)) // 预留IP+TCP头空间
+                if (read > 0) {
+                    // 构造回包IP头+TCP头
+                    val packetLen = constructReturnPacket(buffer, session, read)
+                    // 注入TUN
+                    injectPacket(buffer, packetLen)
+                    session.updateActivity()
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "TCP return traffic error for $sessionKey: ${e.message}")
+            try { socket.close() } catch (_: Exception) {}
+            activeConnections.remove(sessionKey)
+        }
+    }
+    
+    /**
+     * 处理UDP回包
+     */
+    private fun processUdpReturn(session: ConnectionSession, sessionKey: String) {
+        // UDP回包处理（类似TCP，但协议号不同）
+        // 当前实现中UDP使用DatagramSocket，处理方式略有不同
+        // 简化实现：UDP通常在forwardViaWifi中直接处理
+    }
+    
+    /**
+     * 获取写入缓冲区（轮询）
+     */
+    private fun getWriteBuffer(): ByteArray {
+        val index = writeBufferIndex.getAndIncrement() % writeBufferPool.size
+        return writeBufferPool[index]
+    }
+    
+    /**
+     * 构造回包（IP头 + TCP头 + payload）
+     * @return 完整包长度
+     */
+    private fun constructReturnPacket(buffer: ByteArray, session: ConnectionSession, payloadLen: Int): Int {
+        val ipHeaderLen = 20
+        val tcpHeaderLen = 20
+        val totalLen = ipHeaderLen + tcpHeaderLen + payloadLen
+        
+        // 构造IP头（从虚拟源IP到原始源IP）
+        buffer[0] = 0x45 // IPv4, IHL=5
+        buffer[1] = 0 // DSCP/ECN
+        buffer[2] = (totalLen shr 8).toByte()
+        buffer[3] = (totalLen and 0xFF).toByte()
+        buffer[4] = 0 // Identification
+        buffer[5] = 0
+        buffer[6] = 0x40 // DF标志
+        buffer[7] = 0
+        buffer[8] = 64 // TTL
+        buffer[9] = session.protocol.toByte()
+        buffer[10] = 0 // Header checksum (稍后计算)
+        buffer[11] = 0
+        
+        // 源IP（虚拟IP）
+        val srcIpParts = session.virtualSrcIp.split(".").map { it.toInt() }
+        buffer[12] = srcIpParts[0].toByte()
+        buffer[13] = srcIpParts[1].toByte()
+        buffer[14] = srcIpParts[2].toByte()
+        buffer[15] = srcIpParts[3].toByte()
+        
+        // 目标IP（原始源IP）
+        val dstIpParts = session.srcIp.split(".").map { it.toInt() }
+        buffer[16] = dstIpParts[0].toByte()
+        buffer[17] = dstIpParts[1].toByte()
+        buffer[18] = dstIpParts[2].toByte()
+        buffer[19] = dstIpParts[3].toByte()
+        
+        // 计算IP头校验和
+        val ipChecksum = calculateChecksum(buffer, 0, ipHeaderLen)
+        buffer[10] = (ipChecksum shr 8).toByte()
+        buffer[11] = (ipChecksum and 0xFF).toByte()
+        
+        // 构造TCP头
+        buffer[20] = (session.dstPort shr 8).toByte() // 源端口（原始目标端口）
+        buffer[21] = (session.dstPort and 0xFF).toByte()
+        buffer[22] = (session.srcPort shr 8).toByte() // 目标端口（原始源端口）
+        buffer[23] = (session.srcPort and 0xFF).toByte()
+        buffer[24] = 0 // Seq number (简化)
+        buffer[25] = 0
+        buffer[26] = 0
+        buffer[27] = 0
+        buffer[28] = 0 // Ack number
+        buffer[29] = 0
+        buffer[30] = 0
+        buffer[31] = 0
+        buffer[32] = (5 shl 4).toByte() // Data offset = 5
+        buffer[33] = 0x18 // PSH + ACK
+        buffer[34] = (8192 shr 8).toByte() // Window size
+        buffer[35] = (8192 and 0xFF).toByte()
+        buffer[36] = 0 // TCP checksum (稍后计算)
+        buffer[37] = 0
+        buffer[38] = 0 // Urgent pointer
+        buffer[39] = 0
+        
+        // 计算TCP校验和（伪头 + TCP头 + payload）
+        val tcpChecksum = calculateTcpChecksum(buffer, srcIpParts, dstIpParts, session.protocol, tcpHeaderLen, payloadLen)
+        buffer[36] = (tcpChecksum shr 8).toByte()
+        buffer[37] = (tcpChecksum and 0xFF).toByte()
+        
+        // 移动payload到正确位置（已经在位置28开始，需要移动到40）
+        if (payloadLen > 0) {
+            System.arraycopy(buffer, 28, buffer, ipHeaderLen + tcpHeaderLen, payloadLen)
+        }
+        
+        return totalLen
+    }
+    
+    /**
+     * 计算IP校验和
+     */
+    private fun calculateChecksum(data: ByteArray, offset: Int, length: Int): Int {
+        var sum = 0
+        var i = offset
+        while (i < offset + length - 1) {
+            sum += ((data[i].toInt() and 0xFF) shl 8) or (data[i + 1].toInt() and 0xFF)
+            i += 2
+        }
+        if (i < offset + length) {
+            sum += (data[i].toInt() and 0xFF) shl 8
+        }
+        while (sum shr 16 != 0) {
+            sum = (sum and 0xFFFF) + (sum shr 16)
+        }
+        return sum.inv() and 0xFFFF
+    }
+    
+    /**
+     * 计算TCP校验和（包含伪头）
+     */
+    private fun calculateTcpChecksum(
+        buffer: ByteArray,
+        srcIp: List<Int>,
+        dstIp: List<Int>,
+        protocol: Int,
+        tcpHeaderLen: Int,
+        payloadLen: Int
+    ): Int {
+        var sum = 0
+        
+        // 伪头
+        sum += (srcIp[0] shl 8) or srcIp[1]
+        sum += (srcIp[2] shl 8) or srcIp[3]
+        sum += (dstIp[0] shl 8) or dstIp[1]
+        sum += (dstIp[2] shl 8) or dstIp[3]
+        sum += protocol
+        sum += tcpHeaderLen + payloadLen
+        
+        // TCP头和payload
+        for (i in 20 until 20 + tcpHeaderLen + payloadLen step 2) {
+            if (i + 1 < buffer.size) {
+                sum += ((buffer[i].toInt() and 0xFF) shl 8) or (buffer[i + 1].toInt() and 0xFF)
+            } else {
+                sum += (buffer[i].toInt() and 0xFF) shl 8
+            }
+        }
+        
+        while (sum shr 16 != 0) {
+            sum = (sum and 0xFFFF) + (sum shr 16)
+        }
+        return sum.inv() and 0xFFFF
+    }
+    
+    /**
+     * 注入包到TUN接口
+     */
+    private fun injectPacket(packet: ByteArray, length: Int) {
+        try {
+            vpnOutputStream?.write(packet, 0, length)
+            vpnOutputStream?.flush()
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "Failed to inject packet to TUN", e)
+        }
+    }
+    
+    /**
+     * 获取或分配虚拟IP
+     */
+    private fun getOrAllocateVirtualIp(realDstIp: String): String {
+        return virtualIpPool.getOrPut(realDstIp) {
+            val ip = "10.0.0.${nextVirtualIp++}"
+            reverseIpMap[ip] = realDstIp
+            android.util.Log.d(TAG, "Allocated virtual IP $ip for $realDstIp")
+            ip
         }
     }
 
@@ -506,8 +800,28 @@ class GatewayVpnService : AndroidVpnService() {
     }
     
     /**
-     * 连接信息
+     * 连接会话（完整四元组映射）
      */
+    private data class ConnectionSession(
+        val srcIp: String,
+        val srcPort: Int,
+        val dstIp: String,
+        val dstPort: Int,
+        val protocol: Int, // 6=TCP, 17=UDP
+        val localSocket: Socket?,
+        val virtualSrcIp: String, // 虚拟源IP（用于回包）
+        val createdAt: Long = System.currentTimeMillis(),
+        var lastActivity: Long = System.currentTimeMillis()
+    ) {
+        fun updateActivity() {
+            lastActivity = System.currentTimeMillis()
+        }
+    }
+    
+    /**
+     * 连接信息（兼容旧代码）
+     */
+    @Deprecated("使用 ConnectionSession", ReplaceWith("ConnectionSession"))
     private data class ConnectionInfo(
         val remoteAddress: String,
         val remotePort: Int,
@@ -557,20 +871,29 @@ class GatewayVpnService : AndroidVpnService() {
         _status.value = VpnStatus(state = VpnState.STOPPED)
         
         try {
+            vpnOutputStream?.close()
+            vpnOutputStream = null
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "Failed to close VPN output stream", e)
+        }
+        
+        try {
             vpnInterface?.close()
             vpnInterface = null
         } catch (e: Exception) {
             android.util.Log.w(TAG, "Failed to close VPN interface", e)
         }
 
-        activeConnections.values.forEach { info ->
+        activeConnections.values.forEach { session ->
             try {
-                info.localSocket?.close()
+                session.localSocket?.close()
             } catch (e: Exception) {
                 android.util.Log.w(TAG, "Failed to close connection socket during VPN stop", e)
             }
         }
         activeConnections.clear()
+        virtualIpPool.clear()
+        reverseIpMap.clear()
         
         stopProxyService()
         stopForeground(STOP_FOREGROUND_REMOVE)
