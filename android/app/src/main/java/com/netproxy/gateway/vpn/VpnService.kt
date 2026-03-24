@@ -574,7 +574,8 @@ class GatewayVpnService : AndroidVpnService() {
             val available = input.available()
             if (available > 0) {
                 val buffer = getWriteBuffer()
-                val read = input.read(buffer, 28, minOf(available, buffer.size - 28)) // 预留IP+TCP头空间
+                val payloadOffset = 40 // 20-byte IP header + 20-byte TCP header
+                val read = input.read(buffer, payloadOffset, minOf(available, buffer.size - payloadOffset))
                 if (read > 0) {
                     // 构造回包IP头+TCP头
                     val packetLen = constructReturnPacket(buffer, session, read)
@@ -678,12 +679,7 @@ class GatewayVpnService : AndroidVpnService() {
         val tcpChecksum = calculateTcpChecksum(buffer, srcIpParts, dstIpParts, session.protocol, tcpHeaderLen, payloadLen)
         buffer[36] = (tcpChecksum shr 8).toByte()
         buffer[37] = (tcpChecksum and 0xFF).toByte()
-        
-        // 移动payload到正确位置（已经在位置28开始，需要移动到40）
-        if (payloadLen > 0) {
-            System.arraycopy(buffer, 28, buffer, ipHeaderLen + tcpHeaderLen, payloadLen)
-        }
-        
+
         return totalLen
     }
     
