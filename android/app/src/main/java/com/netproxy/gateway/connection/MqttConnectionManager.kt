@@ -1,9 +1,9 @@
 package com.netproxy.gateway.connection
 
 import android.content.Context
-import android.util.Log
 import com.netproxy.gateway.BuildConfig
 import com.netproxy.gateway.di.ApplicationScope
+import com.netproxy.gateway.result.AppResult
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -19,6 +19,7 @@ import org.eclipse.paho.client.mqttv3.MqttConnectOptions
 import org.eclipse.paho.client.mqttv3.MqttException
 import org.eclipse.paho.client.mqttv3.MqttMessage
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence
+import org.slf4j.LoggerFactory
 import javax.inject.Inject
 import javax.inject.Singleton
 import javax.net.ssl.SSLContext
@@ -46,7 +47,7 @@ class MqttConnectionManager @Inject constructor(
     @ApplicationScope private val scope: CoroutineScope
 ) {
     companion object {
-        private const val TAG = "MqttConnectionManager"
+        private val logger = LoggerFactory.getLogger(MqttConnectionManager::class.java)
 
         private const val CLIENT_ID = "NetProxyGateway"
         private const val HEARTBEAT_INTERVAL = 30000L
@@ -108,8 +109,22 @@ class MqttConnectionManager @Inject constructor(
         val trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
         trustManagerFactory.init(null as KeyStore?)
 
+        val defaultTrustManager = trustManagerFactory.trustManagers
+            .filterIsInstance<X509TrustManager>()
+            .firstOrNull()
+            ?: throw IllegalStateException("No X509TrustManager available for MQTT TLS")
+
+        val configuredPins = MqttTlsPinning.parseConfiguredPins(BuildConfig.MQTT_TLS_PUBLIC_KEY_PINS)
+        if (configuredPins.isEmpty()) {
+            logger.warn("MQTT TLS pinning is disabled: MQTT_TLS_PUBLIC_KEY_PINS is empty. Falling back to default CA validation.")
+        }
+        val pinningTrustManager = MqttTlsPinning.createPinningTrustManager(
+            delegate = defaultTrustManager,
+            rawPins = BuildConfig.MQTT_TLS_PUBLIC_KEY_PINS
+        )
+
         val sslContext = SSLContext.getInstance("TLS")
-        sslContext.init(null, trustManagerFactory.trustManagers, SecureRandom())
+        sslContext.init(null, arrayOf<TrustManager>(pinningTrustManager), SecureRandom())
         return sslContext.socketFactory
     }
 
@@ -118,7 +133,7 @@ class MqttConnectionManager @Inject constructor(
      * 警告：此方式不安全，仅用于开发环境连接自签名证书服务器
      */
     private fun createDevSocketFactory(): SSLSocketFactory {
-        Log.w(TAG, "Using development SSL socket factory - trusts all certificates!")
+        logger.warn("Using development SSL socket factory - trusts all certificates!")
         val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
             override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {
                 // 开发环境：信任所有客户端证书
@@ -166,7 +181,7 @@ class MqttConnectionManager @Inject constructor(
                         if (generation != connectionGeneration.get()) {
                             return
                         }
-                        Log.w(TAG, "Connection lost: ${cause?.message}")
+                        logger.warn("Connection lost: ${cause?.message}")
                         _connectionState.value = MqttConnectionState.Error(cause?.message ?: "Connection lost")
                         if (shouldStayConnected) {
                             scheduleReconnect(deviceId, authToken, generation)
@@ -177,7 +192,7 @@ class MqttConnectionManager @Inject constructor(
                         message?.let {
                             val payload = String(it.payload)
                             _messages.value = payload
-                            Log.d(TAG, "Message received: $topic - $payload")
+                            logger.debug("Message received: $topic - $payload")
                             if (topic != null) {
                                 topicCallbacks[topic]?.forEach { callback ->
                                     callback(payload)
@@ -209,7 +224,7 @@ class MqttConnectionManager @Inject constructor(
                 if (generation != connectionGeneration.get()) {
                     return@launch
                 }
-                Log.e(TAG, "MQTT connection error: ${e.message}")
+                logger.error("MQTT connection error: ${e.message}")
                 _connectionState.value = MqttConnectionState.Error(e.message ?: "Connection failed")
                 if (shouldStayConnected) {
                     scheduleReconnect(deviceId, authToken, generation)
@@ -244,17 +259,17 @@ class MqttConnectionManager @Inject constructor(
         publishWithResult(topic, payload, qos)
     }
 
-    fun publishWithResult(topic: String, payload: String, qos: Int = 0): Result<Unit> {
-        try {
-            val client = mqttClient ?: return Result.failure(IllegalStateException("MQTT client is not connected"))
+    fun publishWithResult(topic: String, payload: String, qos: Int = 0): AppResult<Unit> {
+        return try {
+            val client = mqttClient ?: return AppResult.error(IllegalStateException("MQTT client is not connected"))
             val message = MqttMessage(payload.toByteArray()).apply {
                 this.qos = qos
             }
             client.publish(topic, message)
-            return Result.success(Unit)
+            AppResult.success(Unit)
         } catch (e: MqttException) {
-            Log.e(TAG, "Publish error: ${e.message}")
-            return Result.failure(e)
+            logger.error("Publish error: ${e.message}")
+            AppResult.error(e)
         }
     }
 
@@ -262,17 +277,17 @@ class MqttConnectionManager @Inject constructor(
         subscribeWithResult(topic, qos, callback)
     }
 
-    fun subscribeWithResult(topic: String, qos: Int = 0, callback: ((String) -> Unit)? = null): Result<Unit> {
-        try {
-            val client = mqttClient ?: return Result.failure(IllegalStateException("MQTT client is not connected"))
+    fun subscribeWithResult(topic: String, qos: Int = 0, callback: ((String) -> Unit)? = null): AppResult<Unit> {
+        return try {
+            val client = mqttClient ?: return AppResult.error(IllegalStateException("MQTT client is not connected"))
             callback?.let {
                 topicCallbacks.computeIfAbsent(topic) { CopyOnWriteArrayList() }.add(it)
             }
             client.subscribe(topic, qos)
-            return Result.success(Unit)
+            AppResult.success(Unit)
         } catch (e: MqttException) {
-            Log.e(TAG, "Subscribe error: ${e.message}")
-            return Result.failure(e)
+            logger.error("Subscribe error: ${e.message}")
+            AppResult.error(e)
         }
     }
 
@@ -287,7 +302,7 @@ class MqttConnectionManager @Inject constructor(
             mqttClient = null
             _connectionState.value = MqttConnectionState.Disconnected
         } catch (e: MqttException) {
-            Log.e(TAG, "Disconnect error: ${e.message}")
+            logger.error("Disconnect error: ${e.message}")
         }
     }
 }

@@ -28,7 +28,7 @@ import javax.inject.Singleton
 class CoreModuleImpl @Inject constructor(
     networkStateManager: NetworkStateManager,
     @ApplicationScope private val appScope: CoroutineScope
-) : CoreModule {
+) : CoreModule, CoreQueryHandler {
 
     private val networkState = MutableStateFlow(NetworkState())
 
@@ -48,7 +48,7 @@ class CoreModuleImpl @Inject constructor(
 @Singleton
 class CommunicationModuleImpl @Inject constructor(
     private val mqttConnectionManager: MqttConnectionManager
-) : CommunicationModule {
+) : CommunicationModule, CommunicationCommandHandler, CommunicationQueryHandler {
 
     override fun connect(deviceId: String, authToken: String): Boolean {
         mqttConnectionManager.connect(deviceId, authToken)
@@ -59,7 +59,7 @@ class CommunicationModuleImpl @Inject constructor(
         mqttConnectionManager.publish(topic, payload, qos)
     }
 
-    override fun subscribe(topic: String, qos: Int, callback: (String) -> Unit) {
+    override fun subscribe(topic: String, qos: Int, callback: ((String) -> Unit)?) {
         mqttConnectionManager.subscribe(topic, qos, callback)
     }
 
@@ -75,7 +75,7 @@ class CommunicationModuleImpl @Inject constructor(
 @Singleton
 class NetworkModuleImpl @Inject constructor(
     @ApplicationContext private val context: Context
-) : NetworkModule {
+) : NetworkModule, NetworkCommandHandler, NetworkQueryHandler {
 
     private val vpnStatus = MutableStateFlow(VpnStatus())
     private val proxyStatus = MutableStateFlow(false)
@@ -116,7 +116,7 @@ class NetworkModuleImpl @Inject constructor(
 @Singleton
 class WiFiModuleImpl @Inject constructor(
     private val wifiManager: GatewayWifiManager
-) : WiFiModule {
+) : WiFiModule, WiFiCommandHandler, WiFiQueryHandler {
 
     private val networks = MutableStateFlow<List<WifiNetwork>>(emptyList())
 
@@ -143,7 +143,7 @@ class WiFiModuleImpl @Inject constructor(
 }
 
 @Singleton
-class UIModuleImpl @Inject constructor() : UIModule {
+class UIModuleImpl @Inject constructor() : UIModule, UICommandHandler, UIQueryHandler {
 
     private val uiState = MutableStateFlow(UiState())
 
@@ -158,7 +158,7 @@ class UIModuleImpl @Inject constructor() : UIModule {
 class ConfigModuleImpl @Inject constructor(
     @ApplicationContext private val context: Context,
     private val authSessionStore: AuthSessionStore
-) : ConfigModule {
+) : ConfigModule, ConfigCommandHandler, ConfigQueryHandler {
 
     private val prefs = context.getSharedPreferences("gateway_config", Context.MODE_PRIVATE)
 

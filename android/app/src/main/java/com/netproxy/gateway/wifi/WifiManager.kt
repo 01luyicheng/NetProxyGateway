@@ -5,19 +5,25 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.net.wifi.ScanResult
 import android.net.wifi.WifiConfiguration
 import android.net.wifi.WifiInfo
+import android.net.wifi.WifiNetworkSuggestion
 import android.net.wifi.WifiManager as AndroidWifiManager
 import android.os.Build
-import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
+import com.netproxy.gateway.result.AppResult
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import org.slf4j.LoggerFactory
+import java.util.Base64
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -43,19 +49,35 @@ data class WifiConnectionInfo(
 class GatewayWifiManager @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
-    companion object {
-        private const val TAG = "GatewayWifiManager"
+    enum class SecurityType(val requiresPassword: Boolean) {
+        OPEN(false),
+        WEP(true),
+        WPA_PSK(true),
+        WPA2_PSK(true),
+        WPA3_SAE(true)
     }
 
+    internal data class SuggestionRecord(
+        val ssid: String,
+        val password: String?,
+        val securityType: SecurityType
+    )
+
     private val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as AndroidWifiManager
+    private var activeSuggestions: List<WifiNetworkSuggestion> = emptyList()
+    private val suggestionStorage by lazy { createSuggestionPreferences() }
+    private val suggestionPrefs: SharedPreferences
+        get() = suggestionStorage.preferences
+    private val canPersistSensitiveSuggestionData: Boolean
+        get() = suggestionStorage.isEncrypted
 
     val wifiScanResults: Flow<List<WifiNetwork>> = callbackFlow {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 if (intent?.action == AndroidWifiManager.SCAN_RESULTS_AVAILABLE_ACTION) {
                     val success = intent.getBooleanExtra(AndroidWifiManager.EXTRA_RESULTS_UPDATED, false)
-                    Log.d(TAG, "WiFi scan completed: success=$success")
-                    
+                    logger.debug("WiFi scan completed: success=$success")
+
                     val results = getScanResults()
                     trySend(results)
                 }
@@ -73,7 +95,9 @@ class GatewayWifiManager @Inject constructor(
     }
 
     companion object {
-        private const val TAG = "GatewayWifiManager"
+        private val logger = LoggerFactory.getLogger(GatewayWifiManager::class.java)
+        private const val SUGGESTION_PREFS_NAME = "gateway_wifi_suggestions"
+        private const val SUGGESTION_PREFS_KEY = "last_suggestion"
 
         /**
          * 检查WiFi扫描所需的权限
@@ -101,19 +125,106 @@ class GatewayWifiManager @Inject constructor(
                 Manifest.permission.ACCESS_FINE_LOCATION
             }
         }
+
+        internal fun shouldUseNetworkSuggestion(apiLevel: Int = Build.VERSION.SDK_INT): Boolean {
+            return apiLevel >= Build.VERSION_CODES.Q
+        }
+
+        internal fun parseSecurityType(rawSecurityType: String): SecurityType {
+            val normalized = rawSecurityType.uppercase()
+            return when {
+                normalized.contains("WPA3") || normalized.contains("SAE") -> SecurityType.WPA3_SAE
+                normalized.contains("WPA2") -> SecurityType.WPA2_PSK
+                normalized.contains("WPA") -> SecurityType.WPA_PSK
+                normalized.contains("WEP") -> SecurityType.WEP
+                else -> SecurityType.OPEN
+            }
+        }
+
+        internal fun isSecureCapabilities(capabilities: String): Boolean {
+            return parseSecurityType(capabilities) != SecurityType.OPEN
+        }
+
+        internal fun serializeSuggestionRecord(record: SuggestionRecord): String {
+            val ssidEncoded = Base64.getEncoder().encodeToString(record.ssid.toByteArray(Charsets.UTF_8))
+            val passwordEncoded = record.password
+                ?.let { Base64.getEncoder().encodeToString(it.toByteArray(Charsets.UTF_8)) }
+                .orEmpty()
+            return "$ssidEncoded|${record.securityType.name}|$passwordEncoded"
+        }
+
+        internal fun deserializeSuggestionRecord(raw: String): SuggestionRecord? {
+            if (raw.isBlank()) {
+                return null
+            }
+
+            val parts = raw.split('|')
+            if (parts.size != 3) {
+                return null
+            }
+
+            return try {
+                val ssid = String(Base64.getDecoder().decode(parts[0]), Charsets.UTF_8)
+                if (ssid.isBlank()) {
+                    return null
+                }
+
+                val securityType = SecurityType.valueOf(parts[1])
+                val password = if (parts[2].isBlank()) {
+                    null
+                } else {
+                    String(Base64.getDecoder().decode(parts[2]), Charsets.UTF_8)
+                }
+
+                SuggestionRecord(
+                    ssid = ssid,
+                    password = password,
+                    securityType = securityType
+                )
+            } catch (e: IllegalArgumentException) {
+                null
+            }
+        }
+
+        internal fun isSuggestionSubmissionAccepted(status: Int): Boolean {
+            return status == AndroidWifiManager.STATUS_NETWORK_SUGGESTIONS_SUCCESS
+        }
+
+        internal fun resolveSuggestionConnectResult(
+            submissionAccepted: Boolean,
+            connectedToTargetSsid: Boolean
+        ): Boolean {
+            // On Android 10+, accepted suggestion submission is asynchronous and
+            // does not guarantee immediate association to the target SSID.
+            return submissionAccepted
+        }
+
+        internal fun canPersistSuggestionSafely(
+            isEncryptedStorageAvailable: Boolean,
+            securityType: SecurityType
+        ): Boolean {
+            return isEncryptedStorageAvailable || !securityType.requiresPassword
+        }
     }
 
     fun startScan(): Boolean {
         if (!hasWifiScanPermission(context)) {
-            Log.w(TAG, "Cannot start scan: permission not granted")
+            logger.warn("Cannot start scan: permission not granted")
             return false
         }
         return wifiManager.startScan()
     }
 
+    fun startScanWithResult(): AppResult<Boolean> {
+        if (!hasWifiScanPermission(context)) {
+            return AppResult.error(SecurityException("WiFi scan permission not granted"))
+        }
+        return AppResult.success(wifiManager.startScan())
+    }
+
     fun getScanResults(): List<WifiNetwork> {
         if (!hasWifiScanPermission(context)) {
-            Log.w(TAG, "Cannot get scan results: permission not granted")
+            logger.warn("Cannot get scan results: permission not granted")
             return emptyList()
         }
 
@@ -127,19 +238,45 @@ class GatewayWifiManager @Inject constructor(
                         signalStrength = result.level,
                         frequency = result.frequency,
                         capabilities = result.capabilities,
-                        isSecure = result.capabilities.contains("WPA") || result.capabilities.contains("WEP")
+                        isSecure = isSecureCapabilities(result.capabilities)
                     )
                 }
                 .sortedByDescending { it.signalStrength }
         } catch (e: SecurityException) {
-            Log.e(TAG, "SecurityException when getting scan results: ${e.message}")
+            logger.error("SecurityException when getting scan results: ${e.message}")
             emptyList()
+        }
+    }
+
+    fun getScanResultsWithResult(): AppResult<List<WifiNetwork>> {
+        if (!hasWifiScanPermission(context)) {
+            return AppResult.error(SecurityException("WiFi scan permission not granted"))
+        }
+
+        return try {
+            val networks = wifiManager.scanResults
+                .filter { !it.SSID.isNullOrEmpty() }
+                .map { result ->
+                    WifiNetwork(
+                        ssid = result.SSID,
+                        bssid = result.BSSID,
+                        signalStrength = result.level,
+                        frequency = result.frequency,
+                        capabilities = result.capabilities,
+                        isSecure = isSecureCapabilities(result.capabilities)
+                    )
+                }
+                .sortedByDescending { it.signalStrength }
+            AppResult.success(networks)
+        } catch (e: SecurityException) {
+            logger.error("SecurityException when getting scan results: ${e.message}")
+            AppResult.error(e)
         }
     }
 
     fun getCurrentConnection(): WifiConnectionInfo? {
         if (!hasWifiScanPermission(context)) {
-            Log.w(TAG, "Cannot get current connection: permission not granted")
+            logger.warn("Cannot get current connection: permission not granted")
             return null
         }
 
@@ -156,19 +293,53 @@ class GatewayWifiManager @Inject constructor(
     }
 
     fun connectToNetwork(ssid: String, password: String?, securityType: String): Boolean {
+        val parsedSecurityType = parseSecurityType(securityType)
+
+        // API 29+ returns whether the suggestion submission is accepted, not whether association is established.
+        return if (shouldUseNetworkSuggestion()) {
+            connectUsingNetworkSuggestion(ssid, password, parsedSecurityType)
+        } else {
+            connectUsingLegacyConfig(ssid, password, parsedSecurityType)
+        }
+    }
+
+    fun connectToNetworkWithResult(ssid: String, password: String?, securityType: String): AppResult<Unit> {
+        val parsedSecurityType = parseSecurityType(securityType)
+
+        val success = if (shouldUseNetworkSuggestion()) {
+            connectUsingNetworkSuggestion(ssid, password, parsedSecurityType)
+        } else {
+            connectUsingLegacyConfig(ssid, password, parsedSecurityType)
+        }
+
+        return if (success) {
+            AppResult.success(Unit)
+        } else {
+            AppResult.error(IllegalStateException("Failed to connect to network: $ssid"))
+        }
+    }
+
+    private fun connectUsingLegacyConfig(ssid: String, password: String?, securityType: SecurityType): Boolean {
+        if (securityType.requiresPassword && password.isNullOrBlank()) {
+            logger.error("Password is required for security type: $securityType")
+            return false
+        }
+
         val configuration = WifiConfiguration().apply {
             SSID = "\"$ssid\""
-            
-            when {
-                securityType.contains("WPA2") || securityType.contains("WPA") -> {
-                    preSharedKey = "\"$password\""
+
+            when (securityType) {
+                SecurityType.WPA3_SAE,
+                SecurityType.WPA2_PSK,
+                SecurityType.WPA_PSK -> {
+                    preSharedKey = "\"${password ?: ""}\""
                     allowedKeyManagement.set(WifiConfiguration.KeyMgmt.WPA_PSK)
                 }
-                securityType.contains("WEP") -> {
-                    wepKeys[0] = "\"$password\""
+                SecurityType.WEP -> {
+                    wepKeys[0] = "\"${password ?: ""}\""
                     allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE)
                 }
-                else -> {
+                SecurityType.OPEN -> {
                     allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE)
                 }
             }
@@ -176,20 +347,202 @@ class GatewayWifiManager @Inject constructor(
 
         val networkId = wifiManager.addNetwork(configuration)
         if (networkId == -1) {
-            Log.e(TAG, "Failed to add network configuration")
+            logger.error("Failed to add network configuration")
             return false
         }
 
         val success = wifiManager.enableNetwork(networkId, true)
         if (!success) {
-            Log.e(TAG, "Failed to enable network")
+            logger.error("Failed to enable network")
             return false
         }
 
         return true
     }
 
+    private fun connectUsingNetworkSuggestion(ssid: String, password: String?, securityType: SecurityType): Boolean {
+        if (securityType == SecurityType.WEP) {
+            logger.error("WEP is not supported by WifiNetworkSuggestion path")
+            return false
+        }
+
+        if (!canPersistSuggestionSafely(canPersistSensitiveSuggestionData, securityType)) {
+            logger.error(
+                "Encrypted suggestion storage unavailable; refusing secured network suggestion to avoid stale unremovable records"
+            )
+            return false
+        }
+
+        if (securityType.requiresPassword && password.isNullOrBlank()) {
+            logger.error("Password is required for security type: $securityType")
+            return false
+        }
+
+        if (!clearNetworkSuggestions()) {
+            logger.error("Failed to clear existing network suggestions before submitting a new one")
+            return false
+        }
+
+        val suggestion = WifiNetworkSuggestion.Builder()
+            .setSsid(ssid)
+            .apply {
+                when (securityType) {
+                    SecurityType.WPA3_SAE -> setWpa3Passphrase(password ?: "")
+                    SecurityType.WPA2_PSK,
+                    SecurityType.WPA_PSK -> setWpa2Passphrase(password ?: "")
+                    SecurityType.OPEN -> Unit
+                    SecurityType.WEP -> Unit
+                }
+            }
+            .build()
+
+        val suggestions = listOf(suggestion)
+        val status = wifiManager.addNetworkSuggestions(suggestions)
+        val submissionAccepted = isSuggestionSubmissionAccepted(status)
+        if (!submissionAccepted) {
+            logger.error("Failed to add network suggestion: status=$status")
+            return false
+        }
+
+        activeSuggestions = suggestions
+        saveSuggestionRecord(
+            SuggestionRecord(
+                ssid = ssid,
+                password = password,
+                securityType = securityType
+            )
+        )
+
+        val connectedToTarget = isConnectedToSsid(ssid)
+        if (!connectedToTarget) {
+            logger.warn(
+                "Network suggestion submitted but target SSID is not connected yet: ssid=$ssid"
+            )
+        }
+
+        return resolveSuggestionConnectResult(submissionAccepted, connectedToTarget)
+    }
+
+    fun isConnectedToSsid(targetSsid: String): Boolean {
+        val currentSsid = getCurrentConnection()?.ssid ?: return false
+        return currentSsid == targetSsid
+    }
+
     fun disconnect(): Boolean {
+        if (shouldUseNetworkSuggestion()) {
+            return clearNetworkSuggestions()
+        }
+
         return wifiManager.disconnect()
     }
+
+    private fun clearNetworkSuggestions(): Boolean {
+        val persistedRecord = loadSuggestionRecord()
+        val persistedSuggestion = persistedRecord?.let { buildSuggestionFromRecord(it) }
+
+        val suggestionsToRemove = buildList {
+            addAll(activeSuggestions)
+            if (persistedSuggestion != null) {
+                add(persistedSuggestion)
+            }
+        }.distinctBy { it.hashCode() }
+
+        if (suggestionsToRemove.isEmpty()) {
+            clearSuggestionRecord()
+            return true
+        }
+
+        val status = wifiManager.removeNetworkSuggestions(suggestionsToRemove)
+        if (status != AndroidWifiManager.STATUS_NETWORK_SUGGESTIONS_SUCCESS) {
+            logger.error("Failed to remove network suggestions: status=$status")
+            return false
+        }
+
+        activeSuggestions = emptyList()
+        clearSuggestionRecord()
+        return true
+    }
+
+    private fun saveSuggestionRecord(record: SuggestionRecord) {
+        val recordToPersist = if (canPersistSensitiveSuggestionData) {
+            record
+        } else {
+            if (!record.password.isNullOrEmpty()) {
+                logger.warn("Encrypted suggestion storage unavailable, persisting suggestion metadata without password")
+            }
+            record.copy(password = null)
+        }
+
+        suggestionPrefs.edit()
+            .putString(SUGGESTION_PREFS_KEY, serializeSuggestionRecord(recordToPersist))
+            .apply()
+    }
+
+    private fun loadSuggestionRecord(): SuggestionRecord? {
+        val serialized = suggestionPrefs.getString(SUGGESTION_PREFS_KEY, null) ?: return null
+        val record = deserializeSuggestionRecord(serialized)
+        if (record == null) {
+            clearSuggestionRecord()
+        }
+        return record
+    }
+
+    private fun clearSuggestionRecord() {
+        suggestionPrefs.edit().remove(SUGGESTION_PREFS_KEY).apply()
+    }
+
+    private fun buildSuggestion(
+        ssid: String,
+        password: String?,
+        securityType: SecurityType
+    ): WifiNetworkSuggestion {
+        return WifiNetworkSuggestion.Builder()
+            .setSsid(ssid)
+            .apply {
+                when (securityType) {
+                    SecurityType.WPA3_SAE -> setWpa3Passphrase(password ?: "")
+                    SecurityType.WPA2_PSK,
+                    SecurityType.WPA_PSK -> setWpa2Passphrase(password ?: "")
+                    SecurityType.OPEN -> Unit
+                    SecurityType.WEP -> Unit
+                }
+            }
+            .build()
+    }
+
+    private fun buildSuggestionFromRecord(record: SuggestionRecord): WifiNetworkSuggestion? {
+        if (record.securityType.requiresPassword && record.password.isNullOrBlank()) {
+            logger.warn("Skipping persisted secured suggestion removal because password is unavailable")
+            return null
+        }
+        return buildSuggestion(record.ssid, record.password, record.securityType)
+    }
+
+    private fun createSuggestionPreferences(): SuggestionStorage = try {
+        val masterKey = MasterKey.Builder(context.applicationContext)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+
+        SuggestionStorage(
+            preferences = EncryptedSharedPreferences.create(
+                context.applicationContext,
+                SUGGESTION_PREFS_NAME,
+                masterKey,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            ),
+            isEncrypted = true
+        )
+    } catch (e: Exception) {
+        logger.warn("Encrypted suggestion storage unavailable; falling back to metadata-only persistence", e)
+        SuggestionStorage(
+            preferences = context.getSharedPreferences(SUGGESTION_PREFS_NAME, Context.MODE_PRIVATE),
+            isEncrypted = false
+        )
+    }
+
+    private data class SuggestionStorage(
+        val preferences: SharedPreferences,
+        val isEncrypted: Boolean
+    )
 }

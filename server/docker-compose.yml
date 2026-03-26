@@ -1,0 +1,91 @@
+version: '3.8'
+
+services:
+  # REST API 服务
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: netproxy-api
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - JWT_SECRET=${JWT_SECRET:-changeme-in-production}
+      - ADMIN_USER=${ADMIN_USER:-admin}
+      - ADMIN_PASS=${ADMIN_PASS:-changeme}
+    restart: unless-stopped
+    networks:
+      - netproxy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # SOCKS5 代理服务
+  socks5-proxy:
+    build:
+      context: ./socks5-proxy
+      dockerfile: Dockerfile
+    container_name: netproxy-socks5
+    ports:
+      - "1080:1080"
+    environment:
+      - SOCKS5_ADDR=0.0.0.0:1080
+      - API_ENDPOINT=http://api:8080
+    depends_on:
+      - api
+    restart: unless-stopped
+    networks:
+      - netproxy
+
+  # 隧道网关服务
+  tunnel:
+    build:
+      context: ./tunnel
+      dockerfile: Dockerfile
+    container_name: netproxy-tunnel
+    ports:
+      - "8443:8443"
+    environment:
+      - TUNNEL_ADDR=0.0.0.0:8443
+      - API_ENDPOINT=http://api:8080
+    depends_on:
+      - api
+    restart: unless-stopped
+    networks:
+      - netproxy
+
+  # MQTT Broker (EMQX)
+  emqx:
+    image: emqx/emqx:5.3
+    container_name: netproxy-mqtt
+    ports:
+      - "1883:1883"      # MQTT TCP
+      - "8883:8883"      # MQTT TLS
+      - "8083:8083"      # MQTT WebSocket
+      - "8084:8084"      # MQTT WebSocket TLS
+      - "18083:18083"    # Dashboard
+    environment:
+      EMQX_NAME: emqx
+      EMQX_HOST: 127.0.0.1
+      EMQX_DASHBOARD__DEFAULT_USERNAME: ${EMQX_DASHBOARD_USERNAME:-admin}
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: ${EMQX_DASHBOARD_PASSWORD:-public}
+      EMQX_MQTT__MAX_PACKET_SIZE: 1MB
+      EMQX_MQTT__KEEPALIVE: 30s
+    volumes:
+      - emqx-data:/opt/emqx/data
+      - emqx-log:/opt/emqx/log
+    restart: unless-stopped
+    networks:
+      - netproxy
+
+networks:
+  netproxy:
+    driver: bridge
+
+volumes:
+  emqx-data:
+  emqx-log:

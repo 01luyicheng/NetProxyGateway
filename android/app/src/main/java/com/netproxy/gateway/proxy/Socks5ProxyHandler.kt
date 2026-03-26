@@ -1,5 +1,6 @@
 package com.netproxy.gateway.proxy
 
+import com.netproxy.gateway.utils.IpAddressUtils
 import io.netty.bootstrap.Bootstrap
 import io.netty.channel.Channel
 import io.netty.channel.ChannelFutureListener
@@ -123,7 +124,7 @@ class Socks5ProxyHandler(
             }
             
             // Only allow RFC1918 private addresses
-            isPrivateRfc1918(ip)
+            IpAddressUtils.isPrivateIpv4Rfc1918(ip)
         } catch (e: Exception) {
             false
         }
@@ -137,21 +138,6 @@ class Socks5ProxyHandler(
         }
         if (normalized.startsWith("ff")) return false
         return normalized.startsWith("fc") || normalized.startsWith("fd")
-    }
-
-    private fun isPrivateRfc1918(ip: String): Boolean {
-        return try {
-            val octets = ip.split(".").map { it.toInt() }
-            when {
-                octets.size != 4 -> false
-                octets[0] == 10 -> true
-                octets[0] == 172 && octets[1] in 16..31 -> true
-                octets[0] == 192 && octets[1] == 168 -> true
-                else -> false
-            }
-        } catch (e: Exception) {
-            false
-        }
     }
 
     private fun handleCmdRequest(ctx: ChannelHandlerContext, msg: Socks5CommandRequest) {
@@ -312,3 +298,4 @@ private class RelayHandler(
         relayChannel.close()
     }
 }
+

@@ -157,7 +157,57 @@ class Socks5ProxyHandlerTest {
             channel.finishAndReleaseAll()
         }
     }
+    @Test
+    fun connectRequest_privateBoundary17231_returnsSuccess() {
+        val fakeConnector = FakeConnector(success = true)
+        val channel = EmbeddedChannel(Socks5ProxyHandler(fakeConnector, testValidator))
 
+        try {
+            authenticate(channel)
+
+            channel.writeInbound(
+                DefaultSocks5CommandRequest(
+                    Socks5CommandType.CONNECT,
+                    Socks5AddressType.IPv4,
+                    "172.31.255.255",
+                    443
+                )
+            )
+
+            val response = channel.readOutbound<Socks5CommandResponse>()
+            assertNotNull(response)
+            assertEquals(Socks5CommandStatus.SUCCESS, response.status())
+            assertTrue(fakeConnector.called)
+        } finally {
+            channel.finishAndReleaseAll()
+        }
+    }
+
+    @Test
+    fun connectRequest_outsidePrivateBoundary17232_returnsForbidden() {
+        val fakeConnector = FakeConnector(success = true)
+        val channel = EmbeddedChannel(Socks5ProxyHandler(fakeConnector, testValidator))
+
+        try {
+            authenticate(channel)
+
+            channel.writeInbound(
+                DefaultSocks5CommandRequest(
+                    Socks5CommandType.CONNECT,
+                    Socks5AddressType.IPv4,
+                    "172.32.0.0",
+                    443
+                )
+            )
+
+            val response = channel.readOutbound<Socks5CommandResponse>()
+            assertNotNull(response)
+            assertEquals(Socks5CommandStatus.FORBIDDEN, response.status())
+            assertTrue(!fakeConnector.called)
+        } finally {
+            channel.finishAndReleaseAll()
+        }
+    }
     @Test
     fun authRequest_withoutNegotiation_returnsFailure() {
         val channel = EmbeddedChannel(Socks5ProxyHandler(credentialValidator = testValidator))
@@ -207,3 +257,4 @@ class Socks5ProxyHandlerTest {
         }
     }
 }
+

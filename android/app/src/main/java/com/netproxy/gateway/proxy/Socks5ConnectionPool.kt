@@ -1,0 +1,430 @@
+package com.netproxy.gateway.proxy
+
+import org.slf4j.LoggerFactory
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.read
+import kotlin.concurrent.write
+
+/**
+ * SOCKS5连接池配置
+ */
+data class Socks5ConnectionPoolConfig(
+    val maxConnections: Int = 50,
+    val idleTimeoutMs: Long = 60_000L,
+    val connectionTimeoutMs: Int = 5_000,
+    val socketSoTimeoutMs: Int = 30_000,
+    val minIdleConnections: Int = 5,
+    val maxConnectionsPerDestination: Int = 10,
+    val cleanupIntervalMs: Long = 30_000L
+)
+
+/**
+ * 连接池中的SOCKS5连接包装器
+ */
+class PooledSocks5Connection(
+    val socket: Socket,
+    val destinationIp: String,
+    val destinationPort: Int,
+    val createdAt: Long = System.currentTimeMillis()
+) {
+    val lastUsedAt = AtomicLong(createdAt)
+    val inUse = AtomicBoolean(false)
+    val useCount = AtomicInteger(0)
+    
+    fun markUsed() {
+        lastUsedAt.set(System.currentTimeMillis())
+        useCount.incrementAndGet()
+        inUse.set(true)
+    }
+    
+    fun markReturned() {
+        inUse.set(false)
+    }
+    
+    fun isValid(): Boolean {
+        return socket.isConnected && !socket.isClosed && !socket.isInputShutdown && !socket.isOutputShutdown
+    }
+    
+    fun close() {
+        try {
+            socket.close()
+        } catch (_: Exception) {}
+    }
+}
+
+/**
+ * SOCKS5连接池
+ * 
+ * 管理到本地SOCKS5代理的可复用连接，避免每次转发都重新进行SOCKS5握手。
+ * 连接池按目标地址（destinationIp:destinationPort）分组管理连接。
+ */
+class Socks5ConnectionPool(
+    private val proxyHost: String = "127.0.0.1",
+    private val proxyPort: Int = 1080,
+    private val config: Socks5ConnectionPoolConfig = Socks5ConnectionPoolConfig(),
+    private val credentialProvider: () -> Pair<String, String>?
+) {
+    companion object {
+        private val logger = LoggerFactory.getLogger(Socks5ConnectionPool::class.java)
+        
+        // 预分配的静态缓冲区，用于SOCKS5握手
+        private val SOCKS5_METHOD_REQUEST = byteArrayOf(0x05, 0x01, 0x02)
+        private val SOCKS5_AUTH_VERSION = byteArrayOf(0x01)
+        private val SOCKS5_CONNECT_HEADER = byteArrayOf(0x05, 0x01, 0x00, 0x01)
+    }
+    
+    private val totalConnections = AtomicInteger(0)
+    private val poolLock = ReentrantReadWriteLock()
+    
+    // 按目标地址分组的连接队列：destinationKey -> 可用连接队列
+    private val availableConnections = ConcurrentHashMap<String, LinkedBlockingQueue<PooledSocks5Connection>>()
+    
+    // 所有活跃连接（包括正在使用的）
+    private val allConnections = ConcurrentHashMap<PooledSocks5Connection, String>()
+    
+    private val isShutdown = AtomicBoolean(false)
+    private var cleanupThread: Thread? = null
+    
+    init {
+        startCleanupThread()
+    }
+    
+    /**
+     * 获取或创建SOCKS5连接
+     * 
+     * @param destinationIp 目标IP地址
+     * @param destinationPort 目标端口
+     * @param protectSocket 可选的socket保护函数（用于VPN场景）
+     * @return 可用的SOCKS5连接，使用完毕后必须调用returnConnection归还
+     */
+    fun borrowConnection(
+        destinationIp: String,
+        destinationPort: Int,
+        protectSocket: ((Socket) -> Unit)? = null
+    ): PooledSocks5Connection? {
+        if (isShutdown.get()) {
+            return null
+        }
+        
+        val destKey = "$destinationIp:$destinationPort"
+        
+        // 首先尝试从池中获取可用连接
+        val connection = poolLock.read {
+            val queue = availableConnections[destKey]
+            if (queue != null) {
+                // 尝试获取有效连接
+                while (true) {
+                    val conn = queue.poll() ?: break
+                    if (conn.isValid() && !conn.inUse.get()) {
+                        conn.markUsed()
+                        return@read conn
+                    } else {
+                        // 无效连接，清理
+                        removeConnection(conn)
+                    }
+                }
+            }
+            null
+        }
+        
+        if (connection != null) {
+            return connection
+        }
+        
+        // 池中没有可用连接，创建新连接
+        return createNewConnection(destinationIp, destinationPort, protectSocket)
+    }
+    
+    /**
+     * 归还连接回连接池
+     */
+    fun returnConnection(connection: PooledSocks5Connection) {
+        if (isShutdown.get()) {
+            connection.close()
+            return
+        }
+        
+        if (!connection.isValid()) {
+            removeConnection(connection)
+            return
+        }
+        
+        connection.markReturned()
+        
+        val destKey = "${connection.destinationIp}:${connection.destinationPort}"
+        
+        poolLock.write {
+            val queue = availableConnections.getOrPut(destKey) { LinkedBlockingQueue() }
+            
+            // 检查该目标地址的连接数是否超过限制
+            val currentCount = queue.count { !it.inUse.get() } + 
+                              allConnections.keys.count { 
+                                  it.destinationIp == connection.destinationIp && 
+                                  it.destinationPort == connection.destinationPort &&
+                                  it.inUse.get()
+                              }
+            
+            if (currentCount >= config.maxConnectionsPerDestination) {
+                // 超过限制，关闭此连接
+                removeConnection(connection)
+            } else {
+                queue.offer(connection)
+            }
+        }
+    }
+    
+    /**
+     * 创建新的SOCKS5连接
+     */
+    private fun createNewConnection(
+        destinationIp: String,
+        destinationPort: Int,
+        protectSocket: ((Socket) -> Unit)?
+    ): PooledSocks5Connection? {
+        // 检查总连接数限制
+        if (totalConnections.get() >= config.maxConnections) {
+            logger.warn("Connection pool exhausted, max=$config.maxConnections")
+            return null
+        }
+        
+        val credentials = credentialProvider()
+        if (credentials == null) {
+            logger.warn("No credentials available for SOCKS5 connection")
+            return null
+        }
+        
+        val (username, password) = credentials
+        
+        return try {
+            val socket = createSocks5Socket(destinationIp, destinationPort, username, password, protectSocket)
+            val connection = PooledSocks5Connection(socket, destinationIp, destinationPort)
+            connection.markUsed()
+            
+            totalConnections.incrementAndGet()
+            allConnections[connection] = "$destinationIp:$destinationPort"
+            
+            connection
+        } catch (e: Exception) {
+            logger.error("Failed to create SOCKS5 connection to $destinationIp:$destinationPort", e)
+            null
+        }
+    }
+    
+    /**
+     * 创建SOCKS5 Socket并进行完整握手
+     */
+    private fun createSocks5Socket(
+        destinationIp: String,
+        destinationPort: Int,
+        username: String,
+        password: String,
+        protectSocket: ((Socket) -> Unit)?
+    ): Socket {
+        val socket = Socket().apply {
+            protectSocket?.invoke(this)
+            connect(InetSocketAddress(proxyHost, proxyPort), config.connectionTimeoutMs)
+            soTimeout = config.socketSoTimeoutMs
+            tcpNoDelay = true
+        }
+        
+        val output = socket.getOutputStream()
+        val input = socket.getInputStream()
+        
+        // SOCKS5握手流程
+        performSocks5Handshake(input, output, username, password, destinationIp, destinationPort)
+        
+        return socket
+    }
+    
+    /**
+     * 执行SOCKS5握手
+     */
+    private fun performSocks5Handshake(
+        input: java.io.InputStream,
+        output: java.io.OutputStream,
+        username: String,
+        password: String,
+        destinationIp: String,
+        destinationPort: Int
+    ) {
+        // 1. 认证方法协商
+        output.write(SOCKS5_METHOD_REQUEST)
+        output.flush()
+        
+        val methodResponse = ByteArray(2)
+        readFully(input, methodResponse)
+        require(methodResponse[0].toInt() == 0x05 && methodResponse[1].toInt() == 0x02) {
+            "SOCKS5 password auth negotiation failed"
+        }
+        
+        // 2. 用户名/密码认证
+        val userBytes = username.toByteArray(Charsets.UTF_8)
+        val passBytes = password.toByteArray(Charsets.UTF_8)
+        require(userBytes.size <= 255 && passBytes.size <= 255) { "SOCKS5 credentials too long" }
+        
+        output.write(SOCKS5_AUTH_VERSION)
+        output.write(userBytes.size)
+        output.write(userBytes)
+        output.write(passBytes.size)
+        output.write(passBytes)
+        output.flush()
+        
+        val authResponse = ByteArray(2)
+        readFully(input, authResponse)
+        require(authResponse[1].toInt() == 0x00) { "SOCKS5 authentication failed" }
+        
+        // 3. CONNECT请求
+        val addressBytes = InetAddress.getByName(destinationIp).address
+        output.write(SOCKS5_CONNECT_HEADER)
+        output.write(addressBytes)
+        output.write(byteArrayOf((destinationPort shr 8).toByte(), (destinationPort and 0xFF).toByte()))
+        output.flush()
+        
+        // 读取CONNECT响应
+        val connectHeader = ByteArray(4)
+        readFully(input, connectHeader)
+        require(connectHeader[1].toInt() == 0x00) { 
+            "SOCKS5 connect failed: ${connectHeader[1].toInt()}" 
+        }
+        
+        // 读取绑定地址（丢弃）
+        val boundAddressLength = when (connectHeader[3].toInt()) {
+            0x01 -> 4
+            0x03 -> {
+                val lenBuffer = ByteArray(1)
+                readFully(input, lenBuffer)
+                lenBuffer[0].toInt() and 0xFF
+            }
+            0x04 -> 16
+            else -> throw IllegalStateException("Unsupported SOCKS5 ATYP ${connectHeader[3].toInt()}")
+        }
+        
+        // 读取绑定地址和端口
+        val boundAddressAndPort = ByteArray(boundAddressLength + 2)
+        readFully(input, boundAddressAndPort)
+    }
+    
+    private fun readFully(input: java.io.InputStream, target: ByteArray) {
+        readFully(input, target, 0, target.size)
+    }
+    
+    private fun readFully(input: java.io.InputStream, target: ByteArray, offset: Int, length: Int) {
+        var currentOffset = offset
+        val endOffset = offset + length
+        while (currentOffset < endOffset) {
+            val read = input.read(target, currentOffset, endOffset - currentOffset)
+            if (read < 0) {
+                throw IllegalStateException("Unexpected EOF while reading SOCKS5 stream")
+            }
+            currentOffset += read
+        }
+    }
+    
+    /**
+     * 从连接池中移除连接
+     */
+    private fun removeConnection(connection: PooledSocks5Connection) {
+        allConnections.remove(connection)
+        totalConnections.decrementAndGet()
+        connection.close()
+    }
+    
+    /**
+     * 清理空闲超时的连接
+     */
+    private fun cleanupIdleConnections() {
+        val now = System.currentTimeMillis()
+        val toRemove = mutableListOf<PooledSocks5Connection>()
+        
+        poolLock.read {
+            allConnections.keys.forEach { conn ->
+                if (!conn.inUse.get() && (now - conn.lastUsedAt.get() > config.idleTimeoutMs)) {
+                    toRemove.add(conn)
+                }
+            }
+        }
+        
+        poolLock.write {
+            toRemove.forEach { conn ->
+                val destKey = "${conn.destinationIp}:${conn.destinationPort}"
+                availableConnections[destKey]?.remove(conn)
+                removeConnection(conn)
+            }
+        }
+        
+        if (toRemove.isNotEmpty()) {
+            logger.debug("Cleaned up ${toRemove.size} idle connections")
+        }
+    }
+    
+    /**
+     * 启动清理线程
+     */
+    private fun startCleanupThread() {
+        cleanupThread = Thread({
+            while (!isShutdown.get()) {
+                try {
+                    Thread.sleep(config.cleanupIntervalMs)
+                    cleanupIdleConnections()
+                } catch (e: InterruptedException) {
+                    break
+                } catch (e: Exception) {
+                    logger.error("Error in cleanup thread", e)
+                }
+            }
+        }, "Socks5ConnectionPool-Cleanup").apply {
+            isDaemon = true
+            start()
+        }
+    }
+    
+    /**
+     * 关闭连接池
+     */
+    fun shutdown() {
+        if (isShutdown.compareAndSet(false, true)) {
+            cleanupThread?.interrupt()
+            
+            poolLock.write {
+                allConnections.keys.forEach { it.close() }
+                allConnections.clear()
+                availableConnections.clear()
+                totalConnections.set(0)
+            }
+            
+            logger.debug("Connection pool shutdown complete")
+        }
+    }
+    
+    /**
+     * 获取连接池统计信息
+     */
+    fun getStats(): ConnectionPoolStats {
+        return poolLock.read {
+            ConnectionPoolStats(
+                totalConnections = totalConnections.get(),
+                availableConnections = allConnections.count { !it.key.inUse.get() },
+                inUseConnections = allConnections.count { it.key.inUse.get() },
+                destinationCount = availableConnections.size
+            )
+        }
+    }
+}
+
+/**
+ * 连接池统计信息
+ */
+data class ConnectionPoolStats(
+    val totalConnections: Int,
+    val availableConnections: Int,
+    val inUseConnections: Int,
+    val destinationCount: Int
+)

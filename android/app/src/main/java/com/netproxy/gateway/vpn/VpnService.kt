@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
 import android.net.VpnService as AndroidVpnService
 import android.os.Build
@@ -13,7 +14,12 @@ import com.netproxy.gateway.BuildConfig
 import com.netproxy.gateway.connection.AuthSessionStore
 import com.netproxy.gateway.ui.MainActivity
 import com.netproxy.gateway.proxy.Socks5ProxyService
+import com.netproxy.gateway.proxy.Socks5ConnectionPool
+import com.netproxy.gateway.proxy.Socks5ConnectionPoolConfig
+import com.netproxy.gateway.proxy.PooledSocks5Connection
+import com.netproxy.gateway.utils.IpAddressUtils
 import dagger.hilt.android.AndroidEntryPoint
+import org.slf4j.LoggerFactory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -33,6 +39,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.ByteBuffer
+import kotlin.math.min
 import javax.inject.Inject
 import java.util.concurrent.atomic.AtomicLong
 
@@ -53,27 +60,24 @@ data class VpnStatus(
 class GatewayVpnService : AndroidVpnService() {
 
     companion object {
-        private const val TAG = "VpnService"
+        private val logger = LoggerFactory.getLogger(GatewayVpnService::class.java)
         private const val NOTIFICATION_CHANNEL_ID = "vpn_service_channel"
         private const val NOTIFICATION_ID = 100
         private const val PACKET_BUFFER_SIZE = 32 * 1024
         private const val CONNECTION_TIMEOUT_MS = 30_000L
-        private const val MAX_RETURN_TRAFFIC_IDLE_DELAY_MS = 20L
+        private const val MAX_RETURN_TRAFFIC_IDLE_DELAY_MS = 100L
         private const val SESSION_MISSING_LOG_INTERVAL_MS = 5_000L
+        private const val GATEWAY_CONFIG_PREFS = "gateway_config"
+        private const val DNS_SERVERS_PREF_KEY = "dns_servers"
         
         const val VPN_ADDRESS = "10.0.0.2"
         const val VPN_ROUTE = "0.0.0.0"
-        const val VPN_DNS = "8.8.8.8"
         const val VPN_MTU = 1500
         
         // SOCKS5 代理本地端口
         const val SOCKS5_PROXY_HOST = "127.0.0.1"
         const val SOCKS5_PROXY_PORT = 1080
         
-        // 预分配的静态缓冲区，用于SOCKS5握手（避免频繁创建小数组）
-        private val SOCKS5_METHOD_REQUEST = byteArrayOf(0x05, 0x01, 0x02)
-        private val SOCKS5_AUTH_VERSION = byteArrayOf(0x01)
-        private val SOCKS5_CONNECT_HEADER = byteArrayOf(0x05, 0x01, 0x00, 0x01)
         private val EMPTY_BYTE_ARRAY = ByteArray(0)
         
         // 内网 IP 段（通过 WiFi 直连）
@@ -99,7 +103,10 @@ class GatewayVpnService : AndroidVpnService() {
     lateinit var authSessionStore: AuthSessionStore
     private var vpnInterface: ParcelFileDescriptor? = null
     
-    // 活跃的代理连接映射（四元组 -> 连接会话）
+    // SOCKS5连接池
+    private var socks5ConnectionPool: Socks5ConnectionPool? = null
+    
+    // 活跃的代理连接映射（四元组 -> 连接会话）- 现在存储借用自连接池的连接
     private val activeConnections = ConcurrentHashMap<String, ConnectionSession>()
     // TUN读取缓冲区
     private val packetBuffer = ByteArray(PACKET_BUFFER_SIZE)
@@ -115,6 +122,7 @@ class GatewayVpnService : AndroidVpnService() {
     
     private val _status = MutableStateFlow(VpnStatus())
     val status: StateFlow<VpnStatus> = _status.asStateFlow()
+    private var resolvedDnsServers: Set<String> = DNS_SERVERS.toSet()
     
     // TUN输出流（用于回包注入）
     private var vpnOutputStream: FileOutputStream? = null
@@ -142,13 +150,19 @@ class GatewayVpnService : AndroidVpnService() {
         _status.value = VpnStatus(state = VpnState.STARTING)
 
         try {
+            val dnsServers = resolveDnsServers()
+            resolvedDnsServers = dnsServers.toSet()
+
             val builder = Builder()
                 .setSession("NetProxyGateway")
                 .setMtu(VPN_MTU)
                 .addAddress(VPN_ADDRESS, 32)
                 .addRoute(VPN_ROUTE, 0)
-                .addDnsServer(VPN_DNS)
                 .setBlocking(true)
+
+            dnsServers.forEach { dnsServer ->
+                builder.addDnsServer(dnsServer)
+            }
 
             val configureIntent = PendingIntent.getActivity(
                 this,
@@ -162,6 +176,9 @@ class GatewayVpnService : AndroidVpnService() {
             
             if (vpnInterface != null) {
                 _status.value = VpnStatus(state = VpnState.RUNNING)
+                
+                // 初始化SOCKS5连接池
+                initializeConnectionPool()
                 
                 // 初始化TUN输出流用于回包注入
                 vpnOutputStream = FileOutputStream(vpnInterface!!.fileDescriptor)
@@ -205,7 +222,7 @@ class GatewayVpnService : AndroidVpnService() {
             }
         } catch (e: Exception) {
             if (_status.value.state == VpnState.RUNNING) {
-                    android.util.Log.e(TAG, "VPN traffic loop failed", e)
+                logger.error("VPN traffic loop failed", e)
                 _status.value = VpnStatus(
                     state = VpnState.ERROR,
                     errorMessage = e.message
@@ -219,9 +236,11 @@ class GatewayVpnService : AndroidVpnService() {
 
         // 解析 IP 包获取目标地址
         val destinationIp = parseDestinationIp(packet, length) ?: return
+        val protocol = parseProtocol(packet)
+        val destinationPort = parseDestinationPort(packet, length)
         
-        // 根据目标 IP 判断流量类型
-        val routeType = determineRouteType(destinationIp)
+        // 根据目标地址、协议和端口判断流量类型
+        val routeType = determineRouteType(destinationIp, protocol, destinationPort)
         
         when (routeType) {
             RouteType.LOCAL_NETWORK -> {
@@ -266,9 +285,14 @@ class GatewayVpnService : AndroidVpnService() {
     /**
      * 判断流量类型
      */
-    private fun determineRouteType(destinationIp: String): RouteType {
-        // 检查是否是 DNS
-        if (destinationIp in DNS_SERVERS) {
+    private fun determineRouteType(destinationIp: String, protocol: Int, destinationPort: Int?): RouteType {
+        // DNS 分流必须同时满足：DNS IP + TCP/UDP + 53端口
+        if (destinationPort != null && VpnDnsConfig.shouldRouteDnsViaWifi(
+                destinationIp = destinationIp,
+                protocol = protocol,
+                destinationPort = destinationPort,
+                dnsServers = resolvedDnsServers
+            )) {
             return RouteType.DNS
         }
         
@@ -282,28 +306,46 @@ class GatewayVpnService : AndroidVpnService() {
         // 这里简化为：其他所有流量走代理
         return RouteType.PROXY
     }
+
+    private fun resolveDnsServers(): List<String> {
+        val prefs = getSharedPreferences(GATEWAY_CONFIG_PREFS, Context.MODE_PRIVATE)
+        val configuredDns = prefs.getString(DNS_SERVERS_PREF_KEY, null)
+        return VpnDnsConfig.resolveDnsServers(configuredDns, DNS_SERVERS)
+    }
+    
+    /**
+     * 初始化SOCKS5连接池
+     */
+    private fun initializeConnectionPool() {
+        val config = Socks5ConnectionPoolConfig(
+            maxConnections = 100,
+            idleTimeoutMs = CONNECTION_TIMEOUT_MS,
+            connectionTimeoutMs = 5_000,
+            socketSoTimeoutMs = 30_000,
+            maxConnectionsPerDestination = 8,
+            cleanupIntervalMs = 30_000L
+        )
+        
+        socks5ConnectionPool = Socks5ConnectionPool(
+            proxyHost = SOCKS5_PROXY_HOST,
+            proxyPort = SOCKS5_PROXY_PORT,
+            config = config,
+            credentialProvider = {
+                val session = authSessionStore.getCurrentSession()
+                if (session != null) {
+                    Pair(session.deviceId, session.authToken)
+                } else {
+                    null
+                }
+            }
+        )
+    }
     
     /**
      * 判断是否是私有 IP 地址
      */
     private fun isPrivateIp(ip: String): Boolean {
-        try {
-            val parts = ip.split(".").map { it.toInt() }
-            if (parts.size != 4) return false
-
-            // 10.0.0.0/8
-            if (parts[0] == 10) return true
-
-            // 172.16.0.0/12
-            if (parts[0] == 172 && parts[1] in 16..31) return true
-
-            // 192.168.0.0/16
-            if (parts[0] == 192 && parts[1] == 168) return true
-
-            return false
-        } catch (e: Exception) {
-            return false
-        }
+        return IpAddressUtils.isPrivateIpv4Rfc1918(ip)
     }
     
     /**
@@ -340,12 +382,12 @@ class GatewayVpnService : AndroidVpnService() {
                 }
             }
         } catch (e: Exception) {
-            android.util.Log.w(TAG, "Forward via WiFi failed for ${redactIp(destinationIp)}", e)
+            logger.warn("Forward via WiFi failed for ${redactIp(destinationIp)}", e)
         }
     }
     
     /**
-     * 通过本地 SOCKS5 代理转发
+     * 通过本地 SOCKS5 代理转发（使用连接池复用SOCKS5连接）
      */
     private fun forwardViaSocks5(packet: ByteArray, length: Int, destinationIp: String) {
         val destinationPort = parseDestinationPort(packet, length) ?: return
@@ -354,50 +396,63 @@ class GatewayVpnService : AndroidVpnService() {
         val srcIp = parseSourceIp(packet, length) ?: return
         val srcPort = parseSourcePort(packet, length) ?: return
         
-        val session = authSessionStore.getCurrentSession()
-        if (session == null) {
+        val pool = socks5ConnectionPool
+        if (pool == null) {
             logMissingSession(destinationIp)
             return
         }
+        
         // 使用四元组作为会话key
         val connectionKey = "$srcIp:$srcPort-$destinationIp:$destinationPort"
 
         try {
             val existingSession = activeConnections[connectionKey]
-            val socket = if (existingSession?.localSocket?.isConnected == true) {
-                existingSession.localSocket
+            val pooledConn = if (existingSession?.pooledConnection?.isValid() == true) {
+                existingSession.pooledConnection
             } else {
-                // 分配虚拟IP用于回包
-                val virtualSrcIp = getOrAllocateVirtualIp(destinationIp)
+                // 旧连接无效，清理
+                existingSession?.pooledConnection?.let { pool.returnConnection(it) }
                 
-                createSocks5Tunnel(
+                // 从连接池借用连接
+                val conn = pool.borrowConnection(
                     destinationIp = destinationIp,
                     destinationPort = destinationPort,
-                    username = session.deviceId,
-                    password = session.authToken
-                ).also {
+                    protectSocket = { protect(it) }
+                )
+                
+                if (conn != null) {
+                    // 分配虚拟IP用于回包
+                    val virtualSrcIp = getOrAllocateVirtualIp(destinationIp)
+                    
                     activeConnections[connectionKey] = ConnectionSession(
                         srcIp = srcIp,
                         srcPort = srcPort,
                         dstIp = destinationIp,
                         dstPort = destinationPort,
                         protocol = protocol,
-                        localSocket = it,
+                        pooledConnection = conn,
                         virtualSrcIp = virtualSrcIp
                     )
-                    logDebug("Created new connection session: ${redactConnectionKey(connectionKey)} -> virtualIP: ${redactIp(virtualSrcIp)}")
+                    logDebug("Borrowed connection from pool: ${redactConnectionKey(connectionKey)} -> virtualIP: ${redactIp(virtualSrcIp)}")
+                    conn
+                } else {
+                    logger.warn("Failed to borrow connection from pool for ${redactConnectionKey(connectionKey)}")
+                    null
                 }
             }
 
-            // 写入payload（不拷贝数组）
-            socket?.getOutputStream()?.write(packet, payloadInfo.first, payloadInfo.second)
-            socket?.getOutputStream()?.flush()
-            
-            // 更新会话活动状态
-            activeConnections[connectionKey]?.updateActivity()
+            if (pooledConn != null) {
+                // 写入payload（不拷贝数组）
+                pooledConn.socket.getOutputStream()?.write(packet, payloadInfo.first, payloadInfo.second)
+                pooledConn.socket.getOutputStream()?.flush()
+                
+                // 更新会话活动状态
+                activeConnections[connectionKey]?.updateActivity()
+            }
         } catch (e: Exception) {
-            android.util.Log.w(TAG, "Forward via SOCKS5 failed for ${redactConnectionKey(connectionKey)}", e)
-            activeConnections.remove(connectionKey)?.localSocket?.close()
+            logger.warn("Forward via SOCKS5 failed for ${redactConnectionKey(connectionKey)}", e)
+            // 连接出错，归还连接并清理会话
+            activeConnections.remove(connectionKey)?.pooledConnection?.let { pool.returnConnection(it) }
         }
     }
     
@@ -423,105 +478,20 @@ class GatewayVpnService : AndroidVpnService() {
         return ((packet[headerLength].toInt() and 0xFF) shl 8) or (packet[headerLength + 1].toInt() and 0xFF)
     }
 
-    private fun createSocks5Tunnel(
-        destinationIp: String,
-        destinationPort: Int,
-        username: String,
-        password: String
-    ): Socket {
-        val socket = Socket().apply {
-            protect(this)
-            connect(InetSocketAddress(SOCKS5_PROXY_HOST, SOCKS5_PROXY_PORT), 3000)
-            soTimeout = 3000
-        }
-
-        val output = socket.getOutputStream()
-        val input = socket.getInputStream()
-
-        // auth method negotiation - 使用预分配的静态缓冲区
-        output.write(SOCKS5_METHOD_REQUEST)
-        output.flush()
-        val methodResponse = ByteArray(2)
-        readFully(input, methodResponse)
-        require(methodResponse[0].toInt() == 0x05 && methodResponse[1].toInt() == 0x02) {
-            "SOCKS5 password auth negotiation failed"
-        }
-
-        // username/password auth - 复用临时缓冲区
-        val userBytes = username.toByteArray(Charsets.UTF_8)
-        val passBytes = password.toByteArray(Charsets.UTF_8)
-        require(userBytes.size <= 255 && passBytes.size <= 255) { "SOCKS5 credentials too long" }
-        
-        // 使用临时缓冲区数组避免多次小数组创建
-        output.write(SOCKS5_AUTH_VERSION)
-        output.write(userBytes.size)
-        output.write(userBytes)
-        output.write(passBytes.size)
-        output.write(passBytes)
-        output.flush()
-        
-        val authResponse = ByteArray(2)
-        readFully(input, authResponse)
-        require(authResponse[1].toInt() == 0x00) { "SOCKS5 authentication failed" }
-
-        // connect to destination - 使用预分配的静态缓冲区
-        val addressBytes = InetAddress.getByName(destinationIp).address
-        output.write(SOCKS5_CONNECT_HEADER)
-        output.write(addressBytes)
-        output.write(byteArrayOf((destinationPort shr 8).toByte(), (destinationPort and 0xFF).toByte()))
-        output.flush()
-
-        val connectHeader = ByteArray(4)
-        readFully(input, connectHeader)
-        require(connectHeader[1].toInt() == 0x00) { "SOCKS5 connect failed: ${connectHeader[1].toInt()}" }
-
-        val boundAddressLength = when (connectHeader[3].toInt()) {
-            0x01 -> 4
-            0x03 -> {
-                val lenBuffer = ByteArray(1)
-                readFully(input, lenBuffer)
-                lenBuffer[0].toInt() and 0xFF
-            }
-            0x04 -> 16
-            else -> throw IllegalStateException("Unsupported SOCKS5 ATYP ${connectHeader[3].toInt()}")
-        }
-        // 复用packetBuffer读取绑定地址（避免创建临时大数组）
-        if (boundAddressLength + 2 <= PACKET_BUFFER_SIZE) {
-            readFully(input, packetBuffer, 0, boundAddressLength + 2)
-        } else {
-            readFully(input, ByteArray(boundAddressLength + 2))
-        }
-
-        return socket
-    }
-
-    private fun readFully(input: java.io.InputStream, target: ByteArray) {
-        readFully(input, target, 0, target.size)
-    }
-    
-    private fun readFully(input: java.io.InputStream, target: ByteArray, offset: Int, length: Int) {
-        var currentOffset = offset
-        val endOffset = offset + length
-        while (currentOffset < endOffset) {
-            val read = input.read(target, currentOffset, endOffset - currentOffset)
-            if (read < 0) {
-                throw IllegalStateException("Unexpected EOF while reading SOCKS5 stream")
-            }
-            currentOffset += read
-        }
-    }
-
     private fun cleanupStaleConnections() {
         val now = System.currentTimeMillis()
+        val pool = socks5ConnectionPool
+        
         activeConnections.entries.removeIf { entry ->
             val session = entry.value
             val isExpired = now - session.lastActivity > CONNECTION_TIMEOUT_MS
             if (isExpired) {
                 try {
-                    session.localSocket?.close()
-                    android.util.Log.d(TAG, "Closed stale connection: ${entry.key}")
+                    // 归还连接到连接池，而不是直接关闭
+                    session.pooledConnection?.let { pool?.returnConnection(it) }
+                    logger.debug("Returned stale connection to pool: ${entry.key}")
                 } catch (e: Exception) {
-                    android.util.Log.w(TAG, "Failed to close stale connection socket", e)
+                    logger.warn("Failed to return stale connection to pool", e)
                 }
             }
             isExpired
@@ -530,6 +500,7 @@ class GatewayVpnService : AndroidVpnService() {
     
     /**
      * 处理回包（从远程服务器读取响应并注入TUN）
+     * 使用平滑指数退避算法减少空闲时的CPU轮询
      */
     private suspend fun processReturnTraffic() {
         var idleRounds = 0
@@ -549,22 +520,40 @@ class GatewayVpnService : AndroidVpnService() {
                 } else {
                     idleRounds = (idleRounds + 1).coerceAtMost(31)
                 }
-                val idleDelay = if (idleRounds == 0) 1L else minOf(1L shl minOf(idleRounds, 4), MAX_RETURN_TRAFFIC_IDLE_DELAY_MS)
+                val idleDelay = calculateIdleDelay(idleRounds)
                 kotlinx.coroutines.delay(idleDelay)
             } catch (e: Exception) {
                 if (_status.value.state == VpnState.RUNNING) {
-                    android.util.Log.e(TAG, "Error processing return traffic", e)
+                    logger.error("Error processing return traffic", e)
                 }
             }
         }
+    }
+
+    /**
+     * 计算空闲退避延迟
+     * 使用平滑指数退避算法：
+     * - 有数据时：1ms（最小延迟，快速响应）
+     * - 空闲时：指数增长，最大100ms
+     * 公式：delay = min(base * 2^rounds, maxDelay)
+     */
+    private fun calculateIdleDelay(idleRounds: Int): Long {
+        if (idleRounds == 0) return 1L
+        // 基础延迟2ms，指数增长，最大MAX_RETURN_TRAFFIC_IDLE_DELAY_MS
+        val baseDelay = 2L
+        val exponent = minOf(idleRounds - 1, 6) // 限制指数最大为6，避免过大数值
+        return minOf(baseDelay shl exponent, MAX_RETURN_TRAFFIC_IDLE_DELAY_MS)
     }
     
     /**
      * 处理TCP回包
      */
     private fun processTcpReturn(session: ConnectionSession, sessionKey: String): Boolean {
-        val socket = session.localSocket ?: return false
-        if (socket.isClosed) {
+        val pooledConn = session.pooledConnection ?: return false
+        val socket = pooledConn.socket
+        if (socket.isClosed || !pooledConn.isValid()) {
+            // 连接无效，归还到连接池并移除会话
+            socks5ConnectionPool?.returnConnection(pooledConn)
             activeConnections.remove(sessionKey)
             return false
         }
@@ -587,8 +576,9 @@ class GatewayVpnService : AndroidVpnService() {
             }
             return false
         } catch (e: Exception) {
-            android.util.Log.w(TAG, "TCP return traffic error for ${redactConnectionKey(sessionKey)}: ${e.message}")
-            try { socket.close() } catch (_: Exception) {}
+            logger.warn("TCP return traffic error for ${redactConnectionKey(sessionKey)}: ${e.message}")
+            // 连接出错，归还到连接池并移除会话
+            socks5ConnectionPool?.returnConnection(pooledConn)
             activeConnections.remove(sessionKey)
             return false
         }
@@ -746,7 +736,7 @@ class GatewayVpnService : AndroidVpnService() {
             vpnOutputStream?.write(packet, 0, length)
             vpnOutputStream?.flush()
         } catch (e: Exception) {
-            android.util.Log.e(TAG, "Failed to inject packet to TUN", e)
+            logger.error("Failed to inject packet to TUN", e)
         }
     }
     
@@ -768,13 +758,13 @@ class GatewayVpnService : AndroidVpnService() {
         if (nowMs - lastMs >= SESSION_MISSING_LOG_INTERVAL_MS &&
             lastMissingSessionLogAt.compareAndSet(lastMs, nowMs)
         ) {
-            android.util.Log.w(TAG, "Skip SOCKS5 forward: missing auth session for ${redactIp(destinationIp)}")
+            logger.warn("Skip SOCKS5 forward: missing auth session for ${redactIp(destinationIp)}")
         }
     }
 
     private fun logDebug(message: String) {
         if (BuildConfig.DEBUG) {
-            android.util.Log.d(TAG, message)
+            logger.debug(message)
         }
     }
 
@@ -847,7 +837,7 @@ class GatewayVpnService : AndroidVpnService() {
     }
     
     /**
-     * 连接会话（完整四元组映射）
+     * 连接会话（完整四元组映射）- 使用连接池管理SOCKS5连接
      */
     private data class ConnectionSession(
         val srcIp: String,
@@ -855,13 +845,14 @@ class GatewayVpnService : AndroidVpnService() {
         val dstIp: String,
         val dstPort: Int,
         val protocol: Int, // 6=TCP, 17=UDP
-        val localSocket: Socket?,
+        val pooledConnection: PooledSocks5Connection?, // 来自连接池的连接
         val virtualSrcIp: String, // 虚拟源IP（用于回包）
         val createdAt: Long = System.currentTimeMillis(),
         var lastActivity: Long = System.currentTimeMillis()
     ) {
         fun updateActivity() {
             lastActivity = System.currentTimeMillis()
+            pooledConnection?.markUsed()
         }
     }
     
@@ -921,24 +912,27 @@ class GatewayVpnService : AndroidVpnService() {
             vpnOutputStream?.close()
             vpnOutputStream = null
         } catch (e: Exception) {
-            android.util.Log.w(TAG, "Failed to close VPN output stream", e)
+            logger.warn("Failed to close VPN output stream", e)
         }
-        
+
         try {
             vpnInterface?.close()
             vpnInterface = null
         } catch (e: Exception) {
-            android.util.Log.w(TAG, "Failed to close VPN interface", e)
+            logger.warn("Failed to close VPN interface", e)
         }
 
-        activeConnections.values.forEach { session ->
-            try {
-                session.localSocket?.close()
-            } catch (e: Exception) {
-                android.util.Log.w(TAG, "Failed to close connection socket during VPN stop", e)
-            }
-        }
+        // 清理活跃会话（连接会由连接池统一管理）
         activeConnections.clear()
+        
+        // 关闭连接池
+        try {
+            socks5ConnectionPool?.shutdown()
+            socks5ConnectionPool = null
+        } catch (e: Exception) {
+            logger.warn("Failed to shutdown connection pool", e)
+        }
+        
         virtualIpPool.clear()
         reverseIpMap.clear()
         
@@ -962,3 +956,5 @@ class GatewayVpnService : AndroidVpnService() {
         super.onRevoke()
     }
 }
+
+

@@ -1,13 +1,14 @@
 package com.netproxy.gateway.connection
 
 import android.content.Context
-import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.netproxy.gateway.di.ApplicationScope
+import com.netproxy.gateway.result.AppResult
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
+import org.slf4j.LoggerFactory
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -18,7 +19,7 @@ class AuthSessionStore @Inject constructor(
 ) {
 
     companion object {
-        private const val TAG = "AuthSessionStore"
+        private val logger = LoggerFactory.getLogger(AuthSessionStore::class.java)
         private const val PREF_NAME = "auth_session_store"
         private const val KEY_DEVICE_ID = "device_id"
         private const val KEY_AUTH_TOKEN = "auth_token"
@@ -45,7 +46,7 @@ class AuthSessionStore @Inject constructor(
         // Pre-warm encrypted storage off the main thread to avoid first-use UI jank.
         appScope.launch {
             runCatching { encryptedPrefs }
-                .onFailure { error -> Log.w(TAG, "Encrypted prefs pre-warm failed", error) }
+                .onFailure { error -> logger.warn("Encrypted prefs pre-warm failed", error) }
         }
     }
 
@@ -62,11 +63,43 @@ class AuthSessionStore @Inject constructor(
     }
 
     @Synchronized
+    fun updateWithResult(deviceId: String, authToken: String): AppResult<Unit> {
+        return try {
+            inMemoryToken?.fill('\u0000')
+            inMemoryToken = authToken.toCharArray()
+            inMemoryDeviceId = deviceId
+
+            encryptedPrefs.edit()
+                .putString(KEY_DEVICE_ID, deviceId)
+                .putString(KEY_AUTH_TOKEN, authToken)
+                .apply()
+            AppResult.success(Unit)
+        } catch (e: Exception) {
+            logger.error("Failed to update session", e)
+            AppResult.error(e)
+        }
+    }
+
+    @Synchronized
     fun clear() {
         inMemoryToken?.fill('\u0000')
         inMemoryToken = null
         inMemoryDeviceId = null
         encryptedPrefs.edit().clear().apply()
+    }
+
+    @Synchronized
+    fun clearWithResult(): AppResult<Unit> {
+        return try {
+            inMemoryToken?.fill('\u0000')
+            inMemoryToken = null
+            inMemoryDeviceId = null
+            encryptedPrefs.edit().clear().apply()
+            AppResult.success(Unit)
+        } catch (e: Exception) {
+            logger.error("Failed to clear session", e)
+            AppResult.error(e)
+        }
     }
 
     @Synchronized
@@ -77,8 +110,34 @@ class AuthSessionStore @Inject constructor(
     }
 
     @Synchronized
+    fun validateWithResult(username: String, password: String): AppResult<Boolean> {
+        return try {
+            val session = loadSession()
+                ?: return AppResult.success(false)
+            if (session.deviceId != username) {
+                return AppResult.success(false)
+            }
+            val isValid = constantTimeEquals(session.authToken.toCharArray(), password.toCharArray())
+            AppResult.success(isValid)
+        } catch (e: Exception) {
+            AppResult.error(e)
+        }
+    }
+
+    @Synchronized
     fun getCurrentSession(): ProxyAuthSession? {
         return loadSession()
+    }
+
+    @Synchronized
+    fun getCurrentSessionWithResult(): AppResult<ProxyAuthSession> {
+        return try {
+            val session = loadSession()
+                ?: return AppResult.error(IllegalStateException("No active session found"))
+            AppResult.success(session)
+        } catch (e: Exception) {
+            AppResult.error(e)
+        }
     }
 
     @Synchronized

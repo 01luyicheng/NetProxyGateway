@@ -1,0 +1,1070 @@
+package main
+
+import (
+	"bufio"
+	"crypto/tls"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/gorilla/websocket"
+)
+
+// Config 服务配置
+type Config struct {
+	Addr           string
+	APIEndpoint    string
+	TunnelEndpoint string
+	TLSCert        string
+	TLSKey         string
+	EnableTLS      bool
+	MaxConnections int
+	IdleTimeout    time.Duration
+}
+
+// SessionStore 会话存储接口
+type SessionStore interface {
+	ValidateToken(deviceID, token string) (bool, error)
+}
+
+// APISessionStore 通过API验证会话
+type APISessionStore struct {
+	apiEndpoint string
+	tokenCache  map[string]*TokenInfo
+	cacheMu     sync.RWMutex
+	httpClient  *http.Client
+}
+
+// TokenInfo 令牌信息
+type TokenInfo struct {
+	DeviceID  string
+	Valid     bool
+	ExpiresAt time.Time
+}
+
+// NewAPISessionStore 创建API会话存储
+func NewAPISessionStore(apiEndpoint string) *APISessionStore {
+	return &APISessionStore{
+		apiEndpoint: apiEndpoint,
+		tokenCache:  make(map[string]*TokenInfo),
+		httpClient: &http.Client{
+			Timeout: 5 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					MinVersion: tls.VersionTLS12,
+				},
+			},
+		},
+	}
+}
+
+// ValidateToken 验证设备令牌
+func (s *APISessionStore) ValidateToken(deviceID, token string) (bool, error) {
+	cacheKey := deviceID + ":" + token
+
+	// 检查缓存
+	s.cacheMu.RLock()
+	if info, ok := s.tokenCache[cacheKey]; ok && time.Now().Before(info.ExpiresAt) {
+		s.cacheMu.RUnlock()
+		return info.Valid, nil
+	}
+	s.cacheMu.RUnlock()
+
+	// 调用API验证
+	valid, err := s.validateWithAPI(deviceID, token)
+	if err != nil {
+		log.Printf("API validation error: %v", err)
+		// API失败时使用缓存（如果有）
+		s.cacheMu.RLock()
+		if info, ok := s.tokenCache[cacheKey]; ok {
+			s.cacheMu.RUnlock()
+			return info.Valid, nil
+		}
+		s.cacheMu.RUnlock()
+		return false, err
+	}
+
+	// 更新缓存
+	s.cacheMu.Lock()
+	s.tokenCache[cacheKey] = &TokenInfo{
+		DeviceID:  deviceID,
+		Valid:     valid,
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+	s.cacheMu.Unlock()
+
+	return valid, nil
+}
+
+// validateWithAPI 调用API验证
+func (s *APISessionStore) validateWithAPI(deviceID, token string) (bool, error) {
+	u, err := url.Parse(s.apiEndpoint + "/api/session/validate")
+	if err != nil {
+		return false, err
+	}
+
+	reqBody := fmt.Sprintf(`{"device_id":"%s","token":"%s"}`, deviceID, token)
+	req, err := http.NewRequest("POST", u.String(), strings.NewReader(reqBody))
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("API returned status %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Valid bool `json:"valid"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return false, err
+	}
+
+	return result.Valid, nil
+}
+
+// RateLimiter 限流器
+type RateLimiter struct {
+	attempts map[string]*LoginAttempt
+	mu       sync.RWMutex
+}
+
+// LoginAttempt 登录尝试
+type LoginAttempt struct {
+	Count      int
+	LastTry    time.Time
+	Blocked    bool
+	BlockUntil time.Time
+}
+
+// NewRateLimiter 创建限流器
+func NewRateLimiter() *RateLimiter {
+	rl := &RateLimiter{
+		attempts: make(map[string]*LoginAttempt),
+	}
+	go rl.cleanupLoop()
+	return rl
+}
+
+// Allow 检查是否允许登录
+func (rl *RateLimiter) Allow(key string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	attempt, ok := rl.attempts[key]
+	if !ok {
+		rl.attempts[key] = &LoginAttempt{
+			Count:   1,
+			LastTry: time.Now(),
+		}
+		return true
+	}
+
+	if attempt.Blocked && time.Now().Before(attempt.BlockUntil) {
+		return false
+	}
+
+	if attempt.Blocked && time.Now().After(attempt.BlockUntil) {
+		attempt.Blocked = false
+		attempt.Count = 0
+	}
+
+	if attempt.Count >= 5 && time.Since(attempt.LastTry) < 5*time.Minute {
+		attempt.Blocked = true
+		attempt.BlockUntil = time.Now().Add(15 * time.Minute)
+		log.Printf("Rate limit exceeded for %s, blocked for 15 minutes", key)
+		return false
+	}
+
+	if time.Since(attempt.LastTry) > 5*time.Minute {
+		attempt.Count = 0
+	}
+
+	attempt.Count++
+	attempt.LastTry = time.Now()
+	return true
+}
+
+// Success 登录成功，重置计数
+func (rl *RateLimiter) Success(key string) {
+	rl.mu.Lock()
+	delete(rl.attempts, key)
+	rl.mu.Unlock()
+}
+
+// cleanupLoop 定期清理旧的尝试记录
+func (rl *RateLimiter) cleanupLoop() {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		rl.mu.Lock()
+		now := time.Now()
+		for key, attempt := range rl.attempts {
+			if now.Sub(attempt.LastTry) > 30*time.Minute {
+				delete(rl.attempts, key)
+			}
+		}
+		rl.mu.Unlock()
+	}
+}
+
+// IPFilter IP过滤器
+type IPFilter struct {
+	allowedCIDRs []string
+}
+
+// NewIPFilter 创建IP过滤器
+func NewIPFilter() *IPFilter {
+	return &IPFilter{
+		allowedCIDRs: []string{
+			"10.0.0.0/8",
+			"172.16.0.0/12",
+			"192.168.0.0/16",
+		},
+	}
+}
+
+// IsAllowed 检查IP是否允许
+func (f *IPFilter) IsAllowed(ip string) bool {
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		return false
+	}
+
+	if parsedIP.IsLoopback() ||
+		parsedIP.IsMulticast() ||
+		parsedIP.Equal(net.ParseIP("0.0.0.0")) ||
+		parsedIP.IsLinkLocalUnicast() {
+		return false
+	}
+
+	for _, cidr := range f.allowedCIDRs {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			continue
+		}
+		if ipNet.Contains(parsedIP) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// StreamConn 隧道流连接
+type StreamConn struct {
+	StreamID    string
+	DeviceID    string
+	TunnelConn  *websocket.Conn
+	DataChan    chan []byte
+	CloseChan   chan struct{}
+	Closed      int32
+	WriteBuffer []byte
+	mu          sync.Mutex
+}
+
+// NewStreamConn 创建新的流连接
+func NewStreamConn(streamID, deviceID string, tunnelConn *websocket.Conn) *StreamConn {
+	return &StreamConn{
+		StreamID:   streamID,
+		DeviceID:   deviceID,
+		TunnelConn: tunnelConn,
+		DataChan:   make(chan []byte, 100),
+		CloseChan:  make(chan struct{}),
+	}
+}
+
+// Read 实现 net.Conn 的 Read 方法
+func (s *StreamConn) Read(p []byte) (n int, err error) {
+	select {
+	case data := <-s.DataChan:
+		n = copy(p, data)
+		return n, nil
+	case <-s.CloseChan:
+		return 0, io.EOF
+	}
+}
+
+// Write 实现 net.Conn 的 Write 方法
+func (s *StreamConn) Write(p []byte) (n int, err error) {
+	if atomic.LoadInt32(&s.Closed) == 1 {
+		return 0, fmt.Errorf("stream closed")
+	}
+
+	msg := struct {
+		Type string `json:"type"`
+		Data struct {
+			StreamID string `json:"stream_id"`
+			Data     []byte `json:"data"`
+		} `json:"data"`
+	}{
+		Type: "data",
+		Data: struct {
+			StreamID string `json:"stream_id"`
+			Data     []byte `json:"data"`
+		}{
+			StreamID: s.StreamID,
+			Data:     p,
+		},
+	}
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return 0, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.TunnelConn == nil {
+		return 0, fmt.Errorf("tunnel connection not available")
+	}
+
+	err = s.TunnelConn.WriteMessage(websocket.BinaryMessage, data)
+	if err != nil {
+		return 0, err
+	}
+
+	return len(p), nil
+}
+
+// Close 实现 net.Conn 的 Close 方法
+func (s *StreamConn) Close() error {
+	if atomic.CompareAndSwapInt32(&s.Closed, 0, 1) {
+		close(s.CloseChan)
+
+		// 发送断开连接消息
+		msg := struct {
+			Type string `json:"type"`
+			Data struct {
+				StreamID string `json:"stream_id"`
+			} `json:"data"`
+		}{
+			Type: "disconnect",
+			Data: struct {
+				StreamID string `json:"stream_id"`
+			}{
+				StreamID: s.StreamID,
+			},
+		}
+
+		data, _ := json.Marshal(msg)
+		s.mu.Lock()
+		if s.TunnelConn != nil {
+			s.TunnelConn.WriteMessage(websocket.BinaryMessage, data)
+		}
+		s.mu.Unlock()
+	}
+	return nil
+}
+
+// LocalAddr 实现 net.Conn 的 LocalAddr 方法
+func (s *StreamConn) LocalAddr() net.Addr {
+	if s.TunnelConn != nil {
+		return s.TunnelConn.LocalAddr()
+	}
+	return nil
+}
+
+// RemoteAddr 实现 net.Conn 的 RemoteAddr 方法
+func (s *StreamConn) RemoteAddr() net.Addr {
+	if s.TunnelConn != nil {
+		return s.TunnelConn.RemoteAddr()
+	}
+	return nil
+}
+
+// SetDeadline 实现 net.Conn 的 SetDeadline 方法
+func (s *StreamConn) SetDeadline(t time.Time) error {
+	return nil
+}
+
+// SetReadDeadline 实现 net.Conn 的 SetReadDeadline 方法
+func (s *StreamConn) SetReadDeadline(t time.Time) error {
+	return nil
+}
+
+// SetWriteDeadline 实现 net.Conn 的 SetWriteDeadline 方法
+func (s *StreamConn) SetWriteDeadline(t time.Time) error {
+	return nil
+}
+
+// TunnelClient 隧道客户端
+type TunnelClient struct {
+	tunnelEndpoint string
+	httpClient     *http.Client
+	wsDialer       *websocket.Dialer
+	connections    map[string]*websocket.Conn // deviceID -> websocket.Conn
+	streams        map[string]*StreamConn     // streamID -> StreamConn
+	mu             sync.RWMutex
+}
+
+// NewTunnelClient 创建新的隧道客户端
+func NewTunnelClient(tunnelEndpoint string) *TunnelClient {
+	return &TunnelClient{
+		tunnelEndpoint: tunnelEndpoint,
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					MinVersion: tls.VersionTLS12,
+				},
+			},
+		},
+		wsDialer: &websocket.Dialer{
+			HandshakeTimeout: 10 * time.Second,
+			TLSClientConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			},
+			ReadBufferSize:  64 * 1024,
+			WriteBufferSize: 64 * 1024,
+		},
+		connections: make(map[string]*websocket.Conn),
+		streams:     make(map[string]*StreamConn),
+	}
+}
+
+// GetOrConnectTunnel 获取或建立到设备的隧道连接
+func (tc *TunnelClient) GetOrConnectTunnel(deviceID, token string) (*websocket.Conn, error) {
+	tc.mu.RLock()
+	if conn, ok := tc.connections[deviceID]; ok {
+		tc.mu.RUnlock()
+		// 检查连接是否仍然有效
+		if tc.isConnAlive(conn) {
+			return conn, nil
+		}
+		// 连接已失效，需要重新连接
+		tc.mu.Lock()
+		delete(tc.connections, deviceID)
+		tc.mu.Unlock()
+	} else {
+		tc.mu.RUnlock()
+	}
+
+	// 建立新的 WebSocket 连接
+	wsURL := fmt.Sprintf("%s/tunnel?device_id=%s&token=%s", tc.tunnelEndpoint, deviceID, token)
+	// 将 http/https 转换为 ws/wss
+	if strings.HasPrefix(wsURL, "https://") {
+		wsURL = "wss://" + wsURL[8:]
+	} else if strings.HasPrefix(wsURL, "http://") {
+		wsURL = "ws://" + wsURL[7:]
+	}
+
+	conn, _, err := tc.wsDialer.Dial(wsURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to dial tunnel: %w", err)
+	}
+
+	tc.mu.Lock()
+	tc.connections[deviceID] = conn
+	tc.mu.Unlock()
+
+	// 启动读取协程
+	go tc.readLoop(deviceID, conn)
+
+	return conn, nil
+}
+
+// isConnAlive 检查连接是否存活
+func (tc *TunnelClient) isConnAlive(conn *websocket.Conn) bool {
+	// 尝试发送 ping
+	if err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5*time.Second)); err != nil {
+		return false
+	}
+	return true
+}
+
+// readLoop 读取循环，处理来自设备的消息
+func (tc *TunnelClient) readLoop(deviceID string, conn *websocket.Conn) {
+	defer func() {
+		tc.mu.Lock()
+		if tc.connections[deviceID] == conn {
+			delete(tc.connections, deviceID)
+		}
+		tc.mu.Unlock()
+		conn.Close()
+	}()
+
+	for {
+		messageType, data, err := conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("WebSocket error for device %s: %v", deviceID, err)
+			}
+			return
+		}
+
+		if messageType == websocket.BinaryMessage || messageType == websocket.TextMessage {
+			tc.handleMessage(conn, data)
+		}
+	}
+}
+
+// handleMessage 处理来自设备的消息
+func (tc *TunnelClient) handleMessage(conn *websocket.Conn, data []byte) {
+	var msg struct {
+		Type string          `json:"type"`
+		Data json.RawMessage `json:"data"`
+	}
+
+	if err := json.Unmarshal(data, &msg); err != nil {
+		log.Printf("Failed to unmarshal message: %v", err)
+		return
+	}
+
+	switch msg.Type {
+	case "connect_response":
+		tc.handleConnectResponse(msg.Data)
+	case "data":
+		tc.handleData(msg.Data)
+	case "disconnect":
+		tc.handleDisconnect(msg.Data)
+	default:
+		log.Printf("Unknown message type: %s", msg.Type)
+	}
+}
+
+// handleConnectResponse 处理连接响应
+func (tc *TunnelClient) handleConnectResponse(data json.RawMessage) {
+	var resp struct {
+		StreamID string `json:"stream_id"`
+		Success  bool   `json:"success"`
+		Error    string `json:"error,omitempty"`
+	}
+
+	if err := json.Unmarshal(data, &resp); err != nil {
+		log.Printf("Failed to unmarshal connect response: %v", err)
+		return
+	}
+
+	tc.mu.RLock()
+	stream, ok := tc.streams[resp.StreamID]
+	tc.mu.RUnlock()
+
+	if !ok {
+		log.Printf("No stream found for ID: %s", resp.StreamID)
+		return
+	}
+
+	if !resp.Success {
+		log.Printf("Connection failed for stream %s: %s", resp.StreamID, resp.Error)
+		stream.Close()
+		return
+	}
+
+	log.Printf("Connection established for stream %s", resp.StreamID)
+}
+
+// handleData 处理数据消息
+func (tc *TunnelClient) handleData(data json.RawMessage) {
+	var resp struct {
+		StreamID string `json:"stream_id"`
+		Data     []byte `json:"data"`
+	}
+
+	if err := json.Unmarshal(data, &resp); err != nil {
+		log.Printf("Failed to unmarshal data: %v", err)
+		return
+	}
+
+	tc.mu.RLock()
+	stream, ok := tc.streams[resp.StreamID]
+	tc.mu.RUnlock()
+
+	if !ok {
+		log.Printf("No stream found for ID: %s", resp.StreamID)
+		return
+	}
+
+	select {
+	case stream.DataChan <- resp.Data:
+	case <-stream.CloseChan:
+	}
+}
+
+// handleDisconnect 处理断开连接消息
+func (tc *TunnelClient) handleDisconnect(data json.RawMessage) {
+	var resp struct {
+		StreamID string `json:"stream_id"`
+	}
+
+	if err := json.Unmarshal(data, &resp); err != nil {
+		log.Printf("Failed to unmarshal disconnect: %v", err)
+		return
+	}
+
+	tc.mu.RLock()
+	stream, ok := tc.streams[resp.StreamID]
+	tc.mu.RUnlock()
+
+	if ok {
+		stream.Close()
+	}
+}
+
+// ConnectThroughTunnel 通过隧道连接到目标地址
+func (tc *TunnelClient) ConnectThroughTunnel(deviceID, token, dstAddr string, dstPort int) (net.Conn, error) {
+	// 获取或建立隧道连接
+	tunnelConn, err := tc.GetOrConnectTunnel(deviceID, token)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get tunnel: %w", err)
+	}
+
+	// 生成唯一的流ID
+	streamID := fmt.Sprintf("%s-%d", deviceID, time.Now().UnixNano())
+
+	// 创建流连接
+	streamConn := NewStreamConn(streamID, deviceID, tunnelConn)
+
+	tc.mu.Lock()
+	tc.streams[streamID] = streamConn
+	tc.mu.Unlock()
+
+	// 发送连接请求
+	connectReq := struct {
+		Type string `json:"type"`
+		Data struct {
+			StreamID string `json:"stream_id"`
+			Address  string `json:"address"`
+			Port     int    `json:"port"`
+		} `json:"data"`
+	}{
+		Type: "connect",
+		Data: struct {
+			StreamID string `json:"stream_id"`
+			Address  string `json:"address"`
+			Port     int    `json:"port"`
+		}{
+			StreamID: streamID,
+			Address:  dstAddr,
+			Port:     dstPort,
+		},
+	}
+
+	reqData, err := json.Marshal(connectReq)
+	if err != nil {
+		tc.mu.Lock()
+		delete(tc.streams, streamID)
+		tc.mu.Unlock()
+		return nil, fmt.Errorf("failed to marshal connect request: %w", err)
+	}
+
+	if err := tunnelConn.WriteMessage(websocket.BinaryMessage, reqData); err != nil {
+		tc.mu.Lock()
+		delete(tc.streams, streamID)
+		tc.mu.Unlock()
+		return nil, fmt.Errorf("failed to send connect request: %w", err)
+	}
+
+	// 等待连接响应（带超时）
+	select {
+	case <-time.After(30 * time.Second):
+		tc.mu.Lock()
+		delete(tc.streams, streamID)
+		tc.mu.Unlock()
+		return nil, fmt.Errorf("connection timeout")
+	default:
+		// 继续检查连接状态
+	}
+
+	return streamConn, nil
+}
+
+// RemoveStream 移除流
+func (tc *TunnelClient) RemoveStream(streamID string) {
+	tc.mu.Lock()
+	delete(tc.streams, streamID)
+	tc.mu.Unlock()
+}
+
+// SOCKS5Server SOCKS5服务器
+type SOCKS5Server struct {
+	config        *Config
+	sessionStore  SessionStore
+	rateLimiter   *RateLimiter
+	ipFilter      *IPFilter
+	tunnelClient  *TunnelClient
+	listener      net.Listener
+	connCount     int32 // 当前活跃连接数（原子操作）
+}
+
+// NewSOCKS5Server 创建SOCKS5服务器
+func NewSOCKS5Server(config *Config) *SOCKS5Server {
+	return &SOCKS5Server{
+		config:       config,
+		sessionStore: NewAPISessionStore(config.APIEndpoint),
+		rateLimiter:  NewRateLimiter(),
+		ipFilter:     NewIPFilter(),
+		tunnelClient: NewTunnelClient(config.TunnelEndpoint),
+	}
+}
+
+// Start 启动服务器
+func (s *SOCKS5Server) Start() error {
+	listener, err := net.Listen("tcp", s.config.Addr)
+	if err != nil {
+		return err
+	}
+	s.listener = listener
+
+	if s.config.EnableTLS {
+		cert, err := tls.LoadX509KeyPair(s.config.TLSCert, s.config.TLSKey)
+		if err != nil {
+			return fmt.Errorf("failed to load TLS certificates: %v", err)
+		}
+
+		tlsConfig := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+
+		s.listener = tls.NewListener(listener, tlsConfig)
+		log.Printf("SOCKS5 server with TLS starting on %s", s.config.Addr)
+	} else {
+		log.Printf("SOCKS5 server starting on %s", s.config.Addr)
+	}
+
+	for {
+		conn, err := s.listener.Accept()
+		if err != nil {
+			log.Printf("Accept error: %v", err)
+			continue
+		}
+
+		go s.handleConnection(conn)
+	}
+}
+
+// handleConnection 处理连接
+func (s *SOCKS5Server) handleConnection(conn net.Conn) {
+	// 检查连接数限制
+	currentCount := atomic.AddInt32(&s.connCount, 1)
+	defer atomic.AddInt32(&s.connCount, -1)
+
+	if int(currentCount) > s.config.MaxConnections {
+		log.Printf("Connection limit exceeded: %d/%d", currentCount, s.config.MaxConnections)
+		conn.Close()
+		return
+	}
+
+	defer conn.Close()
+
+	clientAddr := conn.RemoteAddr().String()
+	clientIP, _, _ := net.SplitHostPort(clientAddr)
+
+	// 检查限流
+	if !s.rateLimiter.Allow(clientIP) {
+		log.Printf("Rate limit exceeded for %s", clientIP)
+		return
+	}
+
+	// SOCKS5握手
+	deviceID, err := s.handleHandshake(conn, clientIP)
+	if err != nil {
+		log.Printf("Handshake failed for %s: %v", clientIP, err)
+		return
+	}
+
+	// 处理SOCKS5请求
+	err = s.handleRequest(conn, deviceID)
+	if err != nil {
+		log.Printf("Request handling failed for %s: %v", clientIP, err)
+	}
+}
+
+// handleHandshake 处理SOCKS5握手
+func (s *SOCKS5Server) handleHandshake(conn net.Conn, clientIP string) (string, error) {
+	reader := bufio.NewReader(conn)
+
+	// 读取版本和认证方法数
+	buf := make([]byte, 2)
+	if _, err := io.ReadFull(reader, buf); err != nil {
+		return "", err
+	}
+
+	if buf[0] != 0x05 {
+		return "", fmt.Errorf("unsupported SOCKS version: %d", buf[0])
+	}
+
+	nmethods := int(buf[1])
+	methods := make([]byte, nmethods)
+	if _, err := io.ReadFull(reader, methods); err != nil {
+		return "", err
+	}
+
+	// 检查是否支持用户名/密码认证(0x02)
+	supportsAuth := false
+	for _, m := range methods {
+		if m == 0x02 {
+			supportsAuth = true
+			break
+		}
+	}
+
+	if !supportsAuth {
+		// 不支持认证，返回无认证方法
+		conn.Write([]byte{0x05, 0x00})
+		return "", fmt.Errorf("no supported authentication method")
+	}
+
+	// 选择用户名/密码认证
+	conn.Write([]byte{0x05, 0x02})
+
+	// 处理用户名/密码认证
+	return s.handleAuth(conn, reader, clientIP)
+}
+
+// handleAuth 处理认证
+func (s *SOCKS5Server) handleAuth(conn net.Conn, reader *bufio.Reader, clientIP string) (string, error) {
+	// 读取版本
+	version, err := reader.ReadByte()
+	if err != nil {
+		return "", err
+	}
+	if version != 0x01 {
+		return "", fmt.Errorf("unsupported auth version: %d", version)
+	}
+
+	// 读取用户名长度
+	ulen, err := reader.ReadByte()
+	if err != nil {
+		return "", err
+	}
+
+	// 读取用户名
+	username := make([]byte, ulen)
+	if _, err := io.ReadFull(reader, username); err != nil {
+		return "", err
+	}
+
+	// 读取密码长度
+	plen, err := reader.ReadByte()
+	if err != nil {
+		return "", err
+	}
+
+	// 读取密码
+	password := make([]byte, plen)
+	if _, err := io.ReadFull(reader, password); err != nil {
+		return "", err
+	}
+
+	deviceID := string(username)
+	token := string(password)
+
+	// 验证令牌
+	valid, err := s.sessionStore.ValidateToken(deviceID, token)
+	if err != nil || !valid {
+		conn.Write([]byte{0x01, 0x01}) // 认证失败
+		return "", fmt.Errorf("authentication failed")
+	}
+
+	// 认证成功
+	conn.Write([]byte{0x01, 0x00})
+	s.rateLimiter.Success(clientIP)
+	log.Printf("Authentication successful for device: %s", deviceID)
+
+	return deviceID, nil
+}
+
+// handleRequest 处理SOCKS5请求
+func (s *SOCKS5Server) handleRequest(conn net.Conn, deviceID string) error {
+	reader := bufio.NewReader(conn)
+
+	// 读取请求头
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(reader, buf); err != nil {
+		return err
+	}
+
+	if buf[0] != 0x05 {
+		return fmt.Errorf("unsupported SOCKS version: %d", buf[0])
+	}
+
+	cmd := buf[1]
+	// rsv := buf[2]
+	atyp := buf[3]
+
+	var dstAddr string
+	var dstPort int
+
+	switch atyp {
+	case 0x01: // IPv4
+		ipBuf := make([]byte, 4)
+		if _, err := io.ReadFull(reader, ipBuf); err != nil {
+			return err
+		}
+		dstAddr = net.IP(ipBuf).String()
+
+	case 0x03: // Domain name
+		lenBuf, err := reader.ReadByte()
+		if err != nil {
+			return err
+		}
+		domainBuf := make([]byte, lenBuf)
+		if _, err := io.ReadFull(reader, domainBuf); err != nil {
+			return err
+		}
+		dstAddr = string(domainBuf)
+
+		// 解析域名
+		ips, err := net.LookupIP(dstAddr)
+		if err != nil {
+			s.sendReply(conn, 0x04) // Host unreachable
+			return err
+		}
+		for _, ip := range ips {
+			if ip.To4() != nil {
+				dstAddr = ip.String()
+				break
+			}
+		}
+
+	case 0x04: // IPv6
+		s.sendReply(conn, 0x08) // Address type not supported
+		return fmt.Errorf("IPv6 not supported")
+
+	default:
+		s.sendReply(conn, 0x08) // Address type not supported
+		return fmt.Errorf("unsupported address type: %d", atyp)
+	}
+
+	// 读取端口
+	portBuf := make([]byte, 2)
+	if _, err := io.ReadFull(reader, portBuf); err != nil {
+		return err
+	}
+	dstPort = int(portBuf[0])<<8 | int(portBuf[1])
+
+	// 检查IP是否允许
+	if !s.ipFilter.IsAllowed(dstAddr) {
+		log.Printf("Blocked connection to %s:%d", dstAddr, dstPort)
+		s.sendReply(conn, 0x02) // Connection not allowed
+		return fmt.Errorf("target IP not allowed: %s", dstAddr)
+	}
+
+	switch cmd {
+	case 0x01: // CONNECT
+		return s.handleConnect(conn, deviceID, dstAddr, dstPort)
+	case 0x02: // BIND
+		s.sendReply(conn, 0x07) // Command not supported
+		return fmt.Errorf("BIND not supported")
+	case 0x03: // UDP ASSOCIATE
+		s.sendReply(conn, 0x07) // Command not supported
+		return fmt.Errorf("UDP ASSOCIATE not supported")
+	default:
+		s.sendReply(conn, 0x07) // Command not supported
+		return fmt.Errorf("unsupported command: %d", cmd)
+	}
+}
+
+// sendReply 发送SOCKS5响应
+func (s *SOCKS5Server) sendReply(conn net.Conn, rep byte) {
+	reply := []byte{0x05, rep, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	conn.Write(reply)
+}
+
+// handleConnect 处理CONNECT请求
+func (s *SOCKS5Server) handleConnect(conn net.Conn, deviceID, dstAddr string, dstPort int) error {
+	log.Printf("CONNECT request from %s to %s:%d", deviceID, dstAddr, dstPort)
+
+	// 使用token作为设备凭证（在实际场景中，token应该从sessionStore获取）
+	// 这里使用deviceID作为token的简化版本
+	token := deviceID
+
+	// 通过隧道连接到目标
+	targetConn, err := s.tunnelClient.ConnectThroughTunnel(deviceID, token, dstAddr, dstPort)
+	if err != nil {
+		log.Printf("Failed to connect through tunnel: %v", err)
+		s.sendReply(conn, 0x05) // Connection refused
+		return err
+	}
+	defer func() {
+		targetConn.Close()
+		// 清理流记录
+		if streamConn, ok := targetConn.(*StreamConn); ok {
+			s.tunnelClient.RemoveStream(streamConn.StreamID)
+		}
+	}()
+
+	// 发送成功响应
+	s.sendReply(conn, 0x00)
+
+	// 双向转发
+	return s.relay(conn, targetConn)
+}
+
+// relay 双向转发数据
+func (s *SOCKS5Server) relay(clientConn, targetConn net.Conn) error {
+	errChan := make(chan error, 2)
+
+	go func() {
+		_, err := io.Copy(targetConn, clientConn)
+		errChan <- err
+	}()
+
+	go func() {
+		_, err := io.Copy(clientConn, targetConn)
+		errChan <- err
+	}()
+
+	// 等待任意一个方向完成
+	err := <-errChan
+	return err
+}
+
+func main() {
+	addr := flag.String("addr", "0.0.0.0:1080", "SOCKS5 server address")
+	apiEndpoint := flag.String("api", "http://localhost:8080", "API endpoint URL")
+	tunnelEndpoint := flag.String("tunnel", "ws://localhost:8443", "Tunnel WebSocket endpoint URL")
+	tlsCert := flag.String("tls-cert", "", "TLS certificate file")
+	tlsKey := flag.String("tls-key", "", "TLS key file")
+	flag.Parse()
+
+	if envAddr := os.Getenv("SOCKS5_ADDR"); envAddr != "" {
+		*addr = envAddr
+	}
+	if envAPI := os.Getenv("API_ENDPOINT"); envAPI != "" {
+		*apiEndpoint = envAPI
+	}
+	if envTunnel := os.Getenv("TUNNEL_ENDPOINT"); envTunnel != "" {
+		*tunnelEndpoint = envTunnel
+	}
+
+	config := &Config{
+		Addr:           *addr,
+		APIEndpoint:    *apiEndpoint,
+		TunnelEndpoint: *tunnelEndpoint,
+		EnableTLS:      *tlsCert != "" && *tlsKey != "",
+		TLSCert:        *tlsCert,
+		TLSKey:         *tlsKey,
+		MaxConnections: 1000,
+		IdleTimeout:    5 * time.Minute,
+	}
+
+	server := NewSOCKS5Server(config)
+
+	log.Printf("API endpoint: %s", config.APIEndpoint)
+	log.Printf("Tunnel endpoint: %s", config.TunnelEndpoint)
+
+	if err := server.Start(); err != nil {
+		log.Fatalf("Server failed: %v", err)
+	}
+}

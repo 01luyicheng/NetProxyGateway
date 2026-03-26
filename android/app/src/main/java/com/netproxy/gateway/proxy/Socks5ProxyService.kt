@@ -8,7 +8,6 @@ import android.app.Service
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
-import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.netproxy.gateway.connection.AuthSessionStore
 import com.netproxy.gateway.ui.MainActivity
@@ -27,6 +26,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import org.slf4j.LoggerFactory
 import java.net.InetSocketAddress
 import javax.inject.Inject
 
@@ -46,7 +46,7 @@ import javax.inject.Inject
 class Socks5ProxyService : Service() {
 
     companion object {
-        private const val TAG = "Socks5ProxyService"
+        private val logger = LoggerFactory.getLogger(Socks5ProxyService::class.java)
         const val PROXY_PORT = 1080
         const val CHANNEL_ID = "proxy_service_channel"
         private const val MAX_WORKER_THREADS = 2
@@ -100,7 +100,7 @@ class Socks5ProxyService : Service() {
                 serverChannel?.closeFuture()?.sync()
 
             } catch (e: Exception) {
-                Log.e(TAG, "SOCKS5 server failed to start", e)
+                logger.error("SOCKS5 server failed to start", e)
                 stopSelf()
             }
         }
