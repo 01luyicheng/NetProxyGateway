@@ -18,3 +18,9 @@ Thumbs.db
 
 # Tooling
 .sisyphus/
+
+# Git hooks are tracked in git, but local hooks directory might have other files
+# .githooks/* (we track specific hooks, ignore local-only hooks)
+
+# Commitlint (config is tracked, node_modules would be ignored if installed locally)
+node_modules/
