@@ -8,7 +8,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o tunnel .
 
 FROM alpine:latest
-RUN apk --no-cache add ca-certificates
+RUN apk --no-cache add ca-certificates netcat-openbsd
 WORKDIR /root/
 COPY --from=builder /app/tunnel .
 EXPOSE 8443

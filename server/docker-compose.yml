@@ -1,4 +1,9 @@
-version: '3.8'
+# TLS 证书配置说明：
+# 1. 生产环境：将证书文件放在 ./certs 目录下，命名为 server.crt 和 server.key
+# 2. 测试环境：使用以下命令生成自签名证书：
+#    mkdir -p certs && openssl req -x509 -newkey rsa:4096 -keyout certs/server.key -out certs/server.crt -days 365 -nodes -subj "/CN=localhost"
+# 3. 启用 TLS：设置 ENABLE_TLS=true，并确保证书文件路径正确
+# 4. 客户端需要信任自签名证书，或将证书添加到系统信任库
 
 services:
   # REST API 服务
@@ -14,11 +19,19 @@ services:
       - JWT_SECRET=${JWT_SECRET:-changeme-in-production}
       - ADMIN_USER=${ADMIN_USER:-admin}
       - ADMIN_PASS=${ADMIN_PASS:-changeme}
+      # TLS 配置（可选）
+      - ENABLE_TLS=${ENABLE_TLS:-false}
+      - TLS_CERT=${TLS_CERT:-/app/certs/server.crt}
+      - TLS_KEY=${TLS_KEY:-/app/certs/server.key}
+    volumes:
+      # 挂载证书目录（可选，仅在启用TLS时需要）
+      - ./certs:/app/certs:ro
     restart: unless-stopped
     networks:
       - netproxy
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      # 根据是否启用TLS选择健康检查协议，使用 --no-check-certificate 支持自签名证书
+      test: ["CMD", "wget", "-q", "--spider", "--no-check-certificate", "${HEALTH_CHECK_URL:-http://localhost:8080/health}"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -35,11 +48,25 @@ services:
     environment:
       - SOCKS5_ADDR=0.0.0.0:1080
       - API_ENDPOINT=http://api:8080
+      # TLS 配置（可选）
+      - ENABLE_TLS=${SOCKS5_ENABLE_TLS:-false}
+      - TLS_CERT=${SOCKS5_TLS_CERT:-/app/certs/server.crt}
+      - TLS_KEY=${SOCKS5_TLS_KEY:-/app/certs/server.key}
+    volumes:
+      # 挂载证书目录（可选，仅在启用TLS时需要）
+      - ./certs:/app/certs:ro
     depends_on:
       - api
     restart: unless-stopped
     networks:
       - netproxy
+    healthcheck:
+      # SOCKS5 服务健康检查：测试 TCP 端口是否可连接
+      test: ["CMD", "sh", "-c", "nc -z localhost 1080 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   # 隧道网关服务
   tunnel:
@@ -52,11 +79,25 @@ services:
     environment:
       - TUNNEL_ADDR=0.0.0.0:8443
       - API_ENDPOINT=http://api:8080
+      # TLS 配置（可选）
+      - ENABLE_TLS=${TUNNEL_ENABLE_TLS:-false}
+      - TLS_CERT=${TUNNEL_TLS_CERT:-/app/certs/server.crt}
+      - TLS_KEY=${TUNNEL_TLS_KEY:-/app/certs/server.key}
+    volumes:
+      # 挂载证书目录（可选，仅在启用TLS时需要）
+      - ./certs:/app/certs:ro
     depends_on:
       - api
     restart: unless-stopped
     networks:
       - netproxy
+    healthcheck:
+      # Tunnel 服务健康检查：测试 TCP 端口是否可连接
+      test: ["CMD", "sh", "-c", "nc -z localhost 8443 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   # MQTT Broker (EMQX)
   emqx:
@@ -78,6 +119,8 @@ services:
     volumes:
       - emqx-data:/opt/emqx/data
       - emqx-log:/opt/emqx/log
+      # EMQX TLS 证书配置（可选）
+      - ./certs:/opt/emqx/etc/certs:ro
     restart: unless-stopped
     networks:
       - netproxy

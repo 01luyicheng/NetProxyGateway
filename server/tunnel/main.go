@@ -481,6 +481,16 @@ func (s *Server) Run() error {
 	return http.ListenAndServe(s.config.Addr, nil)
 }
 
+// firstNonEmpty 返回第一个非空字符串（环境变量优先）
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func main() {
 	// 解析命令行参数
 	addr := flag.String("addr", "0.0.0.0:8443", "Server address")
@@ -499,17 +509,49 @@ func main() {
 		*apiEndpoint = envAPI
 	}
 	
+	// 读取TLS配置（环境变量优先）
+	envEnableTLS := os.Getenv("ENABLE_TLS")
+	envTLSCert := os.Getenv("TLS_CERT")
+	envTLSKey := os.Getenv("TLS_KEY")
+	
+	// 确定是否启用TLS：环境变量设置则使用环境变量，否则根据命令行参数判断
+	enableTLS := false
+	if envEnableTLS != "" {
+		enableTLS = envEnableTLS == "true"
+	} else {
+		enableTLS = *tlsCert != "" && *tlsKey != ""
+	}
+	
+	// 证书路径：环境变量优先
+	finalTLSCert := firstNonEmpty(envTLSCert, *tlsCert)
+	finalTLSKey := firstNonEmpty(envTLSKey, *tlsKey)
+	
+	// 验证TLS配置
+	if enableTLS {
+		if finalTLSCert == "" || finalTLSKey == "" {
+			log.Fatalf("TLS enabled but certificate paths not provided")
+		}
+		if _, err := os.Stat(finalTLSCert); os.IsNotExist(err) {
+			log.Fatalf("TLS certificate file not found: %s", finalTLSCert)
+		}
+		if _, err := os.Stat(finalTLSKey); os.IsNotExist(err) {
+			log.Fatalf("TLS key file not found: %s", finalTLSKey)
+		}
+	}
+	
 	config := &Config{
 		Addr:              *addr,
 		APIEndpoint:       *apiEndpoint,
-		EnableTLS:         *tlsCert != "" && *tlsKey != "",
-		TLSCert:           *tlsCert,
-		TLSKey:            *tlsKey,
+		EnableTLS:         enableTLS,
+		TLSCert:           finalTLSCert,
+		TLSKey:            finalTLSKey,
 		HeartbeatInterval: *heartbeatInterval,
 		HeartbeatTimeout:  *heartbeatTimeout,
 	}
 	
 	server := NewServer(config)
+	
+	log.Printf("Tunnel server starting on %s (TLS enabled: %v)", config.Addr, config.EnableTLS)
 	
 	if err := server.Run(); err != nil {
 		log.Fatalf("Server failed: %v", err)

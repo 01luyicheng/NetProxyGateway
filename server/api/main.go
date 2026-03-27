@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -616,9 +617,35 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
-	
-	fmt.Printf("API server starting on :%s\n", port)
-	if err := r.Run(":" + port); err != nil {
-		fmt.Printf("Server failed: %v\n", err)
+
+	// 读取TLS配置（环境变量优先）
+	enableTLS := os.Getenv("ENABLE_TLS") == "true"
+	tlsCert := os.Getenv("TLS_CERT")
+	tlsKey := os.Getenv("TLS_KEY")
+
+	// 验证TLS配置
+	if enableTLS {
+		if tlsCert == "" || tlsKey == "" {
+			log.Fatalf("TLS enabled but certificate paths not provided")
+		}
+		if _, err := os.Stat(tlsCert); os.IsNotExist(err) {
+			log.Fatalf("TLS certificate file not found: %s", tlsCert)
+		}
+		if _, err := os.Stat(tlsKey); os.IsNotExist(err) {
+			log.Fatalf("TLS key file not found: %s", tlsKey)
+		}
+		log.Printf("API server starting on :%s (TLS enabled)", port)
+	} else {
+		log.Printf("API server starting on :%s (TLS disabled)", port)
+	}
+
+	if enableTLS {
+		if err := r.RunTLS(":"+port, tlsCert, tlsKey); err != nil {
+			log.Fatalf("Server failed: %v", err)
+		}
+	} else {
+		if err := r.Run(":" + port); err != nil {
+			log.Fatalf("Server failed: %v", err)
+		}
 	}
 }
