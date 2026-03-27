@@ -16,6 +16,12 @@ Thumbs.db
 # Logs
 *.log
 
+# Go binaries
+*.exe
+server/api/api
+server/socks5-proxy/socks5-proxy
+server/tunnel/tunnel
+
 # Tooling
 .sisyphus/
 
