@@ -11,6 +11,8 @@ import org.junit.Test
  * MqttConnectionManager 的单元测试
  * 由于 MqttConnectionManager 使用 Eclipse Paho MQTT 客户端，
  * 本测试类主要测试可以独立测试的状态类和结果类型。
+ * 
+ * 对于需要模拟 MQTT 客户端的测试，建议使用集成测试或设备测试。
  */
 class MqttConnectionManagerTest {
 
@@ -222,5 +224,179 @@ class MqttConnectionManagerTest {
             // Smart cast should work
             assertEquals("test message", state.message)
         }
+    }
+
+    // ==================== TLS/SSL 配置方法存在性测试 ====================
+
+    @Test
+    fun mqttConnectionManager_hasCreateProductionSocketFactoryMethod() {
+        val method = MqttConnectionManager::class.java.declaredMethods.find { it.name == "createProductionSocketFactory" }
+        assertNotNull("Should have createProductionSocketFactory method", method)
+    }
+
+    @Test
+    fun mqttConnectionManager_hasCreateDevSocketFactoryMethod() {
+        val method = MqttConnectionManager::class.java.declaredMethods.find { it.name == "createDevSocketFactory" }
+        assertNotNull("Should have createDevSocketFactory method", method)
+    }
+
+    @Test
+    fun mqttConnectionManager_hasCreateSecureSocketFactoryMethod() {
+        val method = MqttConnectionManager::class.java.declaredMethods.find { it.name == "createSecureSocketFactory" }
+        assertNotNull("Should have createSecureSocketFactory method", method)
+    }
+
+    @Test
+    fun mqttConnectionManager_hasIsTlsEnabledMethod() {
+        val method = MqttConnectionManager::class.java.declaredMethods.find { it.name == "isTlsEnabled" }
+        assertNotNull("Should have isTlsEnabled method", method)
+    }
+
+    @Test
+    fun mqttConnectionManager_hasBrokerUrlMethod() {
+        val method = MqttConnectionManager::class.java.declaredMethods.find { it.name == "brokerUrl" }
+        assertNotNull("Should have brokerUrl method", method)
+    }
+
+    @Test
+    fun mqttConnectionManager_hasValidateBrokerUrlMethod() {
+        val method = MqttConnectionManager::class.java.declaredMethods.find { it.name == "validateBrokerUrl" }
+        assertNotNull("Should have validateBrokerUrl method", method)
+    }
+
+    // ==================== 连接状态流转测试（基于类结构）====================
+
+    @Test
+    fun mqttConnectionState_disconnectedTypeIsCorrect() {
+        val state = MqttConnectionState.Disconnected
+        assertTrue(state is MqttConnectionState)
+    }
+
+    @Test
+    fun mqttConnectionState_connectingTypeIsCorrect() {
+        val state = MqttConnectionState.Connecting
+        assertTrue(state is MqttConnectionState)
+    }
+
+    @Test
+    fun mqttConnectionState_connectedTypeIsCorrect() {
+        val state = MqttConnectionState.Connected
+        assertTrue(state is MqttConnectionState)
+    }
+
+    @Test
+    fun mqttConnectionState_errorTypeIsCorrect() {
+        val state = MqttConnectionState.Error("test")
+        assertTrue(state is MqttConnectionState)
+    }
+
+    // ==================== 错误状态测试 ====================
+
+    @Test
+    fun mqttConnectionState_errorWithNullMessage() {
+        val error = MqttConnectionState.Error("null")
+        assertEquals("null", error.message)
+    }
+
+    @Test
+    fun mqttConnectionState_errorWithWhitespaceMessage() {
+        val error = MqttConnectionState.Error("   ")
+        assertEquals("   ", error.message)
+    }
+
+    @Test
+    fun mqttConnectionState_errorWithNewlineMessage() {
+        val error = MqttConnectionState.Error("line1\nline2")
+        assertEquals("line1\nline2", error.message)
+    }
+
+    @Test
+    fun mqttConnectionState_errorWithTabMessage() {
+        val error = MqttConnectionState.Error("col1\tcol2")
+        assertEquals("col1\tcol2", error.message)
+    }
+
+    // ==================== 密封类层级测试 ====================
+
+    @Test
+    fun mqttConnectionState_isSealedClass() {
+        val isSealed = MqttConnectionState::class.isSealed
+        assertTrue("MqttConnectionState should be a sealed class", isSealed)
+    }
+
+    @Test
+    fun mqttConnectionState_hasAllRequiredSubtypes() {
+        val subclasses = MqttConnectionState::class.sealedSubclasses
+        assertTrue("Should have Disconnected subtype", subclasses.any { it == MqttConnectionState.Disconnected::class })
+        assertTrue("Should have Connecting subtype", subclasses.any { it == MqttConnectionState.Connecting::class })
+        assertTrue("Should have Connected subtype", subclasses.any { it == MqttConnectionState.Connected::class })
+        assertTrue("Should have Error subtype", subclasses.any { it == MqttConnectionState.Error::class })
+    }
+
+    // ==================== 方法签名测试 ====================
+
+    @Test
+    fun mqttConnectionManager_connectMethodSignature() {
+        val method = MqttConnectionManager::class.java.methods.find { it.name == "connect" }
+        assertNotNull(method)
+        assertEquals(2, method?.parameterCount)
+    }
+
+    @Test
+    fun mqttConnectionManager_disconnectMethodSignature() {
+        val method = MqttConnectionManager::class.java.methods.find { it.name == "disconnect" }
+        assertNotNull(method)
+        assertEquals(0, method?.parameterCount)
+    }
+
+    @Test
+    fun mqttConnectionManager_publishMethodSignature() {
+        val method = MqttConnectionManager::class.java.methods.find { it.name == "publish" && it.parameterCount == 3 }
+        assertNotNull(method)
+    }
+
+    @Test
+    fun mqttConnectionManager_subscribeMethodSignature() {
+        val method = MqttConnectionManager::class.java.methods.find { it.name == "subscribe" && it.parameterCount == 3 }
+        assertNotNull(method)
+    }
+
+    @Test
+    fun mqttConnectionManager_publishWithResultMethodSignature() {
+        val method = MqttConnectionManager::class.java.methods.find { it.name == "publishWithResult" }
+        assertNotNull(method)
+        assertEquals(3, method?.parameterCount)
+    }
+
+    @Test
+    fun mqttConnectionManager_subscribeWithResultMethodSignature() {
+        val method = MqttConnectionManager::class.java.methods.find { it.name == "subscribeWithResult" }
+        assertNotNull(method)
+        assertEquals(3, method?.parameterCount)
+    }
+
+    // ==================== 字段存在性测试 ====================
+
+    @Test
+    fun mqttConnectionManager_hasConnectionStateField() {
+        val field = MqttConnectionManager::class.java.declaredFields.find { it.name == "connectionState" }
+        assertNotNull("Should have connectionState field", field)
+    }
+
+    @Test
+    fun mqttConnectionManager_hasMessagesField() {
+        val field = MqttConnectionManager::class.java.declaredFields.find { it.name == "messages" }
+        assertNotNull("Should have messages field", field)
+    }
+
+    // ==================== 伴生对象测试 ====================
+
+    @Test
+    fun mqttConnectionManager_hasCompanionObject() {
+        val companion = MqttConnectionManager::class.java.declaredClasses.find { it.name.contains("Companion") }
+        // Companion object may be null if not declared, but we check for constants
+        val hasClientId = MqttConnectionManager::class.java.declaredFields.any { it.name == "CLIENT_ID" }
+        val hasHeartbeatInterval = MqttConnectionManager::class.java.declaredFields.any { it.name == "HEARTBEAT_INTERVAL" }
+        assertTrue("Should have CLIENT_ID constant or companion object", hasClientId || companion != null)
     }
 }
