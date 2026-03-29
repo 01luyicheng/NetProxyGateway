@@ -1,6 +1,8 @@
 # Gradle
 .gradle/
 **/build/
+android/b/
+android/.gpc/
 
 # Android local config
 android/local.properties

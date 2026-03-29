@@ -6,3 +6,9 @@ plugins {
     id("com.google.devtools.ksp") version "2.1.20-1.0.32" apply false
     id("com.google.dagger.hilt.android") version "2.56" apply false
 }
+
+// Reduce build output path depth to mitigate long-path build failures.
+layout.buildDirectory.set(layout.projectDirectory.dir("b"))
+subprojects {
+    layout.buildDirectory.set(rootProject.layout.projectDirectory.dir("b").dir(name))
+}
