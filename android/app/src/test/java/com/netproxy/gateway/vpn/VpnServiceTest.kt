@@ -20,6 +20,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import java.net.Socket
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * VpnService 的单元测试
@@ -490,9 +492,23 @@ class VpnServiceTest {
         packet[18] = 1.toByte()
         packet[19] = 1.toByte()
 
-        // 使用反射调用私有方法进行测试
-        val result = parseDestinationIp(packet, packet.size)
+        val result = VpnTestUtils.parseDestinationIp(packet, packet.size)
         assertEquals("192.168.1.1", result)
+    }
+
+    @Test
+    fun packetParsing_parseDestinationIp_publicIp() {
+        val packet = ByteArray(40)
+        packet[0] = 0x45
+
+        // 目标 IP: 8.8.8.8 (Google DNS)
+        packet[16] = 8.toByte()
+        packet[17] = 8.toByte()
+        packet[18] = 8.toByte()
+        packet[19] = 8.toByte()
+
+        val result = VpnTestUtils.parseDestinationIp(packet, packet.size)
+        assertEquals("8.8.8.8", result)
     }
 
     @Test
@@ -501,7 +517,7 @@ class VpnServiceTest {
         val packet = ByteArray(40)
         packet[0] = 0x60  // Version 6
 
-        val result = parseDestinationIp(packet, packet.size)
+        val result = VpnTestUtils.parseDestinationIp(packet, packet.size)
         assertNull(result)
     }
 
@@ -509,8 +525,54 @@ class VpnServiceTest {
     fun packetParsing_parseDestinationIp_packetTooShort() {
         // 数据包太短
         val packet = ByteArray(10)
-        val result = parseDestinationIp(packet, packet.size)
+        val result = VpnTestUtils.parseDestinationIp(packet, packet.size)
         assertNull(result)
+    }
+
+    @Test
+    fun packetParsing_parseDestinationIp_exactly20Bytes() {
+        val packet = ByteArray(20)
+        packet[0] = 0x45
+
+        // 目标 IP: 1.2.3.4
+        packet[16] = 1.toByte()
+        packet[17] = 2.toByte()
+        packet[18] = 3.toByte()
+        packet[19] = 4.toByte()
+
+        val result = VpnTestUtils.parseDestinationIp(packet, packet.size)
+        assertEquals("1.2.3.4", result)
+    }
+
+    @Test
+    fun packetParsing_parseDestinationIp_withOptionsHeader() {
+        // IHL = 6 (24 bytes header with options)
+        val packet = ByteArray(40)
+        packet[0] = 0x46  // Version 4, IHL = 6
+
+        // 目标 IP 仍然在字节 16-19
+        packet[16] = 10.toByte()
+        packet[17] = 0.toByte()
+        packet[18] = 0.toByte()
+        packet[19] = 1.toByte()
+
+        val result = VpnTestUtils.parseDestinationIp(packet, packet.size)
+        assertEquals("10.0.0.1", result)
+    }
+
+    @Test
+    fun packetParsing_parseDestinationIp_maximumValues() {
+        val packet = ByteArray(40)
+        packet[0] = 0x45
+
+        // IP: 255.255.255.255
+        packet[16] = 0xFF.toByte()
+        packet[17] = 0xFF.toByte()
+        packet[18] = 0xFF.toByte()
+        packet[19] = 0xFF.toByte()
+
+        val result = VpnTestUtils.parseDestinationIp(packet, packet.size)
+        assertEquals("255.255.255.255", result)
     }
 
     @Test
@@ -523,7 +585,7 @@ class VpnServiceTest {
         packet[14] = 0.toByte()
         packet[15] = 1.toByte()
 
-        val result = parseSourceIp(packet, packet.size)
+        val result = VpnTestUtils.parseSourceIp(packet, packet.size)
         assertEquals("10.0.0.1", result)
     }
 
@@ -532,7 +594,7 @@ class VpnServiceTest {
         val packet = ByteArray(40)
         packet[0] = 0x60  // IPv6
 
-        val result = parseSourceIp(packet, packet.size)
+        val result = VpnTestUtils.parseSourceIp(packet, packet.size)
         assertNull(result)
     }
 
@@ -542,7 +604,7 @@ class VpnServiceTest {
         packet[0] = 0x45
         packet[9] = 6  // TCP
 
-        val result = parseProtocol(packet)
+        val result = VpnTestUtils.parseProtocol(packet)
         assertEquals(6, result)
     }
 
@@ -552,8 +614,25 @@ class VpnServiceTest {
         packet[0] = 0x45
         packet[9] = 17  // UDP
 
-        val result = parseProtocol(packet)
+        val result = VpnTestUtils.parseProtocol(packet)
         assertEquals(17, result)
+    }
+
+    @Test
+    fun packetParsing_parseProtocol_icmp() {
+        val packet = ByteArray(40)
+        packet[0] = 0x45
+        packet[9] = 1  // ICMP
+
+        val result = VpnTestUtils.parseProtocol(packet)
+        assertEquals(1, result)
+    }
+
+    @Test
+    fun packetParsing_parseProtocol_packetTooShort() {
+        val packet = ByteArray(9)
+        val result = VpnTestUtils.parseProtocol(packet)
+        assertEquals(0, result)
     }
 
     @Test
@@ -564,8 +643,72 @@ class VpnServiceTest {
         packet[22] = 1.toByte()   // 0x01
         packet[23] = 0xBB.toByte() // 0xBB = 187, 1*256 + 187 = 443
 
-        val result = parseDestinationPort(packet, packet.size)
+        val result = VpnTestUtils.parseDestinationPort(packet, packet.size)
         assertEquals(443, result)
+    }
+
+    @Test
+    fun packetParsing_parseDestinationPort_httpPort80() {
+        val packet = ByteArray(40)
+        packet[0] = 0x45  // IHL = 5 (20 bytes)
+
+        // TCP 目标端口在字节 22-23 (20 + 2)
+        // 端口 80 = 0x0050
+        packet[22] = 0x00.toByte()
+        packet[23] = 0x50.toByte()
+
+        val result = VpnTestUtils.parseDestinationPort(packet, packet.size)
+        assertEquals(80, result)
+    }
+
+    @Test
+    fun packetParsing_parseDestinationPort_dnsPort53() {
+        val packet = ByteArray(40)
+        packet[0] = 0x45
+
+        // 端口 53 = 0x0035
+        packet[22] = 0x00.toByte()
+        packet[23] = 0x35.toByte()
+
+        val result = VpnTestUtils.parseDestinationPort(packet, packet.size)
+        assertEquals(53, result)
+    }
+
+    @Test
+    fun packetParsing_parseDestinationPort_highPort() {
+        val packet = ByteArray(40)
+        packet[0] = 0x45
+
+        // 端口 65535 = 0xFFFF
+        packet[22] = 0xFF.toByte()
+        packet[23] = 0xFF.toByte()
+
+        val result = VpnTestUtils.parseDestinationPort(packet, packet.size)
+        assertEquals(65535, result)
+    }
+
+    @Test
+    fun packetParsing_parseDestinationPort_maximumValue() {
+        val packet = ByteArray(40)
+        packet[0] = 0x45
+
+        packet[22] = 0xFF.toByte()
+        packet[23] = 0xFF.toByte()
+
+        val result = VpnTestUtils.parseDestinationPort(packet, packet.size)
+        assertEquals(65535, result)
+    }
+
+    @Test
+    fun packetParsing_parseDestinationPort_minimumValue() {
+        val packet = ByteArray(40)
+        packet[0] = 0x45
+
+        packet[22] = 0x00
+        packet[23] = 0x00
+
+        val result = VpnTestUtils.parseDestinationPort(packet, packet.size)
+        assertEquals(0, result)
     }
 
     @Test
@@ -573,8 +716,21 @@ class VpnServiceTest {
         val packet = ByteArray(21)
         packet[0] = 0x45
 
-        val result = parseDestinationPort(packet, packet.size)
+        val result = VpnTestUtils.parseDestinationPort(packet, packet.size)
         assertNull(result)
+    }
+
+    @Test
+    fun packetParsing_parseDestinationPort_withOptionsHeader() {
+        val packet = ByteArray(44)
+        packet[0] = 0x46  // IHL = 6 (24 bytes header)
+
+        // TCP 目标端口在字节 26-27 (24 + 2, 因为源端口占2字节)
+        packet[26] = 0x01.toByte()
+        packet[27] = 0xBB.toByte()
+
+        val result = VpnTestUtils.parseDestinationPort(packet, packet.size)
+        assertEquals(443, result)
     }
 
     @Test
@@ -585,8 +741,21 @@ class VpnServiceTest {
         packet[20] = 0x30.toByte() // 48
         packet[21] = 0x39.toByte() // 57, 48*256 + 57 = 12345
 
-        val result = parseSourcePort(packet, packet.size)
+        val result = VpnTestUtils.parseSourcePort(packet, packet.size)
         assertEquals(12345, result)
+    }
+
+    @Test
+    fun packetParsing_parseSourcePort_ephemeralPort() {
+        val packet = ByteArray(40)
+        packet[0] = 0x45
+
+        // 端口 49152 = 0xC000
+        packet[20] = 0xC0.toByte()
+        packet[21] = 0x00.toByte()
+
+        val result = VpnTestUtils.parseSourcePort(packet, packet.size)
+        assertEquals(49152, result)
     }
 
     @Test
@@ -597,7 +766,7 @@ class VpnServiceTest {
         // TCP Data Offset = 5 (20 bytes), 位于字节 12 的高 4 位
         packet[32] = 0x50.toByte() // Data Offset = 5
 
-        val result = extractTransportPayloadInfo(packet, packet.size)
+        val result = VpnTestUtils.extractTransportPayloadInfo(packet, packet.size)
         assertNotNull(result)
         assertEquals(40, result?.first)  // 20 (IP) + 20 (TCP)
         assertEquals(20, result?.second) // 60 - 40 = 20
@@ -609,7 +778,7 @@ class VpnServiceTest {
         packet[0] = 0x45  // IHL = 5 (20 bytes)
         packet[9] = 17    // UDP
 
-        val result = extractTransportPayloadInfo(packet, packet.size)
+        val result = VpnTestUtils.extractTransportPayloadInfo(packet, packet.size)
         assertNotNull(result)
         assertEquals(28, result?.first)  // 20 (IP) + 8 (UDP)
         assertEquals(12, result?.second) // 40 - 28 = 12
@@ -621,15 +790,30 @@ class VpnServiceTest {
         packet[0] = 0x45
         packet[9] = 17  // UDP
 
-        val result = extractTransportPayloadInfo(packet, packet.size)
+        val result = VpnTestUtils.extractTransportPayloadInfo(packet, packet.size)
         assertNull(result)  // 没有 payload
     }
 
     @Test
     fun packetParsing_extractTransportPayloadInfo_packetTooShort() {
         val packet = ByteArray(10)
-        val result = extractTransportPayloadInfo(packet, packet.size)
+        val result = VpnTestUtils.extractTransportPayloadInfo(packet, packet.size)
         assertNull(result)
+    }
+
+    @Test
+    fun packetParsing_extractTransportPayloadInfo_tcpWithOptions() {
+        val packet = ByteArray(80)
+        packet[0] = 0x45
+        packet[9] = 6  // TCP
+
+        // TCP Data Offset = 8 (32 bytes with options)
+        packet[32] = (8 shl 4).toByte()
+
+        val result = VpnTestUtils.extractTransportPayloadInfo(packet, packet.size)
+        assertNotNull(result)
+        assertEquals(52, result?.first)   // 20 (IP) + 32 (TCP with options)
+        assertEquals(28, result?.second)  // 80 - 52 = 28
     }
 
     // ==================== 校验和计算测试 ====================
@@ -638,7 +822,7 @@ class VpnServiceTest {
     fun checksumCalculation_calculateChecksum_simpleCase() {
         // 测试简单的校验和计算
         val data = byteArrayOf(0x45, 0x00, 0x00, 0x3c, 0x1c, 0x46)
-        val checksum = calculateChecksum(data, 0, data.size)
+        val checksum = VpnTestUtils.calculateChecksum(data, 0, data.size)
 
         // 验证校验和是 16 位值
         assertTrue(checksum in 0..65535)
@@ -648,7 +832,7 @@ class VpnServiceTest {
     fun checksumCalculation_calculateChecksum_withOddLength() {
         // 测试奇数长度的数据
         val data = byteArrayOf(0x45, 0x00, 0x00)
-        val checksum = calculateChecksum(data, 0, data.size)
+        val checksum = VpnTestUtils.calculateChecksum(data, 0, data.size)
 
         assertTrue(checksum in 0..65535)
     }
@@ -681,7 +865,22 @@ class VpnServiceTest {
         ipHeader[18] = 0x01
         ipHeader[19] = 0x01
 
-        val checksum = calculateChecksum(ipHeader, 0, 20)
+        val checksum = VpnTestUtils.calculateChecksum(ipHeader, 0, 20)
+        assertTrue(checksum in 0..65535)
+
+        // 将计算出的校验和写回头部并重新计算，应该得到 0
+        ipHeader[10] = (checksum shr 8).toByte()
+        ipHeader[11] = (checksum and 0xFF).toByte()
+
+        val verificationChecksum = VpnTestUtils.calculateChecksum(ipHeader, 0, 20)
+        assertEquals(0, verificationChecksum)
+    }
+
+    @Test
+    fun checksumCalculation_calculateChecksum_zeroData() {
+        val data = ByteArray(20) { 0x00 }
+        val checksum = VpnTestUtils.calculateChecksum(data, 0, data.size)
+
         assertTrue(checksum in 0..65535)
     }
 
@@ -716,8 +915,90 @@ class VpnServiceTest {
         buffer[38] = 0x00
         buffer[39] = 0x00
 
-        val checksum = calculateTcpChecksum(buffer, srcIp, dstIp, 6, 20, 0)
+        val checksum = VpnTestUtils.calculateTcpChecksum(buffer, srcIp, dstIp, 6, 20, 0)
         assertTrue(checksum in 0..65535)
+    }
+
+    @Test
+    fun checksumCalculation_calculateTcpChecksum_withPayload() {
+        val buffer = ByteArray(60)
+        val srcIp = listOf(10, 0, 0, 1)
+        val dstIp = listOf(192, 168, 1, 1)
+
+        // TCP 头
+        buffer[20] = 0x30.toByte()
+        buffer[21] = 0x39.toByte()
+        buffer[22] = 0x01.toByte()
+        buffer[23] = 0xBB.toByte()
+        buffer[32] = 0x50  // Data offset = 5
+
+        // Payload (20 bytes)
+        for (i in 40 until 60) {
+            buffer[i] = (i % 256).toByte()
+        }
+
+        val checksum = VpnTestUtils.calculateTcpChecksum(buffer, srcIp, dstIp, 6, 20, 20)
+
+        assertTrue(checksum in 0..65535)
+    }
+
+    @Test
+    fun checksumCalculation_calculateTcpChecksum_ipv4Options() {
+        val buffer = ByteArray(64)
+        val srcIp = listOf(10, 0, 0, 1)
+        val dstIp = listOf(192, 168, 1, 1)
+
+        // IPv4 IHL = 6, TCP starts at offset 24.
+        buffer[0] = 0x46
+
+        // 20..23 是 IPv4 options，不应被 TCP 校验和覆盖
+        buffer[20] = 0x11
+        buffer[21] = 0x22
+        buffer[22] = 0x33
+        buffer[23] = 0x44
+
+        // TCP header (20 bytes) from offset 24
+        buffer[24] = 0x30.toByte()
+        buffer[25] = 0x39.toByte()
+        buffer[26] = 0x01.toByte()
+        buffer[27] = 0xBB.toByte()
+        buffer[36] = 0x50
+
+        val checksum = VpnTestUtils.calculateTcpChecksum(buffer, srcIp, dstIp, 6, 20, 0)
+        val expected = computeTcpChecksumExpected(buffer, srcIp, dstIp, 6, 24, 20)
+
+        assertEquals(expected, checksum)
+    }
+
+    private fun computeTcpChecksumExpected(
+        buffer: ByteArray,
+        srcIp: List<Int>,
+        dstIp: List<Int>,
+        protocol: Int,
+        tcpStartOffset: Int,
+        tcpSegmentLength: Int,
+    ): Int {
+        var sum = 0
+        sum += (srcIp[0] shl 8) or srcIp[1]
+        sum += (srcIp[2] shl 8) or srcIp[3]
+        sum += (dstIp[0] shl 8) or dstIp[1]
+        sum += (dstIp[2] shl 8) or dstIp[3]
+        sum += protocol
+        sum += tcpSegmentLength
+
+        for (i in tcpStartOffset until tcpStartOffset + tcpSegmentLength step 2) {
+            if (i + 1 < buffer.size) {
+                sum += ((buffer[i].toInt() and 0xFF) shl 8) or (buffer[i + 1].toInt() and 0xFF)
+            } else if (i < buffer.size) {
+                sum += (buffer[i].toInt() and 0xFF) shl 8
+            }
+        }
+
+        while (sum shr 16 != 0) {
+            sum = (sum and 0xFFFF) + (sum shr 16)
+        }
+
+        return sum.inv() and 0xFFFF
     }
 
     // ==================== SOCKS5 集成测试 ====================
@@ -799,6 +1080,96 @@ class VpnServiceTest {
         )
 
         assertFalse(connection.isValid())
+    }
+
+    // ==================== SOCKS5 连接池 Mock 测试 (来自 VpnServiceCoreTest) ====================
+
+    @Test
+    fun socks5ConnectionPoolMock_borrowConnection_returnsConnection() {
+        val mockPool = mockk<Socks5ConnectionPool>(relaxed = true)
+        val mockSocket = mockk<Socket>(relaxed = true)
+        val mockConnection = mockk<PooledSocks5Connection>(relaxed = true)
+
+        every { mockConnection.socket } returns mockSocket
+        every { mockConnection.isValid() } returns true
+        every { mockConnection.destinationIp } returns "192.168.1.1"
+        every { mockConnection.destinationPort } returns 443
+        every { mockPool.borrowConnection(any(), any(), any()) } returns mockConnection
+
+        val result = mockPool.borrowConnection(
+            destinationIp = "192.168.1.1",
+            destinationPort = 443,
+            protectSocket = null
+        )
+
+        assertNotNull(result)
+        assertEquals("192.168.1.1", result?.destinationIp)
+        assertEquals(443, result?.destinationPort)
+    }
+
+    @Test
+    fun socks5ConnectionPoolMock_borrowConnection_noCredentials_returnsNull() {
+        val mockPool = mockk<Socks5ConnectionPool>(relaxed = true)
+
+        every { mockPool.borrowConnection(any(), any(), any()) } returns null
+
+        val result = mockPool.borrowConnection(
+            destinationIp = "192.168.1.1",
+            destinationPort = 443,
+            protectSocket = null
+        )
+
+        assertNull(result)
+    }
+
+    @Test
+    fun socks5ConnectionPoolMock_returnConnection_validConnection_returnsToPool() {
+        val mockPool = mockk<Socks5ConnectionPool>(relaxed = true)
+        val mockSocket = mockk<Socket>(relaxed = true)
+        val mockConnection = mockk<PooledSocks5Connection>(relaxed = true)
+
+        every { mockConnection.socket } returns mockSocket
+        every { mockConnection.isValid() } returns true
+        every { mockConnection.inUse } returns java.util.concurrent.atomic.AtomicBoolean(true)
+        every { mockConnection.markReturned() } returns Unit
+        every { mockPool.returnConnection(mockConnection) } returns Unit
+
+        mockPool.returnConnection(mockConnection)
+
+        verify { mockPool.returnConnection(mockConnection) }
+    }
+
+    @Test
+    fun socks5ConnectionPoolMock_connectionReuse_sameDestinationReusesConnection() {
+        val mockPool = mockk<Socks5ConnectionPool>(relaxed = true)
+        val mockConnection = mockk<PooledSocks5Connection>(relaxed = true)
+
+        every { mockConnection.isValid() } returns true
+        every { mockPool.borrowConnection("192.168.1.1", 443, any()) } returns mockConnection
+
+        // 第一次借用
+        val conn1 = mockPool.borrowConnection("192.168.1.1", 443, null)
+        assertNotNull(conn1)
+
+        // 归还
+        mockPool.returnConnection(conn1!!)
+
+        // 第二次借用（应该复用）
+        val conn2 = mockPool.borrowConnection("192.168.1.1", 443, null)
+        assertNotNull(conn2)
+    }
+
+    @Test
+    fun socks5ConnectionPoolMock_connectionInvalid_closesAndRemoves() {
+        val mockPool = mockk<Socks5ConnectionPool>(relaxed = true)
+        val mockConnection = mockk<PooledSocks5Connection>(relaxed = true)
+
+        every { mockConnection.isValid() } returns false
+        every { mockConnection.close() } returns Unit
+        every { mockPool.borrowConnection(any(), any(), any()) } returns null
+
+        val result = mockPool.borrowConnection("192.168.1.1", 443, null)
+        assertNull(result)
     }
 
     // ==================== 工具方法测试 ====================
@@ -970,34 +1341,34 @@ class VpnServiceTest {
     @Test
     fun idleDelayCalculation_calculateIdleDelay_noIdle() {
         // 空闲轮数为 0 时，延迟为 1ms
-        val delay = calculateIdleDelay(0)
+        val delay = VpnTestUtils.calculateIdleDelay(0)
         assertEquals(1L, delay)
     }
 
     @Test
     fun idleDelayCalculation_calculateIdleDelay_increasingDelay() {
         // 空闲延迟应该指数增长
-        assertEquals(1L, calculateIdleDelay(0))
-        assertEquals(2L, calculateIdleDelay(1))
-        assertEquals(4L, calculateIdleDelay(2))
-        assertEquals(8L, calculateIdleDelay(3))
-        assertEquals(16L, calculateIdleDelay(4))
-        assertEquals(32L, calculateIdleDelay(5))
-        assertEquals(64L, calculateIdleDelay(6))
+        assertEquals(1L, VpnTestUtils.calculateIdleDelay(0))
+        assertEquals(2L, VpnTestUtils.calculateIdleDelay(1))
+        assertEquals(4L, VpnTestUtils.calculateIdleDelay(2))
+        assertEquals(8L, VpnTestUtils.calculateIdleDelay(3))
+        assertEquals(16L, VpnTestUtils.calculateIdleDelay(4))
+        assertEquals(32L, VpnTestUtils.calculateIdleDelay(5))
+        assertEquals(64L, VpnTestUtils.calculateIdleDelay(6))
     }
 
     @Test
     fun idleDelayCalculation_calculateIdleDelay_maxDelay() {
         // 延迟不应该超过最大值 100ms
-        val delay = calculateIdleDelay(100)
+        val delay = VpnTestUtils.calculateIdleDelay(100)
         assertEquals(100L, delay)
     }
 
     @Test
     fun idleDelayCalculation_calculateIdleDelay_boundaryValues() {
         // 测试边界值
-        assertTrue(calculateIdleDelay(10) <= 100L)
-        assertTrue(calculateIdleDelay(31) <= 100L) // 最大值限制
+        assertTrue(VpnTestUtils.calculateIdleDelay(10) <= 100L)
+        assertTrue(VpnTestUtils.calculateIdleDelay(31) <= 100L) // 最大值限制
     }
 
     // ==================== 虚拟 IP 分配测试 ====================
@@ -1007,20 +1378,20 @@ class VpnServiceTest {
         // 模拟虚拟 IP 池的行为
         val virtualIpPool = HashMap<String, String>()
         val reverseIpMap = HashMap<String, String>()
-        val nextVirtualIp = java.util.concurrent.atomic.AtomicInteger(1)
+        val nextVirtualIp = AtomicInteger(1)
 
         // 第一次分配
-        val ip1 = getOrAllocateVirtualIp("8.8.8.8", virtualIpPool, reverseIpMap, nextVirtualIp)
+        val ip1 = VpnTestUtils.getOrAllocateVirtualIp("8.8.8.8", virtualIpPool, reverseIpMap, nextVirtualIp)
         assertEquals("10.0.0.1", ip1)
         // virtualIpPool 的 key 是 realDstIp，value 是虚拟 IP
         assertEquals("10.0.0.1", virtualIpPool["8.8.8.8"])
 
         // 同一 IP 应该返回相同的虚拟 IP
-        val ip1Again = getOrAllocateVirtualIp("8.8.8.8", virtualIpPool, reverseIpMap, nextVirtualIp)
+        val ip1Again = VpnTestUtils.getOrAllocateVirtualIp("8.8.8.8", virtualIpPool, reverseIpMap, nextVirtualIp)
         assertEquals(ip1, ip1Again)
 
         // 不同 IP 应该分配新的虚拟 IP
-        val ip2 = getOrAllocateVirtualIp("1.1.1.1", virtualIpPool, reverseIpMap, nextVirtualIp)
+        val ip2 = VpnTestUtils.getOrAllocateVirtualIp("1.1.1.1", virtualIpPool, reverseIpMap, nextVirtualIp)
         assertEquals("10.0.0.2", ip2)
         assertFalse(ip1 == ip2)
     }
@@ -1029,12 +1400,68 @@ class VpnServiceTest {
     fun virtualIpAllocation_reverseMapping() {
         val virtualIpPool = HashMap<String, String>()
         val reverseIpMap = HashMap<String, String>()
-        val nextVirtualIp = java.util.concurrent.atomic.AtomicInteger(1)
+        val nextVirtualIp = AtomicInteger(1)
 
-        val virtualIp = getOrAllocateVirtualIp("8.8.8.8", virtualIpPool, reverseIpMap, nextVirtualIp)
+        val virtualIp = VpnTestUtils.getOrAllocateVirtualIp("8.8.8.8", virtualIpPool, reverseIpMap, nextVirtualIp)
 
         // 验证反向映射
         assertEquals("8.8.8.8", reverseIpMap[virtualIp])
+    }
+
+    @Test
+    fun virtualIpAllocation_firstAllocation_returns10_0_0_1() {
+        val virtualIpPool = ConcurrentHashMap<String, String>()
+        val reverseIpMap = ConcurrentHashMap<String, String>()
+        val nextVirtualIp = AtomicInteger(1)
+
+        val result = VpnTestUtils.getOrAllocateVirtualIp("8.8.8.8", virtualIpPool, reverseIpMap, nextVirtualIp)
+
+        assertEquals("10.0.0.1", result)
+        assertEquals("10.0.0.1", virtualIpPool["8.8.8.8"])
+        assertEquals("8.8.8.8", reverseIpMap["10.0.0.1"])
+    }
+
+    @Test
+    fun virtualIpAllocation_sameRealIp_returnsSameVirtualIp() {
+        val virtualIpPool = ConcurrentHashMap<String, String>()
+        val reverseIpMap = ConcurrentHashMap<String, String>()
+        val nextVirtualIp = AtomicInteger(1)
+
+        val ip1 = VpnTestUtils.getOrAllocateVirtualIp("8.8.8.8", virtualIpPool, reverseIpMap, nextVirtualIp)
+        val ip2 = VpnTestUtils.getOrAllocateVirtualIp("8.8.8.8", virtualIpPool, reverseIpMap, nextVirtualIp)
+
+        assertEquals(ip1, ip2)
+        assertEquals(1, virtualIpPool.size)
+    }
+
+    @Test
+    fun virtualIpAllocation_differentRealIps_returnsDifferentVirtualIps() {
+        val virtualIpPool = ConcurrentHashMap<String, String>()
+        val reverseIpMap = ConcurrentHashMap<String, String>()
+        val nextVirtualIp = AtomicInteger(1)
+
+        val ip1 = VpnTestUtils.getOrAllocateVirtualIp("8.8.8.8", virtualIpPool, reverseIpMap, nextVirtualIp)
+        val ip2 = VpnTestUtils.getOrAllocateVirtualIp("1.1.1.1", virtualIpPool, reverseIpMap, nextVirtualIp)
+
+        assertEquals("10.0.0.1", ip1)
+        assertEquals("10.0.0.2", ip2)
+        assertEquals(2, virtualIpPool.size)
+    }
+
+    @Test
+    fun virtualIpAllocation_multipleAllocations_incrementsCorrectly() {
+        val virtualIpPool = ConcurrentHashMap<String, String>()
+        val reverseIpMap = ConcurrentHashMap<String, String>()
+        val nextVirtualIp = AtomicInteger(1)
+
+        for (i in 1..10) {
+            val realIp = "192.168.1.$i"
+            val virtualIp = VpnTestUtils.getOrAllocateVirtualIp(realIp, virtualIpPool, reverseIpMap, nextVirtualIp)
+            assertEquals("10.0.0.$i", virtualIp)
+        }
+
+        assertEquals(10, virtualIpPool.size)
+        assertEquals(11, nextVirtualIp.get())
     }
 
     // ==================== IP 脱敏测试 ====================
@@ -1096,160 +1523,93 @@ class VpnServiceTest {
         assertFalse(stats1 == stats3)
     }
 
+    // ==================== 真实数据包测试 (来自 VpnServiceCoreTest) ====================
+
+    @Test
+    fun realPacket_tcpSynPacket_parsesCorrectly() {
+        // 构造一个真实的 TCP SYN 包
+        val packet = ByteArray(40)
+
+        // IP 头 (20 bytes)
+        packet[0] = 0x45  // Version 4, IHL 5
+        packet[1] = 0x00  // DSCP/ECN
+        packet[2] = 0x00  // Total length high
+        packet[3] = 0x28  // Total length low (40)
+        packet[4] = 0x00  // Identification
+        packet[5] = 0x00
+        packet[6] = 0x40  // Flags (DF)
+        packet[7] = 0x00
+        packet[8] = 0x40  // TTL = 64
+        packet[9] = 0x06  // Protocol = TCP
+        packet[10] = 0x00 // Checksum
+        packet[11] = 0x00
+
+        // Source IP: 10.0.0.2
+        packet[12] = 0x0A
+        packet[13] = 0x00
+        packet[14] = 0x00
+        packet[15] = 0x02
+
+        // Dest IP: 192.168.1.1
+        packet[16] = 0xC0.toByte()
+        packet[17] = 0xA8.toByte()
+        packet[18] = 0x01
+        packet[19] = 0x01
+
+        // TCP 头 (20 bytes)
+        // Source port: 54321 = 0xD431
+        packet[20] = 0xD4.toByte()
+        packet[21] = 0x31.toByte()
+
+        // Dest port: 80 = 0x0050
+        packet[22] = 0x00
+        packet[23] = 0x50
+
+        // 解析验证
+        assertEquals("192.168.1.1", VpnTestUtils.parseDestinationIp(packet, packet.size))
+        assertEquals("10.0.0.2", VpnTestUtils.parseSourceIp(packet, packet.size))
+        assertEquals(6, VpnTestUtils.parseProtocol(packet))
+        assertEquals(80, VpnTestUtils.parseDestinationPort(packet, packet.size))
+        assertEquals(54321, VpnTestUtils.parseSourcePort(packet, packet.size))
+    }
+
+    @Test
+    fun realPacket_udpDnsQuery_parsesCorrectly() {
+        // 构造一个 UDP DNS 查询包
+        val packet = ByteArray(40)
+
+        // IP 头
+        packet[0] = 0x45
+        packet[9] = 0x11  // Protocol = UDP
+
+        // Source IP: 10.0.0.2
+        packet[12] = 0x0A
+        packet[13] = 0x00
+        packet[14] = 0x00
+        packet[15] = 0x02
+
+        // Dest IP: 8.8.8.8
+        packet[16] = 0x08
+        packet[17] = 0x08
+        packet[18] = 0x08
+        packet[19] = 0x08
+
+        // UDP 头 (8 bytes)
+        // Source port: 12345
+        packet[20] = 0x30.toByte()
+        packet[21] = 0x39.toByte()
+
+        // Dest port: 53 (DNS)
+        packet[22] = 0x00
+        packet[23] = 0x35.toByte()
+
+        // 解析验证
+        assertEquals("8.8.8.8", VpnTestUtils.parseDestinationIp(packet, packet.size))
+        assertEquals(17, VpnTestUtils.parseProtocol(packet))
+        assertEquals(53, VpnTestUtils.parseDestinationPort(packet, packet.size))
+    }
+
     // ==================== 帮助方法 ====================
-
-    /**
-     * 解析目标 IP 地址（从 VpnService 复制用于测试）
-     */
-    private fun parseDestinationIp(packet: ByteArray, length: Int): String? {
-        if (length < 20) return null
-
-        val version = (packet[0].toInt() shr 4) and 0x0F
-        if (version != 4) return null
-
-        val headerLength = (packet[0].toInt() and 0x0F) * 4
-        if (length < headerLength || length < 20) return null
-
-        return "${packet[16].toInt() and 0xFF}.${packet[17].toInt() and 0xFF}.${packet[18].toInt() and 0xFF}.${packet[19].toInt() and 0xFF}"
-    }
-
-    /**
-     * 解析源 IP 地址（从 VpnService 复制用于测试）
-     */
-    private fun parseSourceIp(packet: ByteArray, length: Int): String? {
-        if (length < 20) return null
-        val version = (packet[0].toInt() shr 4) and 0x0F
-        if (version != 4) return null
-        return "${packet[12].toInt() and 0xFF}.${packet[13].toInt() and 0xFF}.${packet[14].toInt() and 0xFF}.${packet[15].toInt() and 0xFF}"
-    }
-
-    /**
-     * 解析协议（从 VpnService 复制用于测试）
-     */
-    private fun parseProtocol(packet: ByteArray): Int {
-        return packet[9].toInt() and 0xFF
-    }
-
-    /**
-     * 解析目标端口（从 VpnService 复制用于测试）
-     */
-    private fun parseDestinationPort(packet: ByteArray, length: Int): Int? {
-        if (length < 20) return null
-        val headerLength = (packet[0].toInt() and 0x0F) * 4
-        if (length < headerLength + 4) return null
-        return ((packet[headerLength + 2].toInt() and 0xFF) shl 8) or (packet[headerLength + 3].toInt() and 0xFF)
-    }
-
-    /**
-     * 解析源端口（从 VpnService 复制用于测试）
-     */
-    private fun parseSourcePort(packet: ByteArray, length: Int): Int? {
-        if (length < 20) return null
-        val headerLength = (packet[0].toInt() and 0x0F) * 4
-        if (length < headerLength + 2) return null
-        return ((packet[headerLength].toInt() and 0xFF) shl 8) or (packet[headerLength + 1].toInt() and 0xFF)
-    }
-
-    /**
-     * 提取传输层 payload 信息（从 VpnService 复制用于测试）
-     */
-    private fun extractTransportPayloadInfo(packet: ByteArray, length: Int): Pair<Int, Int>? {
-        if (length < 20) return null
-        val ipHeaderLength = (packet[0].toInt() and 0x0F) * 4
-        val protocol = parseProtocol(packet)
-        val transportHeaderLength = when (protocol) {
-            6 -> {
-                if (length < ipHeaderLength + 13) return null
-                ((packet[ipHeaderLength + 12].toInt() shr 4) and 0x0F) * 4
-            }
-            17 -> 8
-            else -> 0
-        }
-        val payloadStart = ipHeaderLength + transportHeaderLength
-        if (payloadStart >= length) return null
-        return Pair(payloadStart, length - payloadStart)
-    }
-
-    /**
-     * 计算 IP 校验和（从 VpnService 复制用于测试）
-     */
-    private fun calculateChecksum(data: ByteArray, offset: Int, length: Int): Int {
-        var sum = 0
-        var i = offset
-        while (i < offset + length - 1) {
-            sum += ((data[i].toInt() and 0xFF) shl 8) or (data[i + 1].toInt() and 0xFF)
-            i += 2
-        }
-        if (i < offset + length) {
-            sum += (data[i].toInt() and 0xFF) shl 8
-        }
-        while (sum shr 16 != 0) {
-            sum = (sum and 0xFFFF) + (sum shr 16)
-        }
-        return sum.inv() and 0xFFFF
-    }
-
-    /**
-     * 计算 TCP 校验和（从 VpnService 复制用于测试）
-     */
-    private fun calculateTcpChecksum(
-        buffer: ByteArray,
-        srcIp: List<Int>,
-        dstIp: List<Int>,
-        protocol: Int,
-        tcpHeaderLen: Int,
-        payloadLen: Int
-    ): Int {
-        var sum = 0
-
-        // 伪头
-        sum += (srcIp[0] shl 8) or srcIp[1]
-        sum += (srcIp[2] shl 8) or srcIp[3]
-        sum += (dstIp[0] shl 8) or dstIp[1]
-        sum += (dstIp[2] shl 8) or dstIp[3]
-        sum += protocol
-        sum += tcpHeaderLen + payloadLen
-
-        // TCP头和payload
-        for (i in 20 until 20 + tcpHeaderLen + payloadLen step 2) {
-            if (i + 1 < buffer.size) {
-                sum += ((buffer[i].toInt() and 0xFF) shl 8) or (buffer[i + 1].toInt() and 0xFF)
-            } else {
-                sum += (buffer[i].toInt() and 0xFF) shl 8
-            }
-        }
-
-        while (sum shr 16 != 0) {
-            sum = (sum and 0xFFFF) + (sum shr 16)
-        }
-        return sum.inv() and 0xFFFF
-    }
-
-    /**
-     * 计算空闲延迟（从 VpnService 复制用于测试）
-     */
-    private fun calculateIdleDelay(idleRounds: Int): Long {
-        if (idleRounds == 0) return 1L
-        val baseDelay = 2L
-        val exponent = kotlin.math.min(idleRounds - 1, 6)
-        return kotlin.math.min(baseDelay shl exponent, 100L)
-    }
-
-    /**
-     * 获取或分配虚拟 IP（从 VpnService 复制用于测试）
-     */
-    private fun getOrAllocateVirtualIp(
-        realDstIp: String,
-        virtualIpPool: MutableMap<String, String>,
-        reverseIpMap: MutableMap<String, String>,
-        nextVirtualIp: java.util.concurrent.atomic.AtomicInteger
-    ): String {
-        return virtualIpPool.getOrPut(realDstIp) {
-            val ip = "10.0.0.${nextVirtualIp.getAndIncrement()}"
-            reverseIpMap[ip] = realDstIp
-            ip
-        }
-    }
 
     /**
      * IP 脱敏（从 VpnService 复制用于测试）

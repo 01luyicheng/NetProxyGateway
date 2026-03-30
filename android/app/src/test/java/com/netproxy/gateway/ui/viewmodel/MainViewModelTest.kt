@@ -49,6 +49,7 @@ class MainViewModelTest {
         every { networkStateManager.networkState } returns emptyFlow()
         every { mqttConnectionManager.connectionState } returns MutableStateFlow(MqttConnectionState.Disconnected)
         every { wifiManager.getCurrentConnection() } returns null
+        every { authSessionStore.getOrCreateDeviceId() } returns "device-stable"
         every { mqttConnectionManager.connect(any(), any()) } just runs
         every { authSessionStore.update(any(), any()) } just runs
         every { authSessionStore.clear() } just runs
@@ -73,7 +74,7 @@ class MainViewModelTest {
         val uiState = viewModel.uiState.value
         assertEquals("123456", uiState.peerId)
         assertFalse(uiState.isPaired)
-        verify(exactly = 1) { mqttConnectionManager.connect(any(), "123456") }
+        verify(exactly = 1) { mqttConnectionManager.connect("device-stable", "123456") }
     }
 
     @Test
@@ -104,5 +105,15 @@ class MainViewModelTest {
         assertFalse(uiState.isPaired)
         assertEquals("需要蜂窝网络连接", uiState.errorMessage)
         verify(exactly = 0) { mqttConnectionManager.connect(any(), any()) }
+    }
+
+    @Test
+    fun init_usesStableDeviceIdFromStore() = runTest {
+        every { authSessionStore.getOrCreateDeviceId() } returns "persisted-device-id"
+
+        val viewModel = MainViewModel(context, networkStateManager, mqttConnectionManager, wifiManager, authSessionStore)
+        advanceUntilIdle()
+
+        assertEquals("persisted-device-id", viewModel.uiState.value.deviceId)
     }
 }

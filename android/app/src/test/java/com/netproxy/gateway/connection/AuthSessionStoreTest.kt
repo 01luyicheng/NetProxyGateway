@@ -70,6 +70,7 @@ class AuthSessionStoreTest {
         editor = mockk(relaxed = true)
         every { editor.putString(any(), any()) } returns editor
         every { editor.clear() } returns editor
+        every { editor.remove(any()) } returns editor
         every { editor.apply() } just runs
 
         // Mock EncryptedSharedPreferences
@@ -215,10 +216,9 @@ class AuthSessionStoreTest {
 
         // 验证 EncryptedSharedPreferences.edit() 被调用
         verify { encryptedPrefs.edit() }
-        // 验证 putString 被调用两次（deviceId 和 authToken）
+        verify { editor.putString("installation_device_id", deviceId) }
         verify { editor.putString("device_id", deviceId) }
         verify { editor.putString("auth_token", authToken) }
-        // 验证 apply() 被调用
         verify { editor.apply() }
     }
 
@@ -276,8 +276,8 @@ class AuthSessionStoreTest {
         // 清除会话
         authSessionStore.clear()
 
-        // 验证 clear() 被调用
-        verify { editor.clear() }
+        verify { editor.remove("device_id") }
+        verify { editor.remove("auth_token") }
         verify { editor.apply() }
     }
 
@@ -286,8 +286,8 @@ class AuthSessionStoreTest {
         // 直接清除，不设置会话
         authSessionStore.clear()
 
-        // 验证 clear() 被调用
-        verify { editor.clear() }
+        verify { editor.remove("device_id") }
+        verify { editor.remove("auth_token") }
         verify { editor.apply() }
     }
 
@@ -300,7 +300,42 @@ class AuthSessionStoreTest {
 
         assertTrue(result.isSuccess())
         assertEquals(Unit, result.getOrNull())
-        verify { editor.clear() }
+        verify { editor.remove("device_id") }
+        verify { editor.remove("auth_token") }
+        verify { editor.apply() }
+    }
+
+    @Test
+    fun getOrCreateDeviceId_withStoredValue_shouldReuseStoredValue() {
+        every { encryptedPrefs.getString("installation_device_id", null) } returns "device-stable"
+
+        val deviceId = authSessionStore.getOrCreateDeviceId()
+
+        assertEquals("device-stable", deviceId)
+        verify(exactly = 0) { editor.putString("installation_device_id", any()) }
+    }
+
+    @Test
+    fun getOrCreateDeviceId_withoutStoredValue_shouldGenerateAndPersistValue() {
+        every { encryptedPrefs.getString("installation_device_id", null) } returns null
+
+        val deviceId = authSessionStore.getOrCreateDeviceId()
+
+        assertTrue(deviceId.isNotBlank())
+        verify { editor.putString("installation_device_id", deviceId) }
+    }
+
+    @Test
+    fun clear_shouldAlsoRemoveInstallationDeviceId() {
+        every { encryptedPrefs.getString("installation_device_id", null) } returns "device-stable"
+        authSessionStore.update("device-stable", "token-abc")
+
+        authSessionStore.clear()
+
+        // 验证 installation_device_id 也被清理
+        verify { editor.remove("installation_device_id") }
+        verify { editor.remove("device_id") }
+        verify { editor.remove("auth_token") }
         verify { editor.apply() }
     }
 

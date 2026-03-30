@@ -18,6 +18,7 @@ import (
 type Config struct {
 	Addr        string
 	APIEndpoint string
+	InternalAPIKey string
 	TLSCert     string
 	TLSKey      string
 	EnableTLS   bool
@@ -148,11 +149,20 @@ func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string) 
 		}
 		
 		data, _ := json.Marshal(payload)
-		resp, err := client.Post(
+		req, err := http.NewRequest(
+			http.MethodPost,
 			m.config.APIEndpoint+"/api/device/status",
-			"application/json",
 			bytes.NewReader(data),
 		)
+		if err != nil {
+			log.Printf("Failed to build device status request: %v", err)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if m.config.InternalAPIKey != "" {
+			req.Header.Set("X-Internal-API-Key", m.config.InternalAPIKey)
+		}
+		resp, err := client.Do(req)
 		if err != nil {
 			log.Printf("Failed to notify device status: %v", err)
 			return
@@ -165,20 +175,26 @@ func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string) 
 func (m *TunnelManager) cleanupDeadTunnels() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
-	
+
 	for range ticker.C {
+		var deadTunnels []*TunnelConn
+		var deadIDs []string
+
 		m.mu.Lock()
 		for deviceID, tunnel := range m.tunnels {
 			if !tunnel.IsAlive(m.config.HeartbeatTimeout) {
 				log.Printf("Cleaning up dead tunnel for device: %s", deviceID)
-				tunnel.Close()
+				deadTunnels = append(deadTunnels, tunnel)
+				deadIDs = append(deadIDs, deviceID)
 				delete(m.tunnels, deviceID)
-				
-				// 通知API
-				go m.notifyDeviceStatus(deviceID, "offline", "")
 			}
 		}
 		m.mu.Unlock()
+
+		for i, tunnel := range deadTunnels {
+			tunnel.Close()
+			go m.notifyDeviceStatus(deadIDs[i], "offline", "")
+		}
 	}
 }
 
@@ -329,6 +345,19 @@ func (s *Server) sendLoop(tunnel *TunnelConn) {
 	for {
 		select {
 		case data := <-tunnel.sendChan:
+			// 在写入前检查连接是否已关闭
+			select {
+			case <-tunnel.closeChan:
+				return
+			default:
+			}
+			
+			// 再次检查 Conn 是否为 nil
+			if tunnel.Conn == nil {
+				log.Printf("Cannot write message: connection is nil")
+				return
+			}
+			
 			if err := tunnel.Conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
 				log.Printf("Failed to write message: %v", err)
 				return
@@ -508,6 +537,7 @@ func main() {
 	if envAPI := os.Getenv("API_ENDPOINT"); envAPI != "" {
 		*apiEndpoint = envAPI
 	}
+	internalAPIKey := os.Getenv("INTERNAL_API_KEY")
 	
 	// 读取TLS配置（环境变量优先）
 	envEnableTLS := os.Getenv("ENABLE_TLS")
@@ -542,6 +572,7 @@ func main() {
 	config := &Config{
 		Addr:              *addr,
 		APIEndpoint:       *apiEndpoint,
+		InternalAPIKey:    internalAPIKey,
 		EnableTLS:         enableTLS,
 		TLSCert:           finalTLSCert,
 		TLSKey:            finalTLSKey,

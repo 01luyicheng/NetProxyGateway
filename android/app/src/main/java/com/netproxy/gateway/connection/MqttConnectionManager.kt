@@ -93,6 +93,14 @@ class MqttConnectionManager @Inject constructor(
      * TODO: 上线前将BuildConfig.MQTT_TRUST_ALL_CERTS改为false
      */
     private fun createSecureSocketFactory(): SSLSocketFactory {
+        // 安全检查：生产环境(DEBUG=false)且启用信任所有证书时抛出异常
+        if (!BuildConfig.DEBUG && BuildConfig.MQTT_TRUST_ALL_CERTS) {
+            throw IllegalStateException(
+                "TRUST_ALL_CERTS is not allowed in production builds. " +
+                "Please set MQTT_TRUST_ALL_CERTS to false in build configuration."
+            )
+        }
+
         return if (BuildConfig.MQTT_TRUST_ALL_CERTS) {
             // 开发模式：信任所有证书（支持自签名证书）
             createDevSocketFactory()
@@ -131,6 +139,7 @@ class MqttConnectionManager @Inject constructor(
     /**
      * 开发环境：信任所有证书（仅用于开发测试）
      * 警告：此方式不安全，仅用于开发环境连接自签名证书服务器
+     * 安全限制：仅在 BuildConfig.DEBUG 为 true 时允许使用
      */
     private fun createDevSocketFactory(): SSLSocketFactory {
         logger.warn("Using development SSL socket factory - trusts all certificates!")

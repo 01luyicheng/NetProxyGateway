@@ -98,12 +98,12 @@ class Socks5ConnectionPool(
     }
     
     /**
-     * 获取或创建SOCKS5连接
+     * 获取或创建 SOCKS5 连接
      * 
-     * @param destinationIp 目标IP地址
+     * @param destinationIp 目标 IP 地址
      * @param destinationPort 目标端口
-     * @param protectSocket 可选的socket保护函数（用于VPN场景）
-     * @return 可用的SOCKS5连接，使用完毕后必须调用returnConnection归还
+     * @param protectSocket 可选的 socket 保护函数（用于 VPN 场景）
+     * @return 可用的 SOCKS5 连接，使用完毕后必须调用 returnConnection 归还
      */
     fun borrowConnection(
         destinationIp: String,
@@ -117,6 +117,7 @@ class Socks5ConnectionPool(
         val destKey = "$destinationIp:$destinationPort"
         
         // 首先尝试从池中获取可用连接
+        val invalidConnections = mutableListOf<PooledSocks5Connection>()
         val connection = poolLock.read {
             val queue = availableConnections[destKey]
             if (queue != null) {
@@ -127,12 +128,23 @@ class Socks5ConnectionPool(
                         conn.markUsed()
                         return@read conn
                     } else {
-                        // 无效连接，清理
-                        removeConnection(conn)
+                        // 收集无效连接，稍后清理
+                        invalidConnections.add(conn)
                     }
                 }
             }
             null
+        }
+        
+        // 在读锁外清理无效连接，避免在读锁内获取写锁
+        if (invalidConnections.isNotEmpty()) {
+            poolLock.write {
+                invalidConnections.forEach { conn ->
+                    allConnections.remove(conn)
+                    totalConnections.decrementAndGet()
+                    conn.close()
+                }
+            }
         }
         
         if (connection != null) {

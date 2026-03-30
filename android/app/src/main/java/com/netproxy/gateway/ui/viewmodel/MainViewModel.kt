@@ -20,7 +20,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.security.SecureRandom
-import java.util.UUID
 import javax.inject.Inject
 
 data class UiState(
@@ -52,7 +51,7 @@ class MainViewModel @Inject constructor(
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
     init {
-        val deviceId = UUID.randomUUID().toString()
+        val deviceId = authSessionStore.getOrCreateDeviceId()
         _uiState.value = _uiState.value.copy(deviceId = deviceId)
         
         observeNetworkState()

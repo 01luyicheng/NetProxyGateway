@@ -54,7 +54,7 @@ type TokenInfo struct {
 
 // NewAPISessionStore 创建API会话存储
 func NewAPISessionStore(apiEndpoint string) *APISessionStore {
-	return &APISessionStore{
+	s := &APISessionStore{
 		apiEndpoint: apiEndpoint,
 		tokenCache:  make(map[string]*TokenInfo),
 		httpClient: &http.Client{
@@ -65,6 +65,25 @@ func NewAPISessionStore(apiEndpoint string) *APISessionStore {
 				},
 			},
 		},
+	}
+	go s.cleanupLoop()
+	return s
+}
+
+// cleanupLoop 定期清理过期的缓存条目
+func (s *APISessionStore) cleanupLoop() {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		s.cacheMu.Lock()
+		now := time.Now()
+		for key, info := range s.tokenCache {
+			if now.After(info.ExpiresAt) {
+				delete(s.tokenCache, key)
+			}
+		}
+		s.cacheMu.Unlock()
 	}
 }
 
@@ -276,6 +295,7 @@ type StreamConn struct {
 	TunnelConn  *websocket.Conn
 	DataChan    chan []byte
 	CloseChan   chan struct{}
+	Connected   chan bool
 	Closed      int32
 	WriteBuffer []byte
 	mu          sync.Mutex
@@ -289,6 +309,7 @@ func NewStreamConn(streamID, deviceID string, tunnelConn *websocket.Conn) *Strea
 		TunnelConn: tunnelConn,
 		DataChan:   make(chan []byte, 100),
 		CloseChan:  make(chan struct{}),
+		Connected:  make(chan bool, 1),
 	}
 }
 
@@ -565,11 +586,19 @@ func (tc *TunnelClient) handleConnectResponse(data json.RawMessage) {
 
 	if !resp.Success {
 		log.Printf("Connection failed for stream %s: %s", resp.StreamID, resp.Error)
+		select {
+		case stream.Connected <- false:
+		default:
+		}
 		stream.Close()
 		return
 	}
 
 	log.Printf("Connection established for stream %s", resp.StreamID)
+	select {
+	case stream.Connected <- true:
+	default:
+	}
 }
 
 // handleData 处理数据消息
@@ -680,11 +709,15 @@ func (tc *TunnelClient) ConnectThroughTunnel(deviceID, token, dstAddr string, ds
 		delete(tc.streams, streamID)
 		tc.mu.Unlock()
 		return nil, fmt.Errorf("connection timeout")
-	default:
-		// 继续检查连接状态
+	case success := <-streamConn.Connected:
+		if !success {
+			tc.mu.Lock()
+			delete(tc.streams, streamID)
+			tc.mu.Unlock()
+			return nil, fmt.Errorf("connection failed")
+		}
+		return streamConn, nil
 	}
-
-	return streamConn, nil
 }
 
 // RemoveStream 移除流

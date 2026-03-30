@@ -71,7 +71,8 @@ type Server struct {
 	loginAttempts   map[string]*LoginAttempt // ip -> attempts
 	loginAttemptsMu sync.RWMutex
 
-	jwtSecret []byte
+	jwtSecret      []byte
+	internalAPIKey []byte
 }
 
 // NewServer 创建新服务器
@@ -114,6 +115,7 @@ func NewServer() (*Server, error) {
 		db:              db,
 		loginAttempts:   make(map[string]*LoginAttempt),
 		jwtSecret:       []byte(jwtSecret),
+		internalAPIKey:  []byte(os.Getenv("INTERNAL_API_KEY")),
 	}, nil
 }
 
@@ -471,6 +473,24 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 		}
 
 		c.Next()
+	}
+}
+
+func (s *Server) internalOrUserAuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		internalKey := c.GetHeader("X-Internal-API-Key")
+		if len(s.internalAPIKey) > 0 && internalKey != "" {
+			if subtle.ConstantTimeCompare([]byte(internalKey), s.internalAPIKey) == 1 {
+				c.Set("role", "internal")
+				c.Next()
+				return
+			}
+
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid internal api key"})
+			return
+		}
+
+		s.authMiddleware()(c)
 	}
 }
 
@@ -869,7 +889,7 @@ func main() {
 
 		// 设备状态
 		api.GET("/device/:id/status", server.authMiddleware(), server.getDeviceStatus)
-		api.POST("/device/status", server.authMiddleware(), server.updateDeviceStatus)
+		api.POST("/device/status", server.internalOrUserAuthMiddleware(), server.updateDeviceStatus)
 	}
 
 	port := os.Getenv("PORT")

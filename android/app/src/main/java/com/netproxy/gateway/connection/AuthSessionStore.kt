@@ -9,6 +9,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import org.slf4j.LoggerFactory
+import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -21,6 +22,7 @@ class AuthSessionStore @Inject constructor(
     companion object {
         private val logger = LoggerFactory.getLogger(AuthSessionStore::class.java)
         private const val PREF_NAME = "auth_session_store"
+        private const val KEY_INSTALLATION_DEVICE_ID = "installation_device_id"
         private const val KEY_DEVICE_ID = "device_id"
         private const val KEY_AUTH_TOKEN = "auth_token"
     }
@@ -41,6 +43,7 @@ class AuthSessionStore @Inject constructor(
 
     private var inMemoryToken: CharArray? = null
     private var inMemoryDeviceId: String? = null
+    private var inMemoryInstallationDeviceId: String? = null
 
     init {
         // Pre-warm encrypted storage off the main thread to avoid first-use UI jank.
@@ -55,8 +58,10 @@ class AuthSessionStore @Inject constructor(
         inMemoryToken?.fill('\u0000')
         inMemoryToken = authToken.toCharArray()
         inMemoryDeviceId = deviceId
+        inMemoryInstallationDeviceId = deviceId
 
         encryptedPrefs.edit()
+            .putString(KEY_INSTALLATION_DEVICE_ID, deviceId)
             .putString(KEY_DEVICE_ID, deviceId)
             .putString(KEY_AUTH_TOKEN, authToken)
             .apply()
@@ -68,8 +73,10 @@ class AuthSessionStore @Inject constructor(
             inMemoryToken?.fill('\u0000')
             inMemoryToken = authToken.toCharArray()
             inMemoryDeviceId = deviceId
+            inMemoryInstallationDeviceId = deviceId
 
             encryptedPrefs.edit()
+                .putString(KEY_INSTALLATION_DEVICE_ID, deviceId)
                 .putString(KEY_DEVICE_ID, deviceId)
                 .putString(KEY_AUTH_TOKEN, authToken)
                 .apply()
@@ -85,7 +92,12 @@ class AuthSessionStore @Inject constructor(
         inMemoryToken?.fill('\u0000')
         inMemoryToken = null
         inMemoryDeviceId = null
-        encryptedPrefs.edit().clear().apply()
+        inMemoryInstallationDeviceId = null
+        encryptedPrefs.edit()
+            .remove(KEY_INSTALLATION_DEVICE_ID)
+            .remove(KEY_DEVICE_ID)
+            .remove(KEY_AUTH_TOKEN)
+            .apply()
     }
 
     @Synchronized
@@ -94,12 +106,35 @@ class AuthSessionStore @Inject constructor(
             inMemoryToken?.fill('\u0000')
             inMemoryToken = null
             inMemoryDeviceId = null
-            encryptedPrefs.edit().clear().apply()
+            inMemoryInstallationDeviceId = null
+            encryptedPrefs.edit()
+                .remove(KEY_INSTALLATION_DEVICE_ID)
+                .remove(KEY_DEVICE_ID)
+                .remove(KEY_AUTH_TOKEN)
+                .apply()
             AppResult.success(Unit)
         } catch (e: Exception) {
             logger.error("Failed to clear session", e)
             AppResult.error(e)
         }
+    }
+
+    @Synchronized
+    fun getOrCreateDeviceId(): String {
+        inMemoryInstallationDeviceId?.let { return it }
+
+        val storedDeviceId = encryptedPrefs.getString(KEY_INSTALLATION_DEVICE_ID, null)
+        if (!storedDeviceId.isNullOrBlank()) {
+            inMemoryInstallationDeviceId = storedDeviceId
+            return storedDeviceId
+        }
+
+        val deviceId = UUID.randomUUID().toString()
+        inMemoryInstallationDeviceId = deviceId
+        encryptedPrefs.edit()
+            .putString(KEY_INSTALLATION_DEVICE_ID, deviceId)
+            .apply()
+        return deviceId
     }
 
     @Synchronized
