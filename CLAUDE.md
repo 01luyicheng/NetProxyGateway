@@ -37,6 +37,9 @@
 
 - WiFi 连接路径使用传统 API，在 Android 10+ 上受限。
 - MQTT 安全性使用 TLS 1.2 和证书固定（当 MQTT\_TLS\_PUBLIC\_KEY\_PINS 配置时）；为空时回退到默认 CA 验证。
+- **网络出口控制**: 当前使用 `protect()` 绕过 VPN，但无法强制指定 Socket 使用 WiFi 或移动数据。在厂商双 WiFi 加速、Link Turbo 等场景下，流量可能被系统路由到非预期网卡。
+- **厂商定制 ROM**: 项目中完全没有针对小米、华为、OPPO、vivo 等厂商的适配代码。这些厂商的电池优化、后台限制、网络加速等功能可能影响 VPN 服务稳定性。
+- **多网络 API 缺失**: 代码未使用 `Network.bindSocket()`、`excludeRoute()` 等 Android 原生多网络 API，无法实现真正的网卡强制绑定。
 - 任何超出这两点的声明必须先在代码中验证。
 
 ## 6) 执行优先级队列

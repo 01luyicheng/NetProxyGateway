@@ -86,14 +86,14 @@ class MqttConnectionManager @Inject constructor(
     }
 
     /**
-     * 创建SSLSocketFactory
-     * 根据BuildConfig配置决定使用哪种证书验证方式：
-     * - 生产环境：使用系统默认CA证书（验证服务器证书）
+     * 创建 SSLSocketFactory
+     * 根据 BuildConfig 配置决定使用哪种证书验证方式：
+     * - 生产环境：使用系统默认 CA 证书（验证服务器证书）
      * - 开发环境：信任所有证书（仅用于开发测试自签名证书）
-     * TODO: 上线前将BuildConfig.MQTT_TRUST_ALL_CERTS改为false
+     * TODO: 上线前将 BuildConfig.MQTT_TRUST_ALL_CERTS 改为 false
      */
     private fun createSecureSocketFactory(): SSLSocketFactory {
-        // 安全检查：生产环境(DEBUG=false)且启用信任所有证书时抛出异常
+        // 安全检查：生产环境 (DEBUG=false) 不允许启用信任所有证书
         if (!BuildConfig.DEBUG && BuildConfig.MQTT_TRUST_ALL_CERTS) {
             throw IllegalStateException(
                 "TRUST_ALL_CERTS is not allowed in production builds. " +

@@ -1,23 +1,57 @@
 # NetProxyGateway
 
-**AI 优先的 Android 项目** — 为远程网络协助提供可靠的 Android 行为。
+为远程网络协助提供 Android 应用作为进入内网的跳板。
 
-***
+## 项目意义
 
-## 🎯 AI 代理工作指南
+网络工程师需要远程协助客户解决网络问题，但客户设备通常在 NAT/防火墙后，无法直接访问客户的内网设备（路由器、交换机、光猫等）。
 
-如果您是 AI 代理并在此项目上工作：
+本项目解决的核心问题：
 
-1. **执行权限**：首先阅读 [CLAUDE.md ](CLAUDE.md)— 这是唯一的权威指南
-2. **当前范围**：Android 客户端 + Go 服务端
-3. **快速命令**：
+- **穿透 NAT**：通过蜂窝网络建立反向隧道让工程师远程访问客户设备所在的局域网，并且这个局域网可能存在故障例如无法上网
+- **零配置连接**：客户只需运行 Android App，无需路由器配置
+- **安全隔离**：通过 SOCKS5 代理和 JWT 认证确保访问可控
+
+## 应用场景
+
+**典型工作流**：
+
+1. 客户发现网络故障，联系技术支持，客户被技术人员要求在 Android 设备上运行此 App，建立到云端的反向隧道
+2. 工程师登录管理后台，通过配对码关联客户设备
+3. 工程师通过 SOCKS5 代理访问客户局域网（如 192.168.1.100）
+4. 完成远程协助后，会话自动过期
+
+**目标用户**：IT 支持团队、网络运维工程师、远程技术服务提供商、网络运营商
+
+## 核心功能
+
+**Android 客户端**：
+
+- VPN 模式捕获网络流量
+- WebSocket 反向隧道连接云端
+- MQTT 控制通道（心跳、指令）
+- 配对码绑定机制
+
+**Go 服务端**：
+
+- REST API：工程师认证、配对码管理、会话令牌
+- SOCKS5 代理：转发工程师请求到客户局域网
+- WebSocket 隧道网关：维护设备长连接
+- MQTT Broker：设备控制通道
+
+## AI 代理工作指南
+
+如果您在此项目上工作：
+
+1. **执行契约**：首先阅读 [AGENTS.md](AGENTS.md) — 这是唯一的权威指南
+2. **验证门禁**：
    - 构建：`android\gradlew.bat -p android assembleDebug --stacktrace --no-daemon`
    - 测试：`android\gradlew.bat -p android :app:testDebugUnitTest --stacktrace --no-daemon`
-4. **代码入口**：[android/app/src/main/java/com/netproxy/gateway/](android/app/src/main/java/com/netproxy/gateway/)
+3. **代码入口**：[android/app/src/main/java/com/netproxy/gateway/](android/app/src/main/java/com/netproxy/gateway/)
 
 ***
 
-## 📂 仓库结构
+## 仓库结构
 
 ```
 android/                          # Gradle Android 项目
@@ -35,126 +69,26 @@ server/                           # Go 服务端组件
 └── docker-compose.yml           # 容器编排
 
 docs/
-├── CLAUDE.md                    # 执行契约（必读）
-└── ISSUES.md                    # 待修复问题清单
+├── ISSUES.md                    # 待修复问题清单
+└── DECISIONS.md                 # 架构决策记录
 ```
 
 ***
 
-## 🔧 构建与验证
+## 服务端组件概览
 
-在 Windows 上运行（确保可复现性）：
-
-```bash
-# 构建
-android\gradlew.bat -p android assembleDebug --stacktrace --no-daemon
-
-# 单元测试（验证门禁）
-android\gradlew.bat -p android :app:testDebugUnitTest --stacktrace --no-daemon
-
-# IDE：导入 `android/` 文件夹到 Android Studio
-```
-
-如果本地构建因 Gradle 版本错误失败，使用固定的 wrapper（不要使用系统 Gradle）。
-
-***
-
-## 🖥️ 服务端组件
-
-NetProxyGateway 服务端提供远程网络协助的云服务基础设施。
-
-### 架构概览
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      云服务器                               │
-├─────────────────────────────────────────────────────────────┤
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐        │
-│  │ MQTT Broker │  │ SOCKS5代理  │  │  REST API   │        │
-│  │  (控制通道) │  │  (数据通道) │  │  (管理)     │        │
-│  └─────────────┘  └─────────────┘  └─────────────┘        │
-│         │                │                │                 │
-│         └────────────────┼────────────────┘                 │
-│                          ▼                                  │
-│                   ┌─────────────┐                          │
-│                   │  隧道网关   │                          │
-│                   └─────────────┘                          │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### 组件说明
-
-| 组件          | 端口        | 框架/协议     | 功能                   |
-| ----------- | --------- | --------- | -------------------- |
-| REST API    | 8080      | Gin + JWT | 工程师登录、配对码管理、会话令牌     |
-| SOCKS5 代理   | 1080      | go-socks5 | 支持认证、RFC1918过滤、可选TLS |
-| 隧道网关        | 8443      | WebSocket | 设备反向隧道、心跳检测          |
-| MQTT Broker | 1883/8883 | TCP/TLS   | 设备控制通道               |
-
-### 快速开始
-
-**环境要求**：Docker 20.10+, Docker Compose 2.0+
-
-```bash
-cd server/
-
-# 创建环境变量文件 .env
-# JWT_SECRET=your-secret-key-here
-# ADMIN_USER=admin
-# ADMIN_PASS=your-secure-password
-
-# 启动所有服务
-docker-compose up -d
-
-# 查看状态
-docker-compose ps
-```
-
-### API 接口示例
-
-**工程师登录**：
-
-```bash
-POST /api/login
-Content-Type: application/json
-
-{
-  "username": "admin",
-  "password": "your-password"
-}
-```
-
-**创建配对会话**：
-
-```bash
-POST /api/pair
-Authorization: Bearer <token>
-Content-Type: application/json
-
-{
-  "device_id": "device-123"
-}
-```
-
-**使用 SOCKS5 代理**：
-
-```bash
-curl --socks5 deviceID:session-token@localhost:1080 http://192.168.1.1
-```
-
-***
-
-## 安全特性
-
-- **认证与授权**：JWT Token、短期会话令牌（15分钟）、一次性配对码
-- **网络安全**：RFC1918 私有地址限制、特殊地址拒绝、可选 TLS 加密
-- **限流与防护**：IP 级别限流、登录失败封禁（15分钟）
+| 组件          | 端口        | 框架/协议     | 功能               |
+| ----------- | --------- | --------- | ---------------- |
+| REST API    | 8080      | Gin + JWT | 工程师登录、配对码管理、会话令牌 |
+| SOCKS5 代理   | 1080      | go-socks5 | 支持认证、RFC1918 过滤  |
+| 隧道网关        | 8443      | WebSocket | 设备反向隧道、心跳检测      |
+| MQTT Broker | 1883/8883 | TCP/TLS   | 设备控制通道           |
 
 ***
 
 ## 文档策略
 
-此仓库特意保持最少的文档。只保留会直接改变 AI 执行决策的文档。
+此仓库仅保留会直接改变 AI 执行决策的文档。
 
 **保留规则**：
 
@@ -163,7 +97,7 @@ curl --socks5 deviceID:session-token@localhost:1080 http://192.168.1.1
 3. 它是已存在于 git 中的过去决策记录吗？→ **删除它**
 4. 它反映的是理想化（而非实际）状态吗？→ **删除它**
 
-**需要做决策？** → [CLAUDE.md](CLAUDE.md)
+**需要做决策？** → [AGENTS.md](AGENTS.md)
 
 ***
 
