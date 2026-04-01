@@ -25,31 +25,27 @@
   ```
 - **建议修复**: 添加构建时Lint静态检查或Gradle插件验证，确保release构建配置中`MQTT_TRUST_ALL_CERTS=false`
 
-### C3: 虚拟IP分配线程不安全
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L746-L760)
-- **问题描述**: 边界检查逻辑存在缺陷：当 `nextVirtualIp.getAndIncrement()` 在第 255 次分配时返回的 `ipNum` 为 255（即进入 `if (ipNum > 254)` 分支）时，会先使用该值生成广播地址 `10.0.0.255`，然后才重置池并清理映射，导致当前请求获得无效 IP。多线程环境下 IP 分配可能冲突
-- **风险**: IP地址冲突或分配到广播地址，导致数据包路由错误或连接异常
-- **代码**:
+### C3: 虚拟IP分配线程不安全 [已修复]
+- **状态**: 已修复（2026-04-01）
+- **位置**:
+  - `android/app/src/main/java/com/netproxy/gateway/vpn/VirtualIpAllocator.kt`
+  - `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt`
+- **问题描述**: 原实现在 `ipNum=255` 时可能分配广播地址 `10.0.0.255`，且并发语义不清晰。
+- **修复说明**: 已提取 `VirtualIpAllocator` 统一分配逻辑，溢出时先重置再回退到 `10.0.0.1`，并通过同步临界区保证分配与映射更新一致性。
+- **验证**: 新增 `VirtualIpAllocatorTest`（边界与并发回归），并通过 `VpnServiceTest`、全量 Android 单测与 `assembleDebug`。
+- **代码（修复后）**:
   ```kotlin
+  // VpnService.kt
   private fun getOrAllocateVirtualIp(realDstIp: String): String {
-      return virtualIpPool.getOrPut(realDstIp) {
-          val ipNum = nextVirtualIp.getAndIncrement()
-          if (ipNum > 254) {
-              logger.error("Virtual IP pool exhausted! Resetting pool.")
-              nextVirtualIp.set(1)
-              virtualIpPool.clear()
-              reverseIpMap.clear()
-          }
-          val ip = "10.0.0.${ipNum}"  // 问题：ipNum=255时会生成10.0.0.255
-          reverseIpMap[ip] = realDstIp
-          ip
-      }
+      return VirtualIpAllocator.getOrAllocateVirtualIp(
+          realDstIp = realDstIp,
+          virtualIpPool = virtualIpPool,
+          reverseIpMap = reverseIpMap,
+          nextVirtualIp = nextVirtualIp,
+          onPoolReset = { logger.error("Virtual IP pool exhausted! Resetting pool.") }
+      )
   }
   ```
-- **建议修复**:
-  1. 将边界检查提前至递增前，避免生成无效地址
-  2. 使用循环队列或IP池管理器确保IP在有效范围内（2-254）
-  3. 添加并发测试验证线程安全
 
 ---
 
@@ -187,3 +183,4 @@
 | 2026-03-31 | 确认文档完整性：ISSUES.md仅保留需要修复的软件缺陷，其他类型问题已正确迁移到专门文档 | AI Agent |
 | 2026-03-31 | 修正H2引用错误：原"见M2"引用不正确（M2是WiFi权限问题），H2实际已解决（SupervisorJob已实现异常隔离），更新为"已解决"状态 | Bug修复专家 |
 | 2026-03-31 | 更新交叉引用：添加与其他文档的关联链接（TECH_DEBT.md、BLOCKERS.md、KNOWN_LIMITATIONS.md、DECISIONS.md） | AI Agent |
+| 2026-04-01 | 修复 C3 虚拟IP边界与并发分配问题：新增 `VirtualIpAllocator` 并补充边界/并发回归测试，避免分配 `10.0.0.255` | AI Agent |

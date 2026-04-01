@@ -34,7 +34,11 @@ import org.junit.Test
 /**
  * AuthSessionStore 的单元测试
  * 使用 Mockk 模拟 Android 依赖（EncryptedSharedPreferences、SharedPreferences.Editor 等）
+ * 
+ * Note: 此测试使用了已弃用的 EncryptedSharedPreferences 和 MasterKey API
+ * 这是为了测试向后兼容性，新代码应该使用更新的加密 API
  */
+@Suppress("DEPRECATION")
 @OptIn(ExperimentalCoroutinesApi::class)
 class AuthSessionStoreTest {
 

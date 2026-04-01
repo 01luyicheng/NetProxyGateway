@@ -1464,6 +1464,38 @@ class VpnServiceTest {
         assertEquals(11, nextVirtualIp.get())
     }
 
+    @Test
+    fun virtualIpAllocation_boundary254_returns10_0_0_254() {
+        val virtualIpPool = ConcurrentHashMap<String, String>()
+        val reverseIpMap = ConcurrentHashMap<String, String>()
+        val nextVirtualIp = AtomicInteger(254)
+
+        val ip = VpnTestUtils.getOrAllocateVirtualIp("8.8.8.8", virtualIpPool, reverseIpMap, nextVirtualIp)
+
+        assertEquals("10.0.0.254", ip)
+        assertEquals("8.8.8.8", reverseIpMap["10.0.0.254"])
+        assertEquals(255, nextVirtualIp.get())
+    }
+
+    @Test
+    fun virtualIpAllocation_overflow255_resetsAndNeverReturnsBroadcastIp() {
+        val virtualIpPool = ConcurrentHashMap<String, String>()
+        val reverseIpMap = ConcurrentHashMap<String, String>()
+        val nextVirtualIp = AtomicInteger(255)
+
+        virtualIpPool["1.1.1.1"] = "10.0.0.1"
+        reverseIpMap["10.0.0.1"] = "1.1.1.1"
+
+        val ip = VpnTestUtils.getOrAllocateVirtualIp("8.8.8.8", virtualIpPool, reverseIpMap, nextVirtualIp)
+
+        assertEquals("10.0.0.1", ip)
+        assertFalse("10.0.0.255" == ip)
+        assertEquals(1, virtualIpPool.size)
+        assertEquals("10.0.0.1", virtualIpPool["8.8.8.8"])
+        assertEquals("8.8.8.8", reverseIpMap["10.0.0.1"])
+        assertEquals(2, nextVirtualIp.get())
+    }
+
     // ==================== IP 脱敏测试 ====================
 
     @Test

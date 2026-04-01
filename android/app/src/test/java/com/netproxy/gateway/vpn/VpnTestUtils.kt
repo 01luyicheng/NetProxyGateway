@@ -149,11 +149,12 @@ object VpnTestUtils {
         reverseIpMap: MutableMap<String, String>,
         nextVirtualIp: AtomicInteger,
     ): String {
-        return virtualIpPool.getOrPut(realDstIp) {
-            val ip = "10.0.0.${nextVirtualIp.getAndIncrement()}"
-            reverseIpMap[ip] = realDstIp
-            ip
-        }
+        return VirtualIpAllocator.getOrAllocateVirtualIp(
+            realDstIp = realDstIp,
+            virtualIpPool = virtualIpPool,
+            reverseIpMap = reverseIpMap,
+            nextVirtualIp = nextVirtualIp
+        )
     }
 
     fun calculateIdleDelay(idleRounds: Int): Long {
