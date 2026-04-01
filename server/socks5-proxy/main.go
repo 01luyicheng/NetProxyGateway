@@ -727,18 +727,30 @@ func (tc *TunnelClient) RemoveStream(streamID string) {
 	tc.mu.Unlock()
 }
 
-// SOCKS5Server SOCKS5服务器
+// AuthSession 认证会话信息
+type AuthSession struct {
+	DeviceID string
+	Token    string
+}
+
+// TunnelDialer 隧道拨号器接口（用于测试）
+type TunnelDialer interface {
+	ConnectThroughTunnel(deviceID, token, dstAddr string, dstPort int) (net.Conn, error)
+	RemoveStream(streamID string)
+}
+
+// SOCKS5Server SOCKS5 服务器
 type SOCKS5Server struct {
 	config        *Config
 	sessionStore  SessionStore
 	rateLimiter   *RateLimiter
 	ipFilter      *IPFilter
-	tunnelClient  *TunnelClient
+	tunnelClient  TunnelDialer
 	listener      net.Listener
 	connCount     int32 // 当前活跃连接数（原子操作）
 }
 
-// NewSOCKS5Server 创建SOCKS5服务器
+// NewSOCKS5Server 创建 SOCKS5 服务器
 func NewSOCKS5Server(config *Config) *SOCKS5Server {
 	return &SOCKS5Server{
 		config:       config,
@@ -746,6 +758,17 @@ func NewSOCKS5Server(config *Config) *SOCKS5Server {
 		rateLimiter:  NewRateLimiter(),
 		ipFilter:     NewIPFilter(),
 		tunnelClient: NewTunnelClient(config.TunnelEndpoint),
+	}
+}
+
+// NewSOCKS5ServerWithDialer 使用自定义 TunnelDialer 创建 SOCKS5 服务器（用于测试）
+func NewSOCKS5ServerWithDialer(config *Config, dialer TunnelDialer) *SOCKS5Server {
+	return &SOCKS5Server{
+		config:       config,
+		sessionStore: NewAPISessionStore(config.APIEndpoint),
+		rateLimiter:  NewRateLimiter(),
+		ipFilter:     NewIPFilter(),
+		tunnelClient: dialer,
 	}
 }
 
@@ -995,7 +1018,7 @@ func (s *SOCKS5Server) handleRequest(conn net.Conn, deviceID string) error {
 
 	switch cmd {
 	case 0x01: // CONNECT
-		return s.handleConnect(conn, deviceID, dstAddr, dstPort)
+		return s.handleConnect(conn, AuthSession{DeviceID: deviceID, Token: deviceID}, dstAddr, dstPort)
 	case 0x02: // BIND
 		s.sendReply(conn, 0x07) // Command not supported
 		return fmt.Errorf("BIND not supported")
@@ -1014,16 +1037,12 @@ func (s *SOCKS5Server) sendReply(conn net.Conn, rep byte) {
 	conn.Write(reply)
 }
 
-// handleConnect 处理CONNECT请求
-func (s *SOCKS5Server) handleConnect(conn net.Conn, deviceID, dstAddr string, dstPort int) error {
-	log.Printf("CONNECT request from %s to %s:%d", deviceID, dstAddr, dstPort)
-
-	// 使用token作为设备凭证（在实际场景中，token应该从sessionStore获取）
-	// 这里使用deviceID作为token的简化版本
-	token := deviceID
+// handleConnect 处理 CONNECT 请求
+func (s *SOCKS5Server) handleConnect(conn net.Conn, session AuthSession, dstAddr string, dstPort int) error {
+	log.Printf("CONNECT request from %s to %s:%d", session.DeviceID, dstAddr, dstPort)
 
 	// 通过隧道连接到目标
-	targetConn, err := s.tunnelClient.ConnectThroughTunnel(deviceID, token, dstAddr, dstPort)
+	targetConn, err := s.tunnelClient.ConnectThroughTunnel(session.DeviceID, session.Token, dstAddr, dstPort)
 	if err != nil {
 		log.Printf("Failed to connect through tunnel: %v", err)
 		s.sendReply(conn, 0x05) // Connection refused
@@ -1032,9 +1051,7 @@ func (s *SOCKS5Server) handleConnect(conn net.Conn, deviceID, dstAddr string, ds
 	defer func() {
 		targetConn.Close()
 		// 清理流记录
-		if streamConn, ok := targetConn.(*StreamConn); ok {
-			s.tunnelClient.RemoveStream(streamConn.StreamID)
-		}
+		s.tunnelClient.RemoveStream(targetConn.(*StreamConn).StreamID)
 	}()
 
 	// 发送成功响应

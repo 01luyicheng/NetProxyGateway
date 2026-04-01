@@ -1,5 +1,7 @@
 # NetProxyGateway
 
+[![CI](https://github.com/01luyicheng/NetProxyGateway/actions/workflows/ci.yml/badge.svg)](https://github.com/01luyicheng/NetProxyGateway/actions)
+
 为远程网络协助提供 Android 应用作为进入内网的跳板。
 
 ## 项目意义

@@ -20,7 +20,9 @@ func (s *stubTunnelDialer) ConnectThroughTunnel(deviceID, token, dstAddr string,
 	s.token = token
 	s.dstAddr = dstAddr
 	s.dstPort = dstPort
-	return nil, s.err
+	// 返回一个 pipe 连接用于测试
+	localConn, _ := net.Pipe()
+	return localConn, s.err
 }
 
 func (s *stubTunnelDialer) RemoveStream(streamID string) {
