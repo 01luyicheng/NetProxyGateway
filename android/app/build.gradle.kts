@@ -86,6 +86,7 @@ android {
             excludes += "META-INF/LICENSE*"
             excludes += "META-INF/NOTICE*"
             pickFirsts += "META-INF/native/*"
+            pickFirsts += "META-INF/native-image/**"
         }
     }
 }
