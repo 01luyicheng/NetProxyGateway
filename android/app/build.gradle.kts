@@ -27,12 +27,12 @@ val mqttTlsPublicKeyPinsRelease = providers.gradleProperty("MQTT_TLS_PUBLIC_KEY_
 
 android {
     namespace = "com.netproxy.gateway"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.netproxy.gateway"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         versionCode = 1
         versionName = "1.0.0"
 
@@ -98,8 +98,8 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
 
-    implementation("com.google.dagger:hilt-android:2.59.1")
-    ksp("com.google.dagger:hilt-android-compiler:2.59.1")
+    implementation("com.google.dagger:hilt-android:2.56")
+    ksp("com.google.dagger:hilt-android-compiler:2.56")
     implementation("androidx.hilt:hilt-navigation-compose:1.2.0")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
