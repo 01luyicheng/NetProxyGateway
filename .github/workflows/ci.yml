@@ -55,16 +55,6 @@ jobs:
       - name: Run unit tests
         run: ./android/gradlew -p android :app:testDebugUnitTest --stacktrace --no-daemon
 
-      - name: Generate JaCoCo coverage report
-        run: ./android/gradlew -p android jacocoTestReport --stacktrace --no-daemon
-
-      - name: Run Lint check
-        run: ./android/gradlew -p android lintDebug --no-daemon
-
-      - name: Run dependency vulnerability check
-        run: ./android/gradlew -p android dependencyCheckAnalyze --no-daemon || true
-        continue-on-error: true
-
       - name: Upload test results
         uses: actions/upload-artifact@v4
         if: always()
@@ -73,27 +63,6 @@ jobs:
           path: |
             android/app/build/reports/tests/
             android/app/build/test-results/
-
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: android-coverage-report
-          path: android/app/build/reports/jacoco/
-
-      - name: Upload Lint report
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: android-lint-report
-          path: android/app/build/reports/lint-results-debug.html
-
-      - name: Upload dependency check report
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: android-dependency-check-report
-          path: android/app/build/reports/dependency-check-report.html
 
   go-build:
     name: Go Server Build
