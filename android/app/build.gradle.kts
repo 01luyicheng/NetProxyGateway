@@ -4,6 +4,8 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.dagger.hilt.android")
     id("com.google.devtools.ksp")
+    id("jacoco")
+    id("org.owasp.dependencycheck")
 }
 
 val mqttBrokerUrlTlsDebug = providers.gradleProperty("MQTT_BROKER_URL_TLS_DEBUG")
@@ -79,6 +81,21 @@ android {
         buildConfig = true
     }
 
+    lint {
+        disable += "ObsoleteLintCustomCheck"
+        abortOnError = false
+        checkReleaseBuilds = true
+        checkAllWarnings = true
+        warningsAsErrors = false
+        htmlReport = true
+        xmlReport = true
+        sarifReport = true
+    }
+
+    testCoverage {
+        jacocoVersion = "0.8.12"
+    }
+
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -133,4 +150,78 @@ dependencies {
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+
+    // OWASP Dependency Check
+    implementation(platform("org.jetbrains.kotlin:kotlin-bom:2.1.21"))
+}
+
+// JaCoCo task configuration
+android.applicationVariants.all {
+    val variantName = name
+    val testTaskName = "test${variantName.replaceFirstChar { it.uppercase() }}UnitTest"
+
+    tasks.register<JacocoReport>("jacoco${testTaskName}Report") {
+        dependsOn(testTaskName)
+
+        reports {
+            xml.required.set(true)
+            html.required.set(true)
+        }
+
+        val fileFilter = listOf(
+            "**/R.class",
+            "**/R$*.class",
+            "**/BuildConfig.*",
+            "**/Manifest*.*",
+            "**/*Test*.*",
+            "android/**/*.*",
+            "**/di/**/*.*",
+            "**/*_Factory.*",
+            "**/*_MembersInjector.*"
+        )
+
+        val debugTree = fileTree(
+            mapOf(
+                "dir" to layout.buildDirectory.dir("intermediates/javac/$variantName").get().asFile,
+                "excludes" to fileFilter
+            )
+        )
+        val kotlinDebugTree = fileTree(
+            mapOf(
+                "dir" to layout.buildDirectory.dir("tmp/kotlin-classes/$variantName").get().asFile,
+                "excludes" to fileFilter
+            )
+        )
+
+        sourceDirectories.setFrom(
+            files(
+                "src/main/java",
+                "src/main/kotlin",
+                "src/$variantName/java",
+                "src/$variantName/kotlin"
+            )
+        )
+        classDirectories.setFrom(files(debugTree, kotlinDebugTree))
+        executionData.setFrom(layout.buildDirectory.file("jacoco/${testTaskName}.exec").get().asFile)
+    }
+}
+
+// Task to run all JaCoCo reports
+tasks.register("jacocoTestReport") {
+    dependsOn("jacocoTestDebugUnitTestReport")
+    group = "verification"
+    description = "Generate JaCoCo coverage reports for all variants"
+}
+
+// OWASP Dependency Check configuration
+dependencyCheck {
+    analyzers {
+        assemblyEnabled = false
+        nugetconfEnabled = false
+        msbuildEnabled = false
+    }
+    format = "HTML"
+    outputDirectory = layout.buildDirectory.dir("reports").get().asFile.path
+    failBuildOnCVSS = 9.0f // Only fail on critical vulnerabilities (CVSS >= 9.0)
+    suppressionFile = rootProject.file("dependency-check-suppressions.xml").path
 }

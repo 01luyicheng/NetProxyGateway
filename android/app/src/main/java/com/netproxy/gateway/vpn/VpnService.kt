@@ -940,8 +940,8 @@ class GatewayVpnService : AndroidVpnService() {
         reverseIpMap.clear()
         
         stopProxyService()
-        // Use STOP_FOREGROUND_REMOVE for API 24+ compatibility
-        // This replaces the deprecated stopForeground(boolean) API
+        // STOP_FOREGROUND_REMOVE is available since API 24 (Android 7.0)
+        // Since minSdk is 26, we can safely use the new API
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
