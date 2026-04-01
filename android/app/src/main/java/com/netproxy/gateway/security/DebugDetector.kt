@@ -1,7 +1,6 @@
 package com.netproxy.gateway.security
 
 import android.os.Debug
-import android.os.Process
 import java.io.BufferedReader
 import java.io.File
 import java.io.FileReader
@@ -128,29 +127,21 @@ object DebugDetector {
             val statusFile = File("/proc/self/status")
             if (!statusFile.exists()) return false
 
-            var tracerPid = 0
-            var ppid = 0
-
-            BufferedReader(FileReader(statusFile)).use { reader ->
-                var line: String?
-                while (reader.readLine().also { line = it } != null) {
-                    when {
-                        line?.startsWith("TracerPid:") == true -> {
-                            tracerPid = line?.substringAfter(":")?.trim()?.toIntOrNull() ?: 0
-                        }
-                        line?.startsWith("PPid:") == true -> {
-                            ppid = line?.substringAfter(":")?.trim()?.toIntOrNull() ?: 0
-                        }
-                    }
-                }
-            }
-
-            // TracerPid 不为 0 表示被调试
-            // 或者父进程异常
-            tracerPid != 0 || (ppid != 0 && ppid != Process.myPid())
+            parsePtraceStatus(statusFile.readText())
         } catch (e: Exception) {
             false
         }
+    }
+
+    internal fun parsePtraceStatus(statusContent: String): Boolean {
+        return statusContent
+            .lineSequence()
+            .firstOrNull { it.startsWith("TracerPid:") }
+            ?.substringAfter(":")
+            ?.trim()
+            ?.toIntOrNull()
+            ?.let { it != 0 }
+            ?: false
     }
 
     /**

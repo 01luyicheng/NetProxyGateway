@@ -40,7 +40,7 @@ class NetworkStateManager @Inject constructor(
             }
 
             override fun onLost(network: Network) {
-                trySend(NetworkState(isConnected = false, networkType = NetworkType.None))
+                trySend(getStateAfterNetworkLost())
             }
 
             override fun onCapabilitiesChanged(
@@ -65,7 +65,7 @@ class NetworkStateManager @Inject constructor(
         }
     }.distinctUntilChanged()
 
-    private fun getCurrentNetworkState(network: Network?): NetworkState {
+    internal fun getCurrentNetworkState(network: Network?): NetworkState {
         val activeNetwork = network ?: connectivityManager.activeNetwork
         val capabilities = activeNetwork?.let { connectivityManager.getNetworkCapabilities(it) }
 
@@ -86,6 +86,10 @@ class NetworkStateManager @Inject constructor(
             isValidated = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED),
             network = activeNetwork
         )
+    }
+
+    internal fun getStateAfterNetworkLost(): NetworkState {
+        return getCurrentNetworkState(null)
     }
 
     fun getCurrentNetworkType(): NetworkType {
