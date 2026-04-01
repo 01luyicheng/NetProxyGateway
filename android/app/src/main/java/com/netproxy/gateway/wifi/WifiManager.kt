@@ -207,11 +207,14 @@ class GatewayWifiManager @Inject constructor(
         }
     }
 
+    @Suppress("DEPRECATION")
     fun startScan(): Boolean {
         if (!hasWifiScanPermission(context)) {
             logger.warn("Cannot start scan: permission not granted")
             return false
         }
+        // Note: startScan() is deprecated in API 28+ with stricter throttling.
+        // Consider using WifiManager#registerScanResultsCallback for API 29+.
         return wifiManager.startScan()
     }
 
@@ -222,12 +225,15 @@ class GatewayWifiManager @Inject constructor(
         return AppResult.success(wifiManager.startScan())
     }
 
+    @Suppress("DEPRECATION")
     fun getScanResults(): List<WifiNetwork> {
         if (!hasWifiScanPermission(context)) {
             logger.warn("Cannot get scan results: permission not granted")
             return emptyList()
         }
 
+        // Note: getScanResults() requires ACCESS_FINE_LOCATION or NEARBY_WIFI_DEVICES permission.
+        // For API 29+, consider using WifiManager#registerScanResultsCallback.
         return try {
             wifiManager.scanResults
                 .filter { !it.SSID.isNullOrEmpty() }
@@ -274,6 +280,7 @@ class GatewayWifiManager @Inject constructor(
         }
     }
 
+    @Suppress("DEPRECATION")
     fun getCurrentConnection(): WifiConnectionInfo? {
         if (!hasWifiScanPermission(context)) {
             logger.warn("Cannot get current connection: permission not granted")
@@ -281,7 +288,10 @@ class GatewayWifiManager @Inject constructor(
         }
 
         val connectionInfo = wifiManager.connectionInfo ?: return null
-        
+
+        // Note: These APIs are deprecated in API 29+ but still functional.
+        // For API 31+, consider using ConnectivityManager#getLinkProperties for IP
+        // and WifiInfo#getLinkSpeedMbps for link speed.
         return WifiConnectionInfo(
             ssid = connectionInfo.ssid?.replace("\"", ""),
             bssid = connectionInfo.bssid,

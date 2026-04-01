@@ -379,12 +379,14 @@ object EmulatorDetector {
     /**
      * 检查设备 ID
      */
+    @Suppress("DEPRECATION")
     fun checkDeviceId(context: Context): Boolean {
         // 检查 READ_PHONE_STATE 权限
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
             return false
         }
 
+        // Note: getDeviceId() is deprecated in API 26+. Use getImei() for API 26+.
         return try {
             val telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
             val deviceId = telephonyManager?.deviceId
