@@ -72,111 +72,111 @@ sealed class AppResult<out T> {
 }
 
 /**
-     * 当结果为成功时执行操作
-     */
-    inline fun <T> AppResult<T>.onSuccess(action: (T) -> Unit): AppResult<T> {
-        if (this is AppResult.Success) {
-            action(data)
-        }
-        return this
+ * 当结果为成功时执行操作
+ */
+inline fun <T> AppResult<T>.onSuccess(action: (T) -> Unit): AppResult<T> {
+    if (this is AppResult.Success) {
+        action(data)
     }
+    return this
+}
 
-    /**
-     * 当结果为错误时执行操作
-     */
-    inline fun <T> AppResult<T>.onError(action: (Throwable) -> Unit): AppResult<T> {
-        if (this is AppResult.Error) {
-            action(exception)
-        }
-        return this
+/**
+ * 当结果为错误时执行操作
+ */
+inline fun <T> AppResult<T>.onError(action: (Throwable) -> Unit): AppResult<T> {
+    if (this is AppResult.Error) {
+        action(exception)
     }
+    return this
+}
 
-    /**
-     * 映射成功值到另一种类型
-     */
-    inline fun <T, R> AppResult<T>.map(transform: (T) -> R): AppResult<R> = when (this) {
-        is AppResult.Success -> AppResult.success(transform(data))
-        is AppResult.Error -> this
-    }
+/**
+ * 映射成功值到另一种类型
+ */
+inline fun <T, R> AppResult<T>.map(transform: (T) -> R): AppResult<R> = when (this) {
+    is AppResult.Success -> AppResult.success(transform(data))
+    is AppResult.Error -> this
+}
 
-    /**
-     * 映射错误到新的AppResult
-     */
-    inline fun <T> AppResult<T>.mapError(transform: (Throwable) -> Throwable): AppResult<T> = when (this) {
-        is AppResult.Success -> this
-        is AppResult.Error -> AppResult.error(transform(exception))
-    }
+/**
+ * 映射错误到新的AppResult
+ */
+inline fun <T> AppResult<T>.mapError(transform: (Throwable) -> Throwable): AppResult<T> = when (this) {
+    is AppResult.Success -> this
+    is AppResult.Error -> AppResult.error(transform(exception))
+}
 
-    /**
-     * 展平映射，用于链式操作
-     */
-    inline fun <T, R> AppResult<T>.flatMap(transform: (T) -> AppResult<R>): AppResult<R> = when (this) {
-        is AppResult.Success -> transform(data)
-        is AppResult.Error -> this
-    }
+/**
+ * 展平映射，用于链式操作
+ */
+inline fun <T, R> AppResult<T>.flatMap(transform: (T) -> AppResult<R>): AppResult<R> = when (this) {
+    is AppResult.Success -> transform(data)
+    is AppResult.Error -> this
+}
 
-    /**
-     * 获取成功值或默认值
-     */
-    fun <T> AppResult<T>.getOrDefault(defaultValue: T): T = when (this) {
-        is AppResult.Success -> data
-        is AppResult.Error -> defaultValue
-    }
+/**
+ * 获取成功值或默认值
+ */
+fun <T> AppResult<T>.getOrDefault(defaultValue: T): T = when (this) {
+    is AppResult.Success -> data
+    is AppResult.Error -> defaultValue
+}
 
-    /**
-     * 获取成功值或从异常计算
-     */
-    inline fun <T> AppResult<T>.getOrElse(onFailure: (Throwable) -> T): T = when (this) {
-        is AppResult.Success -> data
-        is AppResult.Error -> onFailure(exception)
-    }
+/**
+ * 获取成功值或从异常计算
+ */
+inline fun <T> AppResult<T>.getOrElse(onFailure: (Throwable) -> T): T = when (this) {
+    is AppResult.Success -> data
+    is AppResult.Error -> onFailure(exception)
+}
 
-    /**
-     * 获取成功值或抛出异常
-     */
-    fun <T> AppResult<T>.getOrThrow(): T = when (this) {
-        is AppResult.Success -> data
-        is AppResult.Error -> throw exception
-    }
+/**
+ * 获取成功值或抛出异常
+ */
+fun <T> AppResult<T>.getOrThrow(): T = when (this) {
+    is AppResult.Success -> data
+    is AppResult.Error -> throw exception
+}
 
-    /**
-     * 转换为Kotlin标准库Result
-     */
-    fun <T> AppResult<T>.toResult(): Result<T> = when (this) {
-        is AppResult.Success -> Result.success(data)
-        is AppResult.Error -> Result.failure(exception)
-    }
+/**
+ * 转换为Kotlin标准库Result
+ */
+fun <T> AppResult<T>.toResult(): Result<T> = when (this) {
+    is AppResult.Success -> Result.success(data)
+    is AppResult.Error -> Result.failure(exception)
+}
 
-    /**
-     * 恢复错误为成功值
-     */
-    inline fun <T> AppResult<T>.recover(transform: (Throwable) -> T): AppResult<T> = when (this) {
-        is AppResult.Success -> this
-        is AppResult.Error -> AppResult.success(transform(exception))
-    }
+/**
+ * 恢复错误为成功值
+ */
+inline fun <T> AppResult<T>.recover(transform: (Throwable) -> T): AppResult<T> = when (this) {
+    is AppResult.Success -> this
+    is AppResult.Error -> AppResult.success(transform(exception))
+}
 
-    /**
-     * 展平恢复
-     */
-    inline fun <T> AppResult<T>.recoverCatching(transform: (Throwable) -> T): AppResult<T> = when (this) {
-        is AppResult.Success -> this
-        is AppResult.Error -> AppResult.runCatching { transform(exception) }
-    }
+/**
+ * 展平恢复
+ */
+inline fun <T> AppResult<T>.recoverCatching(transform: (Throwable) -> T): AppResult<T> = when (this) {
+    is AppResult.Success -> this
+    is AppResult.Error -> AppResult.runCatching { transform(exception) }
+}
 
-    /**
-     * 过滤成功值，不满足条件时转为错误
-     */
-    inline fun <T> AppResult<T>.filter(predicate: (T) -> Boolean, errorProvider: () -> Throwable): AppResult<T> = when (this) {
-        is AppResult.Success -> if (predicate(data)) this else AppResult.error(errorProvider())
-        is AppResult.Error -> this
-    }
+/**
+ * 过滤成功值，不满足条件时转为错误
+ */
+inline fun <T> AppResult<T>.filter(predicate: (T) -> Boolean, errorProvider: () -> Throwable): AppResult<T> = when (this) {
+    is AppResult.Success -> if (predicate(data)) this else AppResult.error(errorProvider())
+    is AppResult.Error -> this
+}
 
-    /**
-     * 组合两个AppResult
-     */
-    fun <T1, T2, R> AppResult<T1>.zip(other: AppResult<T2>, transform: (T1, T2) -> R): AppResult<R> = when {
-        this is AppResult.Error -> this
-        other is AppResult.Error -> other
-        this is AppResult.Success && other is AppResult.Success -> AppResult.success(transform(data, other.data))
-        else -> throw IllegalStateException("Unexpected state in zip")
-    }
+/**
+ * 组合两个AppResult
+ */
+fun <T1, T2, R> AppResult<T1>.zip(other: AppResult<T2>, transform: (T1, T2) -> R): AppResult<R> = when {
+    this is AppResult.Error -> this
+    other is AppResult.Error -> other
+    this is AppResult.Success && other is AppResult.Success -> AppResult.success(transform(data, other.data))
+    else -> throw IllegalStateException("Unexpected state in zip")
+}
