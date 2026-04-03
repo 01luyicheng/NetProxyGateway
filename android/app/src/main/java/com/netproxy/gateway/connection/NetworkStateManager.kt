@@ -89,7 +89,7 @@ class NetworkStateManager @Inject constructor(
     }
 
     internal fun getStateAfterNetworkLost(): NetworkState {
-        return getCurrentNetworkState(null)
+        return NetworkState(isConnected = false, networkType = NetworkType.None)
     }
 
     fun getCurrentNetworkType(): NetworkType {

@@ -762,14 +762,20 @@ func NewSOCKS5Server(config *Config) *SOCKS5Server {
 }
 
 // NewSOCKS5ServerWithDialer 使用自定义 TunnelDialer 创建 SOCKS5 服务器（用于测试）
-func NewSOCKS5ServerWithDialer(config *Config, dialer TunnelDialer) *SOCKS5Server {
+func NewSOCKS5ServerWithDialer(config *Config, dialer TunnelDialer) (*SOCKS5Server, error) {
+	if config == nil {
+		return nil, fmt.Errorf("config cannot be nil")
+	}
+	if dialer == nil {
+		return nil, fmt.Errorf("dialer cannot be nil")
+	}
 	return &SOCKS5Server{
 		config:       config,
 		sessionStore: NewAPISessionStore(config.APIEndpoint),
 		rateLimiter:  NewRateLimiter(),
 		ipFilter:     NewIPFilter(),
 		tunnelClient: dialer,
-	}
+	}, nil
 }
 
 // Start 启动服务器
@@ -832,37 +838,37 @@ func (s *SOCKS5Server) handleConnection(conn net.Conn) {
 	}
 
 	// SOCKS5握手
-	deviceID, err := s.handleHandshake(conn, clientIP)
+	deviceID, token, err := s.handleHandshake(conn, clientIP)
 	if err != nil {
 		log.Printf("Handshake failed for %s: %v", clientIP, err)
 		return
 	}
 
 	// 处理SOCKS5请求
-	err = s.handleRequest(conn, deviceID)
+	err = s.handleRequest(conn, deviceID, token)
 	if err != nil {
 		log.Printf("Request handling failed for %s: %v", clientIP, err)
 	}
 }
 
 // handleHandshake 处理SOCKS5握手
-func (s *SOCKS5Server) handleHandshake(conn net.Conn, clientIP string) (string, error) {
+func (s *SOCKS5Server) handleHandshake(conn net.Conn, clientIP string) (string, string, error) {
 	reader := bufio.NewReader(conn)
 
 	// 读取版本和认证方法数
 	buf := make([]byte, 2)
 	if _, err := io.ReadFull(reader, buf); err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	if buf[0] != 0x05 {
-		return "", fmt.Errorf("unsupported SOCKS version: %d", buf[0])
+		return "", "", fmt.Errorf("unsupported SOCKS version: %d", buf[0])
 	}
 
 	nmethods := int(buf[1])
 	methods := make([]byte, nmethods)
 	if _, err := io.ReadFull(reader, methods); err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	// 检查是否支持用户名/密码认证(0x02)
@@ -877,7 +883,7 @@ func (s *SOCKS5Server) handleHandshake(conn net.Conn, clientIP string) (string, 
 	if !supportsAuth {
 		// 不支持认证，返回无认证方法
 		conn.Write([]byte{0x05, 0x00})
-		return "", fmt.Errorf("no supported authentication method")
+		return "", "", fmt.Errorf("no supported authentication method")
 	}
 
 	// 选择用户名/密码认证
@@ -888,38 +894,38 @@ func (s *SOCKS5Server) handleHandshake(conn net.Conn, clientIP string) (string, 
 }
 
 // handleAuth 处理认证
-func (s *SOCKS5Server) handleAuth(conn net.Conn, reader *bufio.Reader, clientIP string) (string, error) {
+func (s *SOCKS5Server) handleAuth(conn net.Conn, reader *bufio.Reader, clientIP string) (string, string, error) {
 	// 读取版本
 	version, err := reader.ReadByte()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if version != 0x01 {
-		return "", fmt.Errorf("unsupported auth version: %d", version)
+		return "", "", fmt.Errorf("unsupported auth version: %d", version)
 	}
 
 	// 读取用户名长度
 	ulen, err := reader.ReadByte()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	// 读取用户名
 	username := make([]byte, ulen)
 	if _, err := io.ReadFull(reader, username); err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	// 读取密码长度
 	plen, err := reader.ReadByte()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	// 读取密码
 	password := make([]byte, plen)
 	if _, err := io.ReadFull(reader, password); err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	deviceID := string(username)
@@ -929,7 +935,7 @@ func (s *SOCKS5Server) handleAuth(conn net.Conn, reader *bufio.Reader, clientIP 
 	valid, err := s.sessionStore.ValidateToken(deviceID, token)
 	if err != nil || !valid {
 		conn.Write([]byte{0x01, 0x01}) // 认证失败
-		return "", fmt.Errorf("authentication failed")
+		return "", "", fmt.Errorf("authentication failed")
 	}
 
 	// 认证成功
@@ -937,11 +943,11 @@ func (s *SOCKS5Server) handleAuth(conn net.Conn, reader *bufio.Reader, clientIP 
 	s.rateLimiter.Success(clientIP)
 	log.Printf("Authentication successful for device: %s", deviceID)
 
-	return deviceID, nil
+	return deviceID, token, nil
 }
 
 // handleRequest 处理SOCKS5请求
-func (s *SOCKS5Server) handleRequest(conn net.Conn, deviceID string) error {
+func (s *SOCKS5Server) handleRequest(conn net.Conn, deviceID string, token string) error {
 	reader := bufio.NewReader(conn)
 
 	// 读取请求头
@@ -1018,7 +1024,7 @@ func (s *SOCKS5Server) handleRequest(conn net.Conn, deviceID string) error {
 
 	switch cmd {
 	case 0x01: // CONNECT
-		return s.handleConnect(conn, AuthSession{DeviceID: deviceID, Token: deviceID}, dstAddr, dstPort)
+		return s.handleConnect(conn, AuthSession{DeviceID: deviceID, Token: token}, dstAddr, dstPort)
 	case 0x02: // BIND
 		s.sendReply(conn, 0x07) // Command not supported
 		return fmt.Errorf("BIND not supported")
@@ -1051,7 +1057,9 @@ func (s *SOCKS5Server) handleConnect(conn net.Conn, session AuthSession, dstAddr
 	defer func() {
 		targetConn.Close()
 		// 清理流记录
-		s.tunnelClient.RemoveStream(targetConn.(*StreamConn).StreamID)
+		if streamConn, ok := targetConn.(*StreamConn); ok {
+			s.tunnelClient.RemoveStream(streamConn.StreamID)
+		}
 	}()
 
 	// 发送成功响应

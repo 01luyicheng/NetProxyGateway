@@ -86,4 +86,47 @@ class VirtualIpAllocatorTest {
         assertFalse(results.contains("10.0.0.255"))
         assertTrue(results.all { it.startsWith("10.0.0.") })
     }
+
+    @Test
+    fun concurrentResetDuringOverflow_maintainsConsistency() {
+        val virtualIpPool = ConcurrentHashMap<String, String>()
+        val reverseIpMap = ConcurrentHashMap<String, String>()
+        val nextVirtualIp = AtomicInteger(253)
+
+        val executor = Executors.newFixedThreadPool(16)
+        val doneLatch = CountDownLatch(32)
+        val results = ConcurrentHashMap.newKeySet<String>()
+        val resetCount = AtomicInteger(0)
+
+        repeat(32) { index ->
+            executor.submit {
+                try {
+                    val ip = VirtualIpAllocator.getOrAllocateVirtualIp(
+                        realDstIp = "10.0.0.$index",
+                        virtualIpPool = virtualIpPool,
+                        reverseIpMap = reverseIpMap,
+                        nextVirtualIp = nextVirtualIp,
+                        onPoolReset = { resetCount.incrementAndGet() }
+                    )
+                    synchronized(results) {
+                        results.add(ip)
+                    }
+                } finally {
+                    doneLatch.countDown()
+                }
+            }
+        }
+
+        assertTrue(doneLatch.await(5, TimeUnit.SECONDS))
+        executor.shutdownNow()
+
+        assertFalse("Should never return broadcast IP", results.contains("10.0.0.255"))
+        assertTrue("All IPs should be in 10.0.0.x format", results.all { it.startsWith("10.0.0.") })
+
+        val uniqueIps = results.filter { it != "10.0.0.1" }
+        assertTrue("Should have allocated valid IPs", uniqueIps.isNotEmpty())
+
+        assertTrue("nextVirtualIp should be >= 2 after concurrent allocations", nextVirtualIp.get() >= 2)
+        assertEquals("Pool reset should be called exactly once", 1, resetCount.get())
+    }
 }

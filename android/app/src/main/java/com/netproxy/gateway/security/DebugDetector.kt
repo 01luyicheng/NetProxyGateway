@@ -133,15 +133,48 @@ object DebugDetector {
         }
     }
 
-    internal fun parsePtraceStatus(statusContent: String): Boolean {
+    internal fun parsePtraceStatus(statusContent: String, currentPid: Int = android.os.Process.myPid()): Boolean {
+        val tracerPid = statusContent
+            .lineSequence()
+            .firstOrNull { it.startsWith("TracerPid:") }
+            ?.substringAfter(":")
+            ?.trim()
+            ?.toIntOrNull() ?: 0
+
+        val ppid = statusContent
+            .lineSequence()
+            .firstOrNull { it.startsWith("PPid:") }
+            ?.substringAfter(":")
+            ?.trim()
+            ?.toIntOrNull() ?: 0
+
+        // TracerPid 检测：非零表示有调试器附加
+        if (tracerPid != 0) return true
+
+        // PPid 检测：仅当 PPid 为异常值时才认为可疑
+        // 正常 Android App 的父进程应该是 zygote，PPid 通常 > 100
+        // PPid = 1 表示由 init 直接启动，可能是调试器启动的进程
+        return ppid == 1
+    }
+
+    internal fun parseTracerPid(statusContent: String): Int {
         return statusContent
             .lineSequence()
             .firstOrNull { it.startsWith("TracerPid:") }
             ?.substringAfter(":")
             ?.trim()
             ?.toIntOrNull()
-            ?.let { it != 0 }
-            ?: false
+            ?: 0
+    }
+
+    internal fun parsePpid(statusContent: String): Int {
+        return statusContent
+            .lineSequence()
+            .firstOrNull { it.startsWith("PPid:") }
+            ?.substringAfter(":")
+            ?.trim()
+            ?.toIntOrNull()
+            ?: 0
     }
 
     /**

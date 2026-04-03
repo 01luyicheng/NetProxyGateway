@@ -744,15 +744,14 @@ class GatewayVpnService : AndroidVpnService() {
      * 获取或分配虚拟 IP
      */
     private fun getOrAllocateVirtualIp(realDstIp: String): String {
-        val ip = VirtualIpAllocator.getOrAllocateVirtualIp(
+        return VirtualIpAllocator.getOrAllocateVirtualIp(
             realDstIp = realDstIp,
             virtualIpPool = virtualIpPool,
             reverseIpMap = reverseIpMap,
             nextVirtualIp = nextVirtualIp,
-            onPoolReset = { logger.error("Virtual IP pool exhausted! Resetting pool.") }
+            onPoolReset = { logger.error("Virtual IP pool exhausted! Resetting pool.") },
+            onAllocated = { ip, dstIp -> logDebug("Allocated virtual IP ${redactIp(ip)} for ${redactIp(dstIp)}") }
         )
-        logDebug("Allocated virtual IP ${redactIp(ip)} for ${redactIp(realDstIp)}")
-        return ip
     }
 
     private fun logMissingSession(destinationIp: String) {
@@ -941,7 +940,7 @@ class GatewayVpnService : AndroidVpnService() {
         
         stopProxyService()
         // STOP_FOREGROUND_REMOVE is available since API 24 (Android 7.0)
-        // Since minSdk is 26, we can safely use the new API
+        // Current minSdk is 26, so it's safe to use
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
 

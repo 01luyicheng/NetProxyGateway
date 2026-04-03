@@ -30,7 +30,9 @@ class NetworkStateManagerTest {
     }
 
     @Test
-    fun getStateAfterNetworkLost_returnsCurrentActiveNetworkState() {
+    fun getStateAfterNetworkLost_returnsDisconnectedState() {
+        // When network is lost, getStateAfterNetworkLost should return disconnected state
+        // regardless of current active network
         every { connectivityManager.activeNetwork } returns cellularNetwork
         every { connectivityManager.getNetworkCapabilities(cellularNetwork) } returns capabilities(
             transport = NetworkCapabilities.TRANSPORT_CELLULAR,
@@ -41,10 +43,10 @@ class NetworkStateManagerTest {
         val manager = NetworkStateManager(context)
         val state = manager.getStateAfterNetworkLost()
 
-        assertTrue(state.isConnected)
-        assertTrue(state.isValidated)
-        assertEquals(NetworkType.Cellular, state.networkType)
-        assertEquals(cellularNetwork, state.network)
+        assertFalse(state.isConnected)
+        assertFalse(state.isValidated)
+        assertEquals(NetworkType.None, state.networkType)
+        assertEquals(null, state.network)
     }
 
     @Test
