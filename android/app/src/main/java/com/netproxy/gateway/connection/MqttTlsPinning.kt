@@ -47,7 +47,11 @@ object MqttTlsPinning {
         }
         val matched = presentedPins.any { pin -> pin in configuredPins }
         if (!matched) {
-            throw CertificateException("MQTT TLS public key pin verification failed")
+            throw CertificateException(
+                "MQTT TLS public key pin verification failed. " +
+                "Configured pins: ${configuredPins.size}, " +
+                "Presented pins: ${presentedPins.size}"
+            )
         }
     }
 

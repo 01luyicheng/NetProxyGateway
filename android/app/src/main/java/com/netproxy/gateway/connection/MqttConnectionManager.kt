@@ -86,32 +86,32 @@ class MqttConnectionManager @Inject constructor(
     }
 
     /**
-     * 创建 SSLSocketFactory
      * 根据 BuildConfig 配置决定使用哪种证书验证方式：
-     * - 生产环境：使用系统默认 CA 证书（验证服务器证书）
-     * - 开发环境：信任所有证书（仅用于开发测试自签名证书）
-     * TODO: 上线前将 BuildConfig.MQTT_TRUST_ALL_CERTS 改为 false
+     * - release 构建：使用系统默认 CA 证书（验证服务器证书，release 构建安全）
+     * - debug 构建：信任所有证书（仅用于开发测试自签名证书，禁止用于生产）
+     * 
+     * 安全限制：MQTT_TRUST_ALL_CERTS 在 release 构建中必须为 false
      */
     private fun createSecureSocketFactory(): SSLSocketFactory {
-        // 安全检查：生产环境 (DEBUG=false) 不允许启用信任所有证书
+        // 安全检查：release 构建 (DEBUG=false) 不允许启用信任所有证书
         if (!BuildConfig.DEBUG && BuildConfig.MQTT_TRUST_ALL_CERTS) {
             throw IllegalStateException(
-                "TRUST_ALL_CERTS is not allowed in production builds. " +
+                "TRUST_ALL_CERTS is not allowed in release builds. " +
                 "Please set MQTT_TRUST_ALL_CERTS to false in build configuration."
             )
         }
 
         return if (BuildConfig.MQTT_TRUST_ALL_CERTS) {
-            // 开发模式：信任所有证书（支持自签名证书）
+            // debug 构建：信任所有证书（支持自签名证书）
             createDevSocketFactory()
         } else {
-            // 生产模式：使用系统默认CA证书
+            // release 构建：使用系统默认 CA 证书
             createProductionSocketFactory()
         }
     }
 
     /**
-     * 生产环境：使用系统默认CA证书验证
+     * release 构建：使用系统默认 CA 证书验证
      */
     private fun createProductionSocketFactory(): SSLSocketFactory {
         val trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
@@ -137,18 +137,17 @@ class MqttConnectionManager @Inject constructor(
     }
 
     /**
-     * 开发环境：信任所有证书（仅用于开发测试）
-     * 警告：此方式不安全，仅用于开发环境连接自签名证书服务器
+     * debug 构建：信任所有证书（仅用于开发测试）
+     * 警告：此方式不安全，仅用于 debug 构建连接自签名证书服务器
      * 安全限制：仅在 BuildConfig.DEBUG 为 true 时允许使用
      */
     private fun createDevSocketFactory(): SSLSocketFactory {
-        logger.warn("Using development SSL socket factory - trusts all certificates!")
         val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
             override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {
-                // 开发环境：信任所有客户端证书
+                // debug 构建：信任所有客户端证书
             }
             override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {
-                // 开发环境：信任所有服务器证书（包括自签名）
+                // debug 构建：信任所有服务器证书（包括自签名）
             }
             override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
         })
