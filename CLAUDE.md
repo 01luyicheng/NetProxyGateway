@@ -9,7 +9,6 @@
 
 - 仓库包含 Android 客户端代码和 Go 服务端代码。
 - 服务端组件：`server/api/`、`server/socks5-proxy/`、`server/tunnel/`
-- 如果需求依赖于未实现的服务端功能，将其视为已阻塞并记录差距。
 
 ## 3) 事实来源
 
@@ -89,7 +88,7 @@
 
 为维护跨会话的连续性：
 
-- 每个通过验证的合并提交必须注明代理名称和日期
+- 每个通过验证的合并提交必须注明Agent使用的模型名称和日期
 - 在开始工作前，必须验证：`android\gradlew.bat -p android :app:testDebugUnitTest` 通过
 - 如果 main 分支测试失败，通过在第 5 节（技术风险）中提交明确的阻塞问题来解除阻塞
 
