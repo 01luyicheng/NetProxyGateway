@@ -733,9 +733,47 @@ type AuthSession struct {
 	Token    string
 }
 
-// TunnelDialer 隧道拨号器接口（用于测试）
+// TunnelDialer 隧道拨号器接口
+// 用于通过隧道建立网络连接，支持测试注入
+// 
+// 线程安全要求：
+// - 所有方法必须是并发安全的，可以在多个 goroutine 中同时调用
+// - 实现应该使用适当的同步机制（如 mutex）保护共享状态
+// 
+// 错误处理：
+// - ConnectThroughTunnel 失败时应返回描述性错误，使用 fmt.Errorf 包装底层错误
+// - RemoveStream 对于不存在的 streamID 应该静默成功（不返回错误）
 type TunnelDialer interface {
+	// ConnectThroughTunnel 通过隧道连接到目标地址
+	// 
+	// 参数：
+	//   - deviceID: 设备唯一标识符，用于认证和路由
+	//   - token: 认证令牌，与 deviceID 配对使用
+	//   - dstAddr: 目标主机地址（域名或 IP）
+	//   - dstPort: 目标端口号
+	// 
+	// 返回：
+	//   - net.Conn: 成功时返回与目标的连接
+	//   - error: 失败时返回错误，可能的错误类型包括：
+	//     * 隧道连接失败：fmt.Errorf("failed to get tunnel: %w", err)
+	//     * 认证失败：当 deviceID/token 无效时
+	//     * 网络错误：目标不可达或连接超时
+	// 
+	// 行为约定：
+	//   - 每次调用都会创建一个新的连接
+	//   - 返回的 net.Conn 必须是并发安全的
+	//   - 调用者负责在使用完毕后关闭连接
 	ConnectThroughTunnel(deviceID, token, dstAddr string, dstPort int) (net.Conn, error)
+	
+	// RemoveStream 移除指定的流连接
+	// 
+	// 参数：
+	//   - streamID: 要移除的流 ID
+	// 
+	// 行为约定：
+	//   - 如果 streamID 不存在，应该静默成功（不返回错误）
+	//   - 移除后应该释放相关资源（关闭底层连接等）
+	//   - 该方法应该在内部进行适当的同步，保证并发安全
 	RemoveStream(streamID string)
 }
 

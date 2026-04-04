@@ -52,10 +52,10 @@
 
 ## 7) 验证门禁（必须通过）
 
+- 要求多个subagents交叉审查变更。
 - 构建：`android\\gradlew.bat -p android assembleDebug --stacktrace --no-daemon`
 - 单元测试：`android\\gradlew.bat -p android :app:testDebugUnitTest --stacktrace --no-daemon`
 - 对于有针对性的更改，先运行最窄相关的测试，然后根据需要运行更广泛的测试套件。
-- 要求多个subagents交叉审查变更。
 
 ## 8) AI 变更输出格式
 
@@ -77,12 +77,13 @@
 - 代理之间不进行通信；所有约束通过本文档向下传递
 - 代理之间变更发生冲突时，以本文档最近一次提交为准
 - 所有代理通过 git pull request 合并变更
+- 每次修改代码完成后必须让多个subagents交叉审查变更
 
 **分支策略**：
 
 - `main`: 生产就绪代码，只能通过 PR 合并
 - `dev`: 主开发分支，所有功能分支从此创建
-- `dev-reviewed`: 经过审查后的dev分支
+- `dev-reviewed`: 经过代码审查后的dev分支
 
 ## 11) 验证跟踪（持续性）
 
