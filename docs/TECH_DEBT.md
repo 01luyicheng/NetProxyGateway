@@ -343,9 +343,9 @@
   - 未来 Android 版本可能移除这些 API
   - 影响敏感凭据存储的安全性
 - **建议重构方案**:
-  1. 使用 `MasterKey.Builder(activity)` 替代 `MasterKey.Builder(context)`
-  2. 评估迁移到 Android Keystore-backed key store
-  3. 保持向后兼容性
+  1. 迁移到 AndroidX Security Crypto 的新 `EncryptedSharedPreferences.create(context, fileName, masterKey, ...)` 重载形式
+  2. 统一使用 `context.applicationContext` 传入，而非 Activity 实例
+  3. 对已有加密数据需设计迁移或重新加密策略
 - **预估工作量**: 0.5 天
 - **参考文档**: [AndroidX Crypto docs](https://developer.android.com/reference/androidx/security/crypto/package-summary)
 
@@ -392,9 +392,9 @@
   - Android 11+ 设备上可能无法正确设置状态栏颜色
   - 与现代 Android 设计规范不一致
 - **建议重构方案**:
-  1. 使用 `window.insetsController?.setSystemBarsAppearance()` 控制状态栏
-  2. 配合 Compose 的 `enableEdgeToEdge()` API
-  3. 保持向后兼容性
+  1. 在 Application/Activity 级别调用 `enableEdgeToEdge()`（AndroidX Activity 1.8+ / Compose 1.7+）统一处理状态栏和导航栏
+  2. 移除 `Theme.kt` 中对 `window.statusBarColor` 的手动赋值
+  3. 通过 Compose Material3 的 `TopAppBarDefaults.topAppBarColors()` 或 `WindowInsets` 控制颜色
 - **预估工作量**: 0.25 天
 
 ---
