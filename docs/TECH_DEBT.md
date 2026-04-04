@@ -308,21 +308,19 @@
 - **预估工作量**: 0.5 天
 - **参考文档**: 详见 `docs/DEPENDENCY_VERSIONS.md`
 
-### L26: Netty 4.2 新 API 迁移
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt` (L255)
-- **问题描述**: Netty 4.2 引入了新的 EventLoopGroup 初始化方式，当前代码仍使用旧的 API：
-  - 当前: `NioEventLoopGroup()` 直接实例化
-  - 推荐: `MultiThreadIoEventLoopGroup(NioIoHandler.newFactory())`
+### L26: Netty NioEventLoopGroup 已产生 deprecation 警告
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyService.kt`
+- **问题描述**: 当前代码使用 `NioEventLoopGroup()` 直接实例化，build 输出已产生 deprecation 警告。Netty 引入了新的 API: `MultiThreadIoEventLoopGroup(NioIoHandler.newFactory())`
 - **技术影响**:
-  - 虽然当前 API 仍兼容，但未来可能被弃用
-  - 无法使用 Netty 4.2 的新特性（如 adaptive 内存分配器）
-  - 性能可能不是最优
+  - build 输出中大量警告影响可读性，掩盖真正问题
+  - 未来 Netty 版本可能移除旧 API
+  - 无法使用新版本 Netty 的特性
 - **建议重构方案**:
-  1. 评估是否迁移到新的 `MultiThreadIoEventLoopGroup` API
-  2. 如需使用旧版 pooled 分配器，设置系统属性: `io.netty.allocator.type=pooled`
-  3. 测试迁移后的性能和兼容性
-- **预估工作量**: 1 天
-- **参考文档**: 详见 `docs/DEPENDENCY_VERSIONS.md` 和 Context7 Netty 4.2 迁移指南
+  1. 升级 Netty 版本（当前 4.1.118.Final），评估 4.2.x 的兼容性
+  2. 迁移到新 API `MultiThreadIoEventLoopGroup(NioIoHandler.newFactory())`
+  3. 或在 gradle 中 suppress 警告作为临时方案
+- **预估工作量**: 1 天（含测试）
+- **参考文档**: 详见 `docs/DEPENDENCY_VERSIONS.md` 和 Context7 Netty 文档
 
 ### L27: Go 版本可升级
 - **位置**: `server/*/go.mod`
@@ -337,6 +335,68 @@
 - **预估工作量**: 0.5 天
 - **参考文档**: 详见 `docs/DEPENDENCY_VERSIONS.md`
 
+### L28: EncryptedSharedPreferences / MasterKey 已弃用
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/AuthSessionStore.kt`, `android/app/src/main/java/com/netproxy/gateway/wifi/WifiManager.kt`
+- **问题描述**: Android 12+ 已弃用 `EncryptedSharedPreferences` 和 `MasterKey.Builder(Context)` 构造方式，推荐使用 `androidx.security.crypto` 的新 API 或 Android Keystore
+- **技术影响**:
+  - 在 Android 12+ 设备上可能触发安全审核警告
+  - 未来 Android 版本可能移除这些 API
+  - 影响敏感凭据存储的安全性
+- **建议重构方案**:
+  1. 使用 `MasterKey.Builder(activity)` 替代 `MasterKey.Builder(context)`
+  2. 评估迁移到 Android Keystore-backed key store
+  3. 保持向后兼容性
+- **预估工作量**: 0.5 天
+- **参考文档**: [AndroidX Crypto docs](https://developer.android.com/reference/androidx/security/crypto/package-summary)
+
+### L29: DI Module 接口被标记为 deprecated
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/di/ModuleInterfaces.kt`, `ModuleImplementations.kt`
+- **问题描述**: `CoreModule`、`CommunicationModule`、`NetworkModule`、`WiFiModule`、`UIModule`、`ConfigModule` 等接口被标记为 deprecated，建议直接使用 `*CommandHandler` / `*QueryHandler` 接口
+- **技术影响**:
+  - 代码可读性差，deprecation 警告分散在 build 输出中
+  - 长期会阻碍维护和重构
+  - 警告掩盖真正重要的编译错误
+- **建议重构方案**:
+  1. 移除中间接口层，直接注入 `CommandHandler` / `QueryHandler`
+  2. 简化 DI 模块配置
+  3. 与 ISSUE-014（接口过度设计）合并处理
+- **预估工作量**: 0.5 天
+
+### L30: hiltViewModel() 迁移到新包
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt`
+- **问题描述**: `dagger.hilt.android.lifecycle.hiltViewModel()` 已迁移到 `androidx.hilt.lifecycle.compose.hiltViewModel()`，当前导入路径 deprecated
+- **技术影响**:
+  - 未来 Hilt 版本可能移除旧导入
+  - 警告影响 build 输出可读性
+- **建议重构方案**:
+  1. 将 `import dagger.hilt.android.lifecycle.hiltViewModel` 替换为 `import androidx.hilt.lifecycle.compose.hiltViewModel`
+  2. 验证功能行为不变
+- **预估工作量**: 0.25 天
+
+### L31: VpnService.extractTransportPayload 已弃用
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt`
+- **问题描述**: `extractTransportPayload()` 方法被标记为 deprecated，建议使用 `extractTransportPayloadInfo` 替代以避免不必要的数组拷贝
+- **技术影响**:
+  - 产生不必要的内存分配，影响性能
+  - 未来版本可能移除旧 API
+- **建议重构方案**:
+  1. 迁移到 `extractTransportPayloadInfo` API
+  2. 验证功能行为不变
+  3. 如新 API 不兼容当前使用场景，需调整调用方
+- **预估工作量**: 0.5 天
+
+### L32: StatusBarColor 属性已弃用
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/theme/Theme.kt`
+- **问题描述**: `window.statusBarColor` 在 API 30+ 已弃用，推荐使用 `WindowInsetsController`
+- **技术影响**:
+  - Android 11+ 设备上可能无法正确设置状态栏颜色
+  - 与现代 Android 设计规范不一致
+- **建议重构方案**:
+  1. 使用 `window.insetsController?.setSystemBarsAppearance()` 控制状态栏
+  2. 配合 Compose 的 `enableEdgeToEdge()` API
+  3. 保持向后兼容性
+- **预估工作量**: 0.25 天
+
 ---
 
 ## 统计汇总
@@ -346,17 +406,17 @@
 | Critical | 2 | 5-8 天 |
 | High | 1 | 3-4 天 |
 | Medium | 4 | 3.5-5 天 |
-| Low | 14 | 11-15 天 |
-| **总计** | **21** | **22.5-32 天** |
+| Low | 10 | 7-9 天 |
+| **总计** | **26** | **18.5-26 天** |
 
 ---
 
 ## 重构优先级建议
 
 1. **紧急（立即）**: C1 网络出口控制、C2 厂商适配 - 影响核心功能正确性
-2. **第一阶段（立即）**: L1 魔法数字、L18 硬编码配置、L25 Go 依赖版本不一致 - 低风险，快速收益
-3. **第二阶段（短期）**: L9 代码重复、L10 重复错误处理、L20 线程安全、L21 异常处理、L23 MQTT 错误日志、L24 已弃用 WiFi API - 改善代码质量
-4. **第三阶段（中期）**: ISSUE-014/L15 不必要抽象、L16 测试改进、L17 依赖网、L19 文档注释、L26 Netty 4.2 迁移 - 架构优化
+2. **第一阶段（立即）**: L1 魔法数字、L18 硬编码配置、L25 Go 依赖版本不一致、L30 hiltViewModel() 迁移、L32 StatusBarColor 迁移 - 低风险，快速收益
+3. **第二阶段（短期）**: L9 代码重复、L10 重复错误处理、L20 线程安全、L21 异常处理、L23 MQTT 错误日志、L24 已弃用 WiFi API、L28 EncryptedSharedPreferences、L29 DI Module 接口、L31 extractTransportPayload - 改善代码质量
+4. **第三阶段（中期）**: ISSUE-014/L15 不必要抽象、L16 测试改进、L17 依赖网、L19 文档注释、L26 Netty NioEventLoopGroup 迁移 - 架构优化
 5. **第四阶段（长期）**: H5 VpnService 拆分、L22 测试覆盖率、L27 Go 升级 - 重大重构，需要充分测试
 
 ---
@@ -374,5 +434,6 @@
 | 2026-03-31 | 新增 Critical 级别债务：C1（网络出口控制机制缺失）、C2（厂商定制 ROM 适配缺失），更新统计为 16 项 | AI Agent |
 | 2026-04-03 | 新增 L23（MQTT 错误日志缺少堆栈信息），更新统计为 17 项 | AI Agent |
 | 2026-04-04 | 新增 L24-L27（依赖相关技术债务），更新统计为 21 项，新增 `docs/DEPENDENCY_VERSIONS.md` | AI Agent |
+| 2026-04-04 | 新增 L28-L32（deprecated API 警告未追踪），更新统计为 26 项 | Claude |
 
 *最后更新：2026-04-04*
