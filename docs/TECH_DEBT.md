@@ -337,7 +337,7 @@
 
 ### L28: EncryptedSharedPreferences / MasterKey 已弃用
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/AuthSessionStore.kt`, `android/app/src/main/java/com/netproxy/gateway/wifi/WifiManager.kt`
-- **问题描述**: Android 12+ 已弃用 `EncryptedSharedPreferences` 和 `MasterKey.Builder(Context)` 构造方式，推荐使用 `androidx.security.crypto` 的新 API 或 Android Keystore
+- **问题描述**: Android 12+ 已弃用 `EncryptedSharedPreferences` 和 `MasterKey.Builder(Context)` 构造方式（当前代码使用 Context 子类构造），推荐使用 `androidx.security.crypto` 的新 API 或 Android Keystore
 - **技术影响**:
   - 在 Android 12+ 设备上可能触发安全审核警告
   - 未来 Android 版本可能移除这些 API
@@ -364,17 +364,17 @@
 
 ### L30: hiltViewModel() 迁移到新包
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt`
-- **问题描述**: `dagger.hilt.android.lifecycle.hiltViewModel()` 已迁移到 `androidx.hilt.lifecycle.compose.hiltViewModel()`，当前导入路径 deprecated
+- **问题描述**: 当前使用 `androidx.hilt.navigation.compose.hiltViewModel()`，build 输出警告该函数已迁移到 `androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel()`
 - **技术影响**:
   - 未来 Hilt 版本可能移除旧导入
   - 警告影响 build 输出可读性
 - **建议重构方案**:
-  1. 将 `import dagger.hilt.android.lifecycle.hiltViewModel` 替换为 `import androidx.hilt.lifecycle.compose.hiltViewModel`
+  1. 将 `import androidx.hilt.navigation.compose.hiltViewModel` 替换为 `import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel`
   2. 验证功能行为不变
 - **预估工作量**: 0.25 天
 
 ### L31: VpnService.extractTransportPayload 已弃用
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/GatewayVpnService.kt`
 - **问题描述**: `extractTransportPayload()` 方法被标记为 deprecated，建议使用 `extractTransportPayloadInfo` 替代以避免不必要的数组拷贝
 - **技术影响**:
   - 产生不必要的内存分配，影响性能
