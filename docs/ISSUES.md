@@ -168,9 +168,92 @@
 
 ### L13: 硬编码延迟
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (L165-L174)
-- **问题**: 使用`delay(2000)`等待扫描完成是脆弱的设计
+- **问题**: 使用 `delay(2000)` 等待扫描完成是脆弱的设计
 - **风险**: 在不同设备上表现不一致
 - **建议修复**: 使用回调或状态监听替代固定延迟
+
+### L14: SSL 证书安全检查注释不准确 [已修复]
+- **状态**: 已修复（2026-04-03）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L89-96)
+- **问题**: 注释使用"生产环境/开发环境"术语，但代码检查的是 `BuildConfig.DEBUG`。虽然基本正确，但不够精确，可能引起误解
+- **风险**: 低，术语不准确可能导致开发者对构建配置的理解混淆
+- **修复说明**: 将"生产环境/开发环境"改为"release 构建/debug 构建"，将"生产环境 (DEBUG=false)"改为"非调试版本 (DEBUG=false)"，更准确地反映代码逻辑
+- **代码（修复后）**:
+  ```kotlin
+  /**
+   * 根据 BuildConfig 配置决定使用哪种证书验证方式：
+   * - release 构建：使用系统默认 CA 证书（验证服务器证书）
+   * - debug 构建：信任所有证书（仅用于开发测试自签名证书）
+   * TODO: 上线前将 BuildConfig.MQTT_TRUST_ALL_CERTS 改为 false
+   */
+  private fun createSecureSocketFactory(): SSLSocketFactory {
+      // 安全检查：非调试版本 (DEBUG=false) 不允许启用信任所有证书
+      if (!BuildConfig.DEBUG && BuildConfig.MQTT_TRUST_ALL_CERTS) {
+          throw IllegalStateException(
+              "TRUST_ALL_CERTS is not allowed in production builds. " +
+              "Please set MQTT_TRUST_ALL_CERTS to false in build configuration."
+          )
+      }
+  }
+  ```
+
+---
+
+## Medium Severity
+
+### M12: MQTT 发布和订阅未检查连接状态
+- **状态**: 待修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L268-280, L286-298)
+- **问题**: `publishWithResult` 和 `subscribeWithResult` 方法只检查 `mqttClient != null`，但不检查连接状态（`_connectionState.value == MqttConnectionState.Connected`）。这可能导致在客户端正在连接或断开时尝试发布/订阅消息，操作会失败但错误信息不明确
+- **风险**: 中。在连接不稳定或重连过程中，可能导致消息发布/订阅失败，增加调试难度
+- **建议修复**:
+  1. 在 `publishWithResult` 和 `subscribeWithResult` 中添加连接状态检查
+  2. 如果未连接，返回明确的错误信息或等待连接完成
+  3. 考虑添加超时机制，避免无限等待
+- **代码示例**:
+  ```kotlin
+  fun publishWithResult(topic: String, payload: String, qos: Int = 0): AppResult<Unit> {
+      val client = mqttClient ?: return AppResult.error(IllegalStateException("MQTT client is not connected"))
+      
+      // 添加连接状态检查
+      if (_connectionState.value != MqttConnectionState.Connected) {
+          return AppResult.error(IllegalStateException("MQTT client is not connected, current state: ${_connectionState.value}"))
+      }
+      
+      // ... 其余代码
+  }
+  ```
+
+### M13: MQTT 重连延迟递增逻辑问题
+- **状态**: 待修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L242-252)
+- **问题**: `scheduleReconnect` 方法在**重连前**就增加延迟（`reconnectDelay = minOf(reconnectDelay * 2, MAX_RECONNECT_DELAY)`），导致第一次重连的延迟是 10 秒而不是 5 秒。正确的逻辑应该是在重连**失败后**再增加延迟
+- **风险**: 低。会导致重连时间比预期更长，影响用户体验
+- **建议修复**:
+  1. 将延迟递增逻辑移到重连尝试之后
+  2. 或者在重连成功后重置延迟为初始值
+  3. 考虑使用指数退避算法的标准实现
+- **代码示例**:
+  ```kotlin
+  private fun scheduleReconnect(deviceId: String, authToken: String, generation: Long) {
+      reconnectJob?.cancel()
+      reconnectJob = scope.launch {
+          delay(reconnectDelay)
+          if (!shouldStayConnected || generation != connectionGeneration.get()) {
+              return@launch
+          }
+          
+          // 先重连
+          connect(deviceId, authToken)
+          
+          // 如果重连失败，再增加延迟（在 connect 方法中处理）
+          // 或者在重连成功后重置延迟
+          if (_connectionState.value == MqttConnectionState.Connected) {
+              reconnectDelay = INITIAL_RECONNECT_DELAY
+          }
+      }
+  }
+  ```
 
 ---
 
@@ -183,4 +266,6 @@
 | 2026-03-31 | 确认文档完整性：ISSUES.md仅保留需要修复的软件缺陷，其他类型问题已正确迁移到专门文档 | AI Agent |
 | 2026-03-31 | 修正H2引用错误：原"见M2"引用不正确（M2是WiFi权限问题），H2实际已解决（SupervisorJob已实现异常隔离），更新为"已解决"状态 | Bug修复专家 |
 | 2026-03-31 | 更新交叉引用：添加与其他文档的关联链接（TECH_DEBT.md、BLOCKERS.md、KNOWN_LIMITATIONS.md、DECISIONS.md） | AI Agent |
-| 2026-04-01 | 修复 C3 虚拟IP边界与并发分配问题：新增 `VirtualIpAllocator` 并补充边界/并发回归测试，避免分配 `10.0.0.255` | AI Agent |
+| 2026-04-01 | 修复 C3 虚拟 IP 边界与并发分配问题：新增 `VirtualIpAllocator` 并补充边界/并发回归测试，避免分配 `10.0.0.255` | AI Agent |
+| 2026-04-03 | 修复 L14 SSL 证书安全检查注释不准确：将"生产环境/开发环境"改为"release 构建/debug 构建"，术语更精确 | AI Agent |
+| 2026-04-03 | 新增 M12（MQTT 发布和订阅未检查连接状态）、M13（MQTT 重连延迟递增逻辑问题） | AI Agent |
