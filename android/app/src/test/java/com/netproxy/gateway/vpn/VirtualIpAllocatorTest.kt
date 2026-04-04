@@ -12,13 +12,18 @@ import java.util.concurrent.atomic.AtomicInteger
 
 class VirtualIpAllocatorTest {
 
+    private fun createAllocator(): VirtualIpAllocator {
+        return VirtualIpAllocatorImpl()
+    }
+
     @Test
     fun boundary254_returns10_0_0_254() {
         val virtualIpPool = ConcurrentHashMap<String, String>()
         val reverseIpMap = ConcurrentHashMap<String, String>()
         val nextVirtualIp = AtomicInteger(254)
 
-        val ip = VirtualIpAllocator.getOrAllocateVirtualIp(
+        val allocator = createAllocator()
+        val ip = allocator.getOrAllocateVirtualIp(
             realDstIp = "8.8.8.8",
             virtualIpPool = virtualIpPool,
             reverseIpMap = reverseIpMap,
@@ -39,7 +44,8 @@ class VirtualIpAllocatorTest {
         virtualIpPool["1.1.1.1"] = "10.0.0.1"
         reverseIpMap["10.0.0.1"] = "1.1.1.1"
 
-        val ip = VirtualIpAllocator.getOrAllocateVirtualIp(
+        val allocator = createAllocator()
+        val ip = allocator.getOrAllocateVirtualIp(
             realDstIp = "8.8.8.8",
             virtualIpPool = virtualIpPool,
             reverseIpMap = reverseIpMap,
@@ -64,10 +70,11 @@ class VirtualIpAllocatorTest {
         val doneLatch = CountDownLatch(16)
         val results = ConcurrentHashMap.newKeySet<String>()
 
+        val allocator = createAllocator()
         repeat(16) { index ->
             executor.submit {
                 try {
-                    val ip = VirtualIpAllocator.getOrAllocateVirtualIp(
+                    val ip = allocator.getOrAllocateVirtualIp(
                         realDstIp = "192.168.1.$index",
                         virtualIpPool = virtualIpPool,
                         reverseIpMap = reverseIpMap,
@@ -98,10 +105,11 @@ class VirtualIpAllocatorTest {
         val results = ConcurrentHashMap.newKeySet<String>()
         val resetCount = AtomicInteger(0)
 
+        val allocator = createAllocator()
         repeat(32) { index ->
             executor.submit {
                 try {
-                    val ip = VirtualIpAllocator.getOrAllocateVirtualIp(
+                    val ip = allocator.getOrAllocateVirtualIp(
                         realDstIp = "10.0.0.$index",
                         virtualIpPool = virtualIpPool,
                         reverseIpMap = reverseIpMap,

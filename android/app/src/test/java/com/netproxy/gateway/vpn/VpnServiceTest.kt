@@ -45,10 +45,11 @@ class VpnServiceTest {
     fun vpnState_values() {
         val values = VpnState.values()
 
-        assertEquals(4, values.size)
+        assertEquals(5, values.size)
         assertTrue(values.contains(VpnState.STOPPED))
         assertTrue(values.contains(VpnState.STARTING))
         assertTrue(values.contains(VpnState.RUNNING))
+        assertTrue(values.contains(VpnState.STOPPING))
         assertTrue(values.contains(VpnState.ERROR))
     }
 
@@ -57,6 +58,7 @@ class VpnServiceTest {
         assertEquals(VpnState.STOPPED, VpnState.valueOf("STOPPED"))
         assertEquals(VpnState.STARTING, VpnState.valueOf("STARTING"))
         assertEquals(VpnState.RUNNING, VpnState.valueOf("RUNNING"))
+        assertEquals(VpnState.STOPPING, VpnState.valueOf("STOPPING"))
         assertEquals(VpnState.ERROR, VpnState.valueOf("ERROR"))
     }
 

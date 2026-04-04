@@ -143,13 +143,15 @@ object VpnTestUtils {
         return sum.inv() and 0xFFFF
     }
 
+    private val testAllocator: VirtualIpAllocator = VirtualIpAllocatorImpl()
+
     fun getOrAllocateVirtualIp(
         realDstIp: String,
         virtualIpPool: MutableMap<String, String>,
         reverseIpMap: MutableMap<String, String>,
         nextVirtualIp: AtomicInteger,
     ): String {
-        return VirtualIpAllocator.getOrAllocateVirtualIp(
+        return testAllocator.getOrAllocateVirtualIp(
             realDstIp = realDstIp,
             virtualIpPool = virtualIpPool,
             reverseIpMap = reverseIpMap,
