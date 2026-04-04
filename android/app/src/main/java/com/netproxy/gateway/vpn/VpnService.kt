@@ -36,6 +36,7 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.ByteBuffer
@@ -47,6 +48,7 @@ enum class VpnState {
     STOPPED,
     STARTING,
     RUNNING,
+    STOPPING,
     ERROR
 }
 
@@ -101,6 +103,10 @@ class GatewayVpnService : AndroidVpnService() {
 
     @Inject
     lateinit var authSessionStore: AuthSessionStore
+
+    @Inject
+    lateinit var virtualIpAllocator: VirtualIpAllocator
+
     private var vpnInterface: ParcelFileDescriptor? = null
     
     // SOCKS5连接池
@@ -126,6 +132,9 @@ class GatewayVpnService : AndroidVpnService() {
     
     // TUN输出流（用于回包注入）
     private var vpnOutputStream: FileOutputStream? = null
+    
+    // 原子标志，防止 stopVpn() 重复执行
+    private val isStopping = AtomicBoolean(false)
 
     override fun onCreate() {
         super.onCreate()
@@ -144,6 +153,9 @@ class GatewayVpnService : AndroidVpnService() {
         if (_status.value.state == VpnState.RUNNING) {
             return
         }
+        
+        // 重置停止标志，允许新的停止流程
+        isStopping.set(false)
 
         startForeground(NOTIFICATION_ID, createNotification())
 
@@ -744,13 +756,13 @@ class GatewayVpnService : AndroidVpnService() {
      * 获取或分配虚拟 IP
      */
     private fun getOrAllocateVirtualIp(realDstIp: String): String {
-        return VirtualIpAllocator.getOrAllocateVirtualIp(
+        return virtualIpAllocator.getOrAllocateVirtualIp(
             realDstIp = realDstIp,
             virtualIpPool = virtualIpPool,
             reverseIpMap = reverseIpMap,
             nextVirtualIp = nextVirtualIp,
             onPoolReset = { logger.error("Virtual IP pool exhausted! Resetting pool.") },
-            onAllocated = { ip, dstIp -> logDebug("Allocated virtual IP ${redactIp(ip)} for ${redactIp(dstIp)}") }
+            onNewAllocation = { allocatedIp, dstIp -> logDebug("Allocated virtual IP ${redactIp(allocatedIp)} for ${redactIp(dstIp)}") }
         )
     }
 
@@ -908,8 +920,50 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     private fun stopVpn() {
+        // 使用原子操作确保状态转换的原子性，防止重复调用
+        if (!isStopping.compareAndSet(false, true)) {
+            // 已经在停止过程中，直接返回
+            return
+        }
+
+        // 检查当前状态，如果已经停止或正在停止则重置标志并返回
+        val currentState = _status.value.state
+        if (currentState == VpnState.STOPPED || currentState == VpnState.STOPPING) {
+            isStopping.set(false)
+            return
+        }
+
+        // 立即更新状态为 STOPPING，通知其他观察者服务正在停止
+        // 这可以防止其他线程误判服务状态，避免在停止过程中发起新操作
+        _status.value = VpnStatus(state = VpnState.STOPPING)
+
+        // 先取消协程作用域，停止所有后台任务
+        // 这会导致阻塞在 inputStream.read() 的协程抛出 CancellationException
+        serviceScope.cancel()
+
+        // 清理资源
+        cleanupVpnResources()
+
+        stopProxyService()
+
+        // stopForeground() 让服务脱离前台状态，但不停止服务本身
+        // STOP_FOREGROUND_REMOVE: 移除通知并从 FOREGROUND 状态移除（服务变为普通后台服务）
+        // STOP_FOREGROUND_DETACH: 保留通知但从 FOREGROUND 状态移除（Android 12+ 行为）
+        stopForeground(STOP_FOREGROUND_REMOVE)
+
+        // 所有资源清理完成后，更新状态为 STOPPED
         _status.value = VpnStatus(state = VpnState.STOPPED)
-        
+
+        // 注意：不调用 stopSelf()，让系统自动管理服务生命周期
+        // 调用 stopSelf() 会触发 onDestroy()，而 onDestroy() 中也包含清理逻辑
+        // 虽然 isStopping 标志可以防止重复执行，但移除 stopSelf() 可以完全避免潜在的循环调用风险
+    }
+
+    /**
+     * 清理 VPN 相关资源
+     * 提取为独立方法以便在 stopVpn() 和 onDestroy() 中复用
+     */
+    private fun cleanupVpnResources() {
         try {
             vpnOutputStream?.close()
             vpnOutputStream = null
@@ -926,7 +980,7 @@ class GatewayVpnService : AndroidVpnService() {
 
         // 清理活跃会话（连接会由连接池统一管理）
         activeConnections.clear()
-        
+
         // 关闭连接池
         try {
             socks5ConnectionPool?.shutdown()
@@ -934,14 +988,9 @@ class GatewayVpnService : AndroidVpnService() {
         } catch (e: Exception) {
             logger.warn("Failed to shutdown connection pool", e)
         }
-        
+
         virtualIpPool.clear()
         reverseIpMap.clear()
-        
-        stopProxyService()
-        // STOP_FOREGROUND_REMOVE is available since API 24 (Android 7.0)
-        // Current minSdk is 26, so it's safe to use
-        stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
     private fun stopProxyService() {
@@ -950,8 +999,24 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     override fun onDestroy() {
+        // onDestroy() 由系统在服务停止时调用
+        // 注意：不要在这里调用 stopVpn()，因为 stopVpn() 会调用 stopSelf() 再次触发 onDestroy() 造成循环
+        // 因此直接执行资源清理，避免重复停止逻辑
+
+        // 如果 stopVpn() 没有被调用过（如系统强制回收服务），需要兜底清理资源
+        if (isStopping.compareAndSet(false, true)) {
+            logger.warn("onDestroy() called without stopVpn(), performing cleanup")
+            // 更新状态为 STOPPED
+            _status.value = VpnStatus(state = VpnState.STOPPED)
+            // 执行资源清理
+            cleanupVpnResources()
+            // 停止代理服务
+            stopProxyService()
+        }
+
+        // 取消协程作用域，停止所有后台任务
         serviceScope.cancel()
-        stopVpn()
+
         super.onDestroy()
     }
 
