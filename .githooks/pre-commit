@@ -20,7 +20,15 @@ fi
 
 # Run Android unit tests
 echo "${YELLOW}Running Android unit tests...${NC}"
-./android/gradlew.bat -p android :app:testDebugUnitTest --stacktrace --no-daemon
+
+# Detect OS and use appropriate gradle wrapper
+if [ "$OS" = "Windows_NT" ] || [ -n "$WINDIR" ]; then
+    # Windows environment
+    android/gradlew.bat -p android :app:testDebugUnitTest --stacktrace --no-daemon
+else
+    # Unix-like environment
+    ./android/gradlew -p android :app:testDebugUnitTest --stacktrace --no-daemon
+fi
 
 # Check test result
 if [ $? -ne 0 ]; then
