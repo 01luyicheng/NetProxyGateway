@@ -1,4 +1,4 @@
-# NetProxyGateway 缺陷清单
+# NetProxyGateway 缺陷清单（待修复）
 ## Critical
 
 ### C1: SSL信任所有证书配置风险 [已降级为Medium]
@@ -51,7 +51,99 @@
 
 ## High
 
-### H1: SOCKS5代理DNS重绑定攻击风险
+### H1: 心跳失败检测失效 [已验证确认]
+- **状态**: 待修复（已验证确认存在）
+- **验证时间**: 2026-04-10
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L329-343)
+- **问题验证**: 
+  - `publish()` 方法调用 `publishWithResult()` 并忽略返回值
+  - `publishWithResult()` 内部捕获所有异常并返回 `AppResult`，不抛出异常
+  - 外部 `try-catch` 块永远不会捕获到异常
+  - **心跳连续失败检测机制完全失效**
+- **风险**: **Critical**。当网络异常时，无法自动触发重连，连接可能处于"假死"状态而不被感知。
+- **代码分析**:
+  ```kotlin
+  // L329-343: 问题代码
+  try {
+      publish("device/$deviceId/heartbeat", "{\"status\":\"alive\"}")  // 内部捕获所有异常
+      consecutiveFailures = 0
+  } catch (e: Exception) {  // 永远不会执行到这里
+      // ...
+  }
+  
+  // L348-364: publish() 和 publishWithResult() 实现
+  fun publish(topic: String, payload: String, qos: Int = 0) {
+      publishWithResult(topic, payload, qos)  // 返回 AppResult，不抛出异常
+  }
+  
+  fun publishWithResult(...): AppResult<Unit> {
+      return try {
+          // ...
+      } catch (e: Exception) {  // 所有异常被捕获
+          AppResult.error(e)  // 返回错误结果，不抛出
+      }
+  }
+  ```
+- **建议修复**:
+  ```kotlin
+  val result = publishWithResult("device/$deviceId/heartbeat", "{\"status\":\"alive\"}")
+  if (result.isSuccess) {
+      consecutiveFailures = 0
+  } else {
+      logger.error("Heartbeat publish error", result.exceptionOrNull())
+      consecutiveFailures++
+      if (consecutiveFailures >= MAX_HEARTBEAT_FAILURES) {
+          logger.warn("Max heartbeat failures reached, triggering reconnect")
+          _connectionState.value = MqttConnectionState.Error("Max heartbeat failures reached")
+          if (shouldStayConnected && generation == connectionGeneration.get()) {
+              scheduleReconnect(deviceId, authToken, generation)
+          }
+          break
+      }
+  }
+  ```
+
+### H2: connectionLost 回调状态竞态 [已验证确认]
+- **状态**: 待修复（已验证确认存在，风险较低）
+- **验证时间**: 2026-04-10
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L215-223)
+- **问题验证**:
+  - L216 已检查 `generation`，但 L220 设置状态前没有再次验证
+  - 在检查 generation 和设置状态之间存在时间窗口
+  - 由于 MQTT 回调在单线程队列中执行，实际并发风险较低
+- **风险**: 中。UI 可能显示错误状态，即使新连接已成功建立。
+- **代码分析**:
+  ```kotlin
+  override fun connectionLost(cause: Throwable?) {
+      if (generation != connectionGeneration.get()) {  // 第1次检查
+          return
+      }
+      logger.warn("Connection lost: ${cause?.message}")
+      // 此处可能 generation 已变化，但状态仍被设置
+      _connectionState.value = MqttConnectionState.Error(cause?.message ?: "Connection lost")
+      // ...
+  }
+  ```
+- **建议修复**:
+  ```kotlin
+  override fun connectionLost(cause: Throwable?) {
+      if (generation != connectionGeneration.get()) {
+          return
+      }
+      logger.warn("Connection lost: ${cause?.message}")
+      // 使用同步块保护状态设置，或再次检查 generation
+      synchronized(this@MqttConnectionManager) {
+          if (generation == connectionGeneration.get()) {
+              _connectionState.value = MqttConnectionState.Error(cause?.message ?: "Connection lost")
+          }
+      }
+      if (shouldStayConnected && generation == connectionGeneration.get()) {
+          scheduleReconnect(deviceId, authToken, generation)
+      }
+  }
+  ```
+
+### H4: SOCKS5代理DNS重绑定攻击风险
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt` (L107-131)
 - **问题**: 代码已有IP范围验证（拒绝回环、链路本地、广播、保留地址，仅允许RFC1918私有地址），但DNS重绑定风险仍然存在。攻击者可能通过快速切换DNS记录绕过IP验证窗口
 - **风险**: 攻击者可能通过DNS重绑定绕过IP验证，访问内网资源
@@ -77,7 +169,7 @@
 - **代码位置**: `android/app/src/main/java/com/netproxy/gateway/di/CoroutineScopes.kt` (L24-L26)
 - **验证**: `ApplicationScope`使用`CoroutineScope(SupervisorJob() + Dispatchers.IO)`，子协程异常不会影响其他协程
 
-### H4: 连接池清理竞争条件
+### H5: 连接池清理竞争条件
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (L343-L366)
 - **问题**: read锁和write锁之间连接状态可能变化
 - **风险**: 清理过期连接时可能误删有效连接，或漏删无效连接
@@ -86,7 +178,7 @@
   2. 或使用CopyOnWriteArrayList简化并发控制
   3. 添加单元测试验证竞争条件处理
 
-### H6: SOCKS5连接池读取未设置超时
+### H7: SOCKS5连接池读取未设置超时
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (L315-L329)
 - **问题**: `readFully`方法没有设置超时，可能永久阻塞
 - **风险**: 线程被永久阻塞，连接池资源耗尽
@@ -95,7 +187,7 @@
   2. 使用带超时的读取方法
   3. 添加心跳检测机制
 
-### H7: MQTT TLS证书固定配置可能为空
+### H8: MQTT TLS证书固定配置可能为空
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L117-L124)
 - **问题**: 当`MQTT_TLS_PUBLIC_KEY_PINS`为空时，仅记录警告，仍使用默认CA验证
 - **风险**: 生产环境可能意外使用不安全的证书验证方式
@@ -254,18 +346,3 @@
       }
   }
   ```
-
----
-
-## 文档变更记录
-
-| 日期 | 变更内容 | 变更人 |
-|------|----------|--------|
-| 2026-03-31 | 重构文档结构，将技术债务、阻塞问题、已知限制、架构决策迁移到独立文档 | AI Agent |
-| 2026-03-31 | 修正过时问题描述：H2标记为已解决（协程已提供异常隔离）、M4移除（已实现指数退避）、M10移除（不存在溢出风险）、M1更新描述（已有验证方法） | Bug修复专家 |
-| 2026-03-31 | 确认文档完整性：ISSUES.md仅保留需要修复的软件缺陷，其他类型问题已正确迁移到专门文档 | AI Agent |
-| 2026-03-31 | 修正H2引用错误：原"见M2"引用不正确（M2是WiFi权限问题），H2实际已解决（SupervisorJob已实现异常隔离），更新为"已解决"状态 | Bug修复专家 |
-| 2026-03-31 | 更新交叉引用：添加与其他文档的关联链接（TECH_DEBT.md、BLOCKERS.md、KNOWN_LIMITATIONS.md、DECISIONS.md） | AI Agent |
-| 2026-04-01 | 修复 C3 虚拟 IP 边界与并发分配问题：新增 `VirtualIpAllocator` 并补充边界/并发回归测试，避免分配 `10.0.0.255` | AI Agent |
-| 2026-04-03 | 修复 L14 SSL 证书安全检查注释不准确：将"生产环境/开发环境"改为"release 构建/debug 构建"，术语更精确 | AI Agent |
-| 2026-04-03 | 新增 M12（MQTT 发布和订阅未检查连接状态）、M13（MQTT 重连延迟递增逻辑问题） | AI Agent |
