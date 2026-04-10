@@ -250,12 +250,31 @@ class MqttConnectionManager @Inject constructor(
                 })
 
                 localClient.connect(options)
-                if (!shouldStayConnected || generation != connectionGeneration.get()) {
-                    synchronized(this@MqttConnectionManager) {
+
+                // 使用 synchronized 块保护所有状态检查和更新，防止竞态条件
+                val shouldProceed = synchronized(this@MqttConnectionManager) {
+                    // 检查是否仍应保持连接且 generation 匹配
+                    if (!shouldStayConnected || generation != connectionGeneration.get()) {
+                        // 只有当前连接仍是有效引用时才清理
                         if (mqttClient === localClient) {
                             mqttClient = null
                         }
+                        false
+                    } else {
+                        // 确认是当前有效连接，可以设置为 Connected
+                        if (mqttClient === localClient) {
+                            _connectionState.value = MqttConnectionState.Connected
+                            reconnectDelay = 5000L
+                            true
+                        } else {
+                            // mqttClient 已被其他线程替换，不设置状态
+                            false
+                        }
                     }
+                }
+
+                if (!shouldProceed) {
+                    // 在同步块外执行关闭操作
                     try {
                         localClient.disconnect()
                     } catch (e: MqttException) {
@@ -267,11 +286,11 @@ class MqttConnectionManager @Inject constructor(
                             logger.error("Close error", e)
                         }
                     }
-                    _connectionState.value = MqttConnectionState.Disconnected
+                    // 注意：不在此处设置状态，因为：
+                    // 1. 如果是 generation 过期，状态可能已被新连接设置
+                    // 2. 如果是 disconnect() 被调用，状态已在 disconnect() 中设置
                     return@launch
                 }
-                _connectionState.value = MqttConnectionState.Connected
-                reconnectDelay = 5000L
 
                 subscribe("device/$deviceId/control")
                 startHeartbeat(deviceId, authToken, generation)
