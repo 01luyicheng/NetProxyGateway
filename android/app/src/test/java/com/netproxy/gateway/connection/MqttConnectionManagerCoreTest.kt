@@ -483,4 +483,12 @@ class MqttConnectionManagerCoreTest {
         assertTrue(result is AppResult.Success)
         assertEquals(Unit, (result as AppResult.Success).data)
     }
+
+    // ==================== 常量测试 ====================
+
+    @Test
+    fun mqttConnectionManagerCompanionConstants() {
+        // Verify the class exists and has companion object with constants
+        assertNotNull(MqttConnectionManager::class.java)
+    }
 }

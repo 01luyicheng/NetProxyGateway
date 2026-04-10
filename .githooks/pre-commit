@@ -12,9 +12,9 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# Check if we're in the right directory
-if [ ! -f "android/gradlew" ]; then
-    echo "${RED}Error: android/gradlew not found. Are you in the project root?${NC}"
+# Check if we're in the right directory (support both Unix and Windows)
+if [ ! -f "android/gradlew" ] && [ ! -f "android/gradlew.bat" ]; then
+    echo "${RED}Error: android/gradlew or android/gradlew.bat not found. Are you in the project root?${NC}"
     exit 1
 fi
 
