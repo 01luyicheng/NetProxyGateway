@@ -31,6 +31,7 @@ import java.security.cert.X509Certificate
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicLong
+import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.TrustManagerFactory
 
@@ -53,9 +54,11 @@ class MqttConnectionManager @Inject constructor(
         private const val HEARTBEAT_INTERVAL = 30000L
         private const val CONNECTION_TIMEOUT_SECONDS = 10
         private const val MAX_RECONNECT_DELAY = 60000L
+        private const val RECONNECT_BACKOFF_MULTIPLIER = 2
+        private const val MAX_HEARTBEAT_FAILURES = 3
     }
 
-    private var mqttClient: MqttClient? = null
+    @Volatile private var mqttClient: MqttClient? = null
     private var reconnectDelay = 5000L
     private var reconnectJob: Job? = null
     private var heartbeatJob: Job? = null
@@ -112,6 +115,9 @@ class MqttConnectionManager @Inject constructor(
 
     /**
      * release 构建：使用系统默认 CA 证书验证
+     * 安全特性：
+     * - 使用 TLS 1.2（兼容 Android 5.0+）
+     * - 启用主机名验证
      */
     private fun createProductionSocketFactory(): SSLSocketFactory {
         val trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
@@ -131,7 +137,8 @@ class MqttConnectionManager @Inject constructor(
             rawPins = BuildConfig.MQTT_TLS_PUBLIC_KEY_PINS
         )
 
-        val sslContext = SSLContext.getInstance("TLS")
+        // 显式指定 TLS 1.2（Android 5.0+ 支持）
+        val sslContext = SSLContext.getInstance("TLSv1.2")
         sslContext.init(null, arrayOf<TrustManager>(pinningTrustManager), SecureRandom())
         return sslContext.socketFactory
     }
@@ -140,6 +147,7 @@ class MqttConnectionManager @Inject constructor(
      * debug 构建：信任所有证书（仅用于开发测试）
      * 警告：此方式不安全，仅用于 debug 构建连接自签名证书服务器
      * 安全限制：仅在 BuildConfig.DEBUG 为 true 时允许使用
+     * 注意：debug 版本仍启用主机名验证以防止中间人攻击
      */
     private fun createDevSocketFactory(): SSLSocketFactory {
         val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
@@ -151,7 +159,8 @@ class MqttConnectionManager @Inject constructor(
             }
             override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
         })
-        val sslContext = SSLContext.getInstance("TLS")
+        // 显式指定 TLS 1.2
+        val sslContext = SSLContext.getInstance("TLSv1.2")
         sslContext.init(null, trustAllCerts, SecureRandom())
         return sslContext.socketFactory
     }
@@ -168,8 +177,12 @@ class MqttConnectionManager @Inject constructor(
                 val brokerUrl = brokerUrl()
                 validateBrokerUrl(brokerUrl)
                 val clientId = "${CLIENT_ID}_$deviceId"
-                mqttClient?.close()
-                mqttClient = MqttClient(brokerUrl, clientId, MemoryPersistence())
+                val localClient = synchronized(this@MqttConnectionManager) {
+                    mqttClient?.close()
+                    MqttClient(brokerUrl, clientId, MemoryPersistence()).also {
+                        mqttClient = it
+                    }
+                }
 
                 val options = MqttConnectOptions().apply {
                     isCleanSession = true
@@ -181,10 +194,13 @@ class MqttConnectionManager @Inject constructor(
 
                     if (isTlsEnabled()) {
                         socketFactory = createSecureSocketFactory()
+                        // 启用主机名验证，防止中间人攻击
+                        // 使用 Android 默认的主机名验证器（与 HTTPS 相同）
+                        sslHostnameVerifier = HttpsURLConnection.getDefaultHostnameVerifier()
                     }
                 }
 
-                mqttClient?.setCallback(object : MqttCallback {
+                localClient.setCallback(object : MqttCallback {
                     override fun connectionLost(cause: Throwable?) {
                         if (generation != connectionGeneration.get()) {
                             return
@@ -198,13 +214,21 @@ class MqttConnectionManager @Inject constructor(
 
                     override fun messageArrived(topic: String?, message: MqttMessage?) {
                         message?.let {
-                            val payload = String(it.payload)
-                            _messages.value = payload
-                            logger.debug("Message received: $topic - $payload")
-                            if (topic != null) {
-                                topicCallbacks[topic]?.forEach { callback ->
-                                    callback(payload)
+                            try {
+                                val payload = String(it.payload)
+                                _messages.value = payload
+                                logger.debug("Message received: $topic - $payload")
+                                if (topic != null) {
+                                    topicCallbacks[topic]?.forEach { callback ->
+                                        try {
+                                            callback(payload)
+                                        } catch (e: Exception) {
+                                            logger.error("Callback error for topic $topic", e)
+                                        }
+                                    }
                                 }
+                            } catch (e: Exception) {
+                                logger.error("Message processing error", e)
                             }
                         }
                     }
@@ -214,11 +238,24 @@ class MqttConnectionManager @Inject constructor(
                     }
                 })
 
-                mqttClient?.connect(options)
+                localClient.connect(options)
                 if (!shouldStayConnected || generation != connectionGeneration.get()) {
-                    mqttClient?.disconnect()
-                    mqttClient?.close()
-                    mqttClient = null
+                    synchronized(this@MqttConnectionManager) {
+                        if (mqttClient === localClient) {
+                            mqttClient = null
+                        }
+                    }
+                    try {
+                        localClient.disconnect()
+                    } catch (e: MqttException) {
+                        logger.error("Disconnect error", e)
+                    } finally {
+                        try {
+                            localClient.close()
+                        } catch (e: Exception) {
+                            logger.error("Close error", e)
+                        }
+                    }
                     _connectionState.value = MqttConnectionState.Disconnected
                     return@launch
                 }
@@ -226,13 +263,13 @@ class MqttConnectionManager @Inject constructor(
                 reconnectDelay = 5000L
 
                 subscribe("device/$deviceId/control")
-                startHeartbeat(deviceId)
+                startHeartbeat(deviceId, authToken, generation)
 
-            } catch (e: MqttException) {
+            } catch (e: Exception) {
                 if (generation != connectionGeneration.get()) {
                     return@launch
                 }
-                logger.error("MQTT connection error: ${e.message}")
+                logger.error("MQTT connection error", e)
                 _connectionState.value = MqttConnectionState.Error(e.message ?: "Connection failed")
                 if (shouldStayConnected) {
                     scheduleReconnect(deviceId, authToken, generation)
@@ -248,17 +285,32 @@ class MqttConnectionManager @Inject constructor(
             if (!shouldStayConnected || generation != connectionGeneration.get()) {
                 return@launch
             }
-            reconnectDelay = minOf(reconnectDelay * 2, MAX_RECONNECT_DELAY)
+            reconnectDelay = minOf(reconnectDelay * RECONNECT_BACKOFF_MULTIPLIER, MAX_RECONNECT_DELAY)
             connect(deviceId, authToken)
         }
     }
 
-    private fun startHeartbeat(deviceId: String) {
+    private fun startHeartbeat(deviceId: String, authToken: String, generation: Long) {
         heartbeatJob?.cancel()
         heartbeatJob = scope.launch {
+            var consecutiveFailures = 0
             while (shouldStayConnected && _connectionState.value == MqttConnectionState.Connected) {
                 delay(HEARTBEAT_INTERVAL)
-                publish("device/$deviceId/heartbeat", "{\"status\":\"alive\"}")
+                try {
+                    publish("device/$deviceId/heartbeat", "{\"status\":\"alive\"}")
+                    consecutiveFailures = 0
+                } catch (e: Exception) {
+                    logger.error("Heartbeat publish error", e)
+                    consecutiveFailures++
+                    if (consecutiveFailures >= MAX_HEARTBEAT_FAILURES) {
+                        logger.warn("Max heartbeat failures reached, triggering reconnect")
+                        _connectionState.value = MqttConnectionState.Error("Max heartbeat failures reached")
+                        if (shouldStayConnected && generation == connectionGeneration.get()) {
+                            scheduleReconnect(deviceId, authToken, generation)
+                        }
+                        break
+                    }
+                }
             }
         }
     }
@@ -275,8 +327,8 @@ class MqttConnectionManager @Inject constructor(
             }
             client.publish(topic, message)
             AppResult.success(Unit)
-        } catch (e: MqttException) {
-            logger.error("Publish error: ${e.message}")
+        } catch (e: Exception) {
+            logger.error("Publish error", e)
             AppResult.error(e)
         }
     }
@@ -294,7 +346,13 @@ class MqttConnectionManager @Inject constructor(
             client.subscribe(topic, qos)
             AppResult.success(Unit)
         } catch (e: MqttException) {
-            logger.error("Subscribe error: ${e.message}")
+            callback?.let {
+                topicCallbacks[topic]?.remove(it)
+                if (topicCallbacks[topic]?.isEmpty() == true) {
+                    topicCallbacks.remove(topic)
+                }
+            }
+            logger.error("Subscribe error", e)
             AppResult.error(e)
         }
     }
@@ -304,13 +362,23 @@ class MqttConnectionManager @Inject constructor(
         connectionGeneration.incrementAndGet()
         reconnectJob?.cancel()
         heartbeatJob?.cancel()
-        try {
-            mqttClient?.disconnect()
-            mqttClient?.close()
+        topicCallbacks.clear()
+        val client = synchronized(this) {
+            val c = mqttClient
             mqttClient = null
-            _connectionState.value = MqttConnectionState.Disconnected
+            c
+        }
+        _connectionState.value = MqttConnectionState.Disconnected
+        try {
+            client?.disconnect()
         } catch (e: MqttException) {
-            logger.error("Disconnect error: ${e.message}")
+            logger.error("Disconnect error", e)
+        } finally {
+            try {
+                client?.close()
+            } catch (e: Exception) {
+                logger.error("Close error", e)
+            }
         }
     }
 }
