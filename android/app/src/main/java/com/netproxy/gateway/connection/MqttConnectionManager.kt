@@ -177,11 +177,22 @@ class MqttConnectionManager @Inject constructor(
                 val brokerUrl = brokerUrl()
                 validateBrokerUrl(brokerUrl)
                 val clientId = "${CLIENT_ID}_$deviceId"
+
+                // 1. 在同步块内只获取旧客户端引用并清空 mqttClient
+                val oldClient = synchronized(this@MqttConnectionManager) {
+                    mqttClient.also { mqttClient = null }
+                }
+
+                // 2. 在同步块外执行 close() IO 操作（避免阻塞其他线程调用 disconnect()）
+                oldClient?.close()
+
+                // 3. 在同步块外创建新客户端
+                val newClient = MqttClient(brokerUrl, clientId, MemoryPersistence())
+
+                // 4. 在新同步块内设置新客户端
                 val localClient = synchronized(this@MqttConnectionManager) {
-                    mqttClient?.close()
-                    MqttClient(brokerUrl, clientId, MemoryPersistence()).also {
-                        mqttClient = it
-                    }
+                    mqttClient = newClient
+                    newClient
                 }
 
                 val options = MqttConnectOptions().apply {
