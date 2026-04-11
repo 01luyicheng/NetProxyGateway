@@ -29,7 +29,7 @@
 - **状态**: 已修复（2026-04-01）
 - **位置**:
   - `android/app/src/main/java/com/netproxy/gateway/vpn/VirtualIpAllocator.kt`
-  - `android/app/src/main/java/com/netproxy/gateway/vpn/GatewayVpnService.kt`
+  - `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt`
 - **问题描述**: 原实现在 `ipNum=255` 时可能分配广播地址 `10.0.0.255`，且并发语义不清晰。
 - **修复说明**: 已提取 `VirtualIpAllocator` 统一分配逻辑，溢出时先重置再回退到 `10.0.0.1`，并通过同步临界区保证分配与映射更新一致性。
 - **验证**: 新增 `VirtualIpAllocatorTest`（边界与并发回归），并通过 `VpnServiceTest`、全量 Android 单测与 `assembleDebug`。
@@ -143,6 +143,126 @@
   }
   ```
 
+### H16: MQTT连接客户端创建竞态条件 [已验证确认]
+- **状态**: 待修复（2026-04-11 Subagents深度验证确认）
+- **验证时间**: 2026-04-11
+- **验证方式**: Logic Analyzer Agent 代码审查
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L181-196)
+- **问题验证**:
+  - 创建新客户端（L190）和设置`mqttClient`（L193-196）之间有时间窗口
+  - 两个操作不在同一个同步块内，可能被其他线程打断
+  - 当并发执行`connect()`时，后创建的客户端可能覆盖先创建的客户端
+- **竞态场景**:
+  ```
+  T1: 线程A创建newClientA，在获取锁之前被挂起
+  T2: 线程B创建newClientB，获取锁并设置mqttClient = newClientB
+  T3: 线程A恢复，获取锁并设置mqttClient = newClientA（覆盖了B的客户端）
+  ```
+- **风险**: 高。可能导致：
+  - 客户端引用丢失，`newClientB`被覆盖后无法访问，造成资源泄露
+  - 状态不一致，`_connectionState`被设置为`Connected`，但实际使用的是旧客户端
+  - 心跳异常，两个线程可能同时运行心跳，或一个线程的心跳覆盖了另一个
+  - 回调错乱，`connectionLost`回调中的generation检查可能无法正确处理
+- **代码分析**:
+  ```kotlin
+  // L181-196: 问题代码
+  val oldClient = synchronized(this@MqttConnectionManager) {
+      mqttClient.also { mqttClient = null }
+  }
+  oldClient?.close()
+  
+  // 在同步块外创建新客户端
+  val newClient = MqttClient(brokerUrl, clientId, MemoryPersistence())
+  
+  // 在新同步块内设置新客户端（可能被其他线程覆盖）
+  val localClient = synchronized(this@MqttConnectionManager) {
+      mqttClient = newClient
+      newClient
+  }
+  ```
+- **建议修复**:
+  ```kotlin
+  // 方案1: 在同步块内完成客户端创建和赋值（推荐）
+  val newClient = synchronized(this@MqttConnectionManager) {
+      // 关闭旧客户端
+      mqttClient?.close()
+      
+      // 创建并设置新客户端（原子操作）
+      val client = MqttClient(brokerUrl, clientId, MemoryPersistence())
+      mqttClient = client
+      client
+  }
+  ```
+
+### H17: MQTT连接失败资源泄漏 [已验证确认]
+- **状态**: 待修复（2026-04-11 Subagents深度验证确认）
+- **验证时间**: 2026-04-11
+- **验证方式**: Logic Analyzer Agent 代码审查
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L298-307)
+- **问题验证**:
+  - 在`connect()`方法的`catch`块中，如果`generation != connectionGeneration.get()`，会直接`return@launch`
+  - 此时`localClient`（已经创建的MqttClient）可能没有被关闭
+  - `MqttClient`内部持有网络连接资源（Socket、线程等），如果不调用`close()`，这些资源将一直占用
+- **风险**: 高。在频繁重连场景下可能导致资源耗尽，影响系统稳定性。
+- **代码分析**:
+  ```kotlin
+  // L298-307: 问题代码
+  } catch (e: Exception) {
+      if (generation != connectionGeneration.get()) {
+          return@launch  // 直接返回，localClient可能未被关闭！
+      }
+      logger.error("MQTT connection error", e)
+      _connectionState.value = MqttConnectionState.Error(e.message ?: "Connection failed")
+      if (shouldStayConnected) {
+          scheduleReconnect(deviceId, authToken, generation)
+      }
+  }
+  ```
+- **建议修复**:
+  ```kotlin
+  } catch (e: Exception) {
+      // 无论generation是否匹配，都应该尝试关闭localClient
+      try {
+          localClient.disconnect()
+      } catch (ex: MqttException) {
+          logger.error("Disconnect error during exception handling", ex)
+      } finally {
+          try {
+              localClient.close()
+          } catch (ex: Exception) {
+              logger.error("Close error during exception handling", ex)
+          }
+      }
+      
+      if (generation != connectionGeneration.get()) {
+          return@launch
+      }
+      logger.error("MQTT connection error", e)
+      _connectionState.value = MqttConnectionState.Error(e.message ?: "Connection failed")
+      if (shouldStayConnected) {
+          scheduleReconnect(deviceId, authToken, generation)
+      }
+  }
+  ```
+
+### H18: MQTT连接客户端创建竞态条件 [已从TECH_DEBT.md C1迁移]
+- **状态**: 待修复（2026-04-11 Subagents深度验证确认）
+- **验证时间**: 2026-04-11
+- **验证方式**: Logic Analyzer Agent 代码审查
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L181-196)
+- **问题验证**:
+  - 创建新客户端（L190）和设置`mqttClient`（L193-196）之间有时间窗口
+  - 两个操作不在同一个同步块内，可能被其他线程打断
+  - 当并发执行`connect()`时，后创建的客户端可能覆盖先创建的客户端
+- **竞态场景**:
+  ```
+  T1: 线程A创建newClientA，在获取锁之前被挂起
+  T2: 线程B创建newClientB，获取锁并设置mqttClient = newClientB
+  T3: 线程A恢复，获取锁并设置mqttClient = newClientA（覆盖了B的客户端）
+  ```
+- **风险**: 高。可能导致客户端引用丢失、状态不一致、心跳异常、回调错乱
+- **建议修复**: 在同步块内完成客户端创建和赋值
+
 ### H4: SOCKS5代理DNS重绑定攻击风险
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt` (L107-131)
 - **问题**: 代码已有IP范围验证（拒绝回环、链路本地、广播、保留地址，仅允许RFC1918私有地址），但DNS重绑定风险仍然存在。攻击者可能通过快速切换DNS记录绕过IP验证窗口
@@ -215,38 +335,46 @@
   }
   ```
 
-### H9: VPN服务 serviceScope 生命周期管理缺陷
-- **状态**: 待修复（2026-04-10 代码审查发现）
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/GatewayVpnService.kt` (L102, L203-210, L950, L1023-L1048)
-- **问题描述**: 
+### H9: VPN服务 serviceScope 生命周期管理缺陷 [已修复]
+- **状态**: ✅ **已修复**（2026-04-11 提交 4f58619）
+- **修复验证**: Subagents代码审查确认修复正确
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L103, L146-148, L207-214, L953-954, L1070-1071)
+- **原问题**:
   - `serviceScope` 使用 `val` 在类实例化时创建，一旦取消无法再次使用
   - `stopVpn()` 调用 `serviceScope.cancel()` 后，协程作用域处于取消状态
-  - 如果服务停止后再次启动，`startVpn()` 中 `serviceScope.launch { ... }` 会立即失败（协程立即被取消）
+  - 如果服务停止后再次启动，`startVpn()` 中 `serviceScope.launch { ... }` 会立即失败
   - 这导致 VPN 服务无法停止后再启动，必须重新创建服务实例
-- **风险**: 高。用户停止 VPN 后无法重新启动，必须强制停止应用或等待系统回收服务
-- **建议修复**:
+- **风险**: 高。用户停止 VPN 后无法重新启动
+- **修复内容**:
   ```kotlin
-  // 将 val 改为 var，在 onCreate 中创建
+  // L103: 将 val 改为 var nullable
   private var serviceScope: CoroutineScope? = null
   
+  // L146-148: 在 onCreate 中创建
   override fun onCreate() {
       super.onCreate()
+      createNotificationChannel()
       serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-      // ...
   }
   
-  private fun startVpn() {
-      val scope = serviceScope ?: return
-      scope.launch { processVpnTraffic() }
-      // ...
-  }
+  // L207-214: 使用安全调用
+  serviceScope?.launch { processVpnTraffic() }
+  serviceScope?.launch { processReturnTraffic() }
   
-  override fun onDestroy() {
-      serviceScope?.cancel()
-      serviceScope = null
-      super.onDestroy()
-  }
+  // L953-954: stopVpn中取消并置null
+  serviceScope?.cancel()
+  serviceScope = null
+  
+  // L1070-1071: onDestroy中安全调用
+  serviceScope?.cancel()
+  serviceScope = null
   ```
+- **修复验证**:
+  - ✅ serviceScope从val改为var，支持重新创建
+  - ✅ 在onCreate()中延迟创建，确保每次服务创建都有新作用域
+  - ✅ 使用安全调用?.launch避免NPE
+  - ✅ stopVpn()和onDestroy()中正确清理
+  - ✅ 单元测试全部通过
 
 ### H5: 连接池清理竞争条件
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (L355-378)
@@ -297,23 +425,11 @@
 - **风险**: 线程被永久阻塞，影响应用响应
 - **建议修复**: 使用`waitFor(timeout, TimeUnit)`替代
 
-### M4: VPN服务忙等待 [已移除]
-- **状态**: 已移除，问题不存在
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/GatewayVpnService.kt` (L540-L546)
-- **说明**: 当前代码已实现指数退避算法，空闲延迟从1ms增长到最大100ms，已优化忙等待问题
-- **备注**: 原问题描述已过时，优化已实现
-
 ### M9: TCP回包状态管理不完整
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/GatewayVpnService.kt` (L668-L687)
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L668-L687)
 - **问题**: 序列号和确认号固定为0，不符合TCP协议
 - **风险**: 与某些TCP实现不兼容，可能导致连接异常
 - **建议修复**: 正确管理TCP序列号和确认号
-
-### M10: MQTT重连延迟计算可能溢出 [已移除]
-- **状态**: 已移除，问题不存在
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L311-L321)
-- **说明**: 代码使用`minOf(reconnectDelay * 2, MAX_RECONNECT_DELAY)`，初始值5000L，最大60000L，不可能发生溢出
-- **备注**: 原问题描述错误，不存在溢出风险
 
 ### M11: 连接池状态检查与清理的竞态条件
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (L119-L148)
@@ -354,7 +470,7 @@
 - **建议修复**: 统一使用 `AppResult` 模式，移除静默失败版本
 
 ### N2: VpnService过于庞大
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/GatewayVpnService.kt` (1054行)
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (1054行)
 - **问题**: 包含 VPN 服务、数据包解析、连接管理、状态机等多个职责；`processPacket()`、`forwardViaSocks5()` 等函数超过 50 行
 - **风险**: 中。代码难以理解和维护
 - **建议修复**: 提取数据包解析为 `PacketParser`，提取连接管理为 `ConnectionManager`
@@ -373,7 +489,7 @@
 
 ### N5: 状态管理分散
 - **位置**: 多处
-- **问题**: VPN 状态多处定义 - `VpnState` 在 `GatewayVpnService.kt`，`MqttConnectionState` 在 `MqttConnectionManager.kt`，`WiFiState` 在 `ModuleCoordinator.kt`
+- **问题**: VPN 状态多处定义 - `VpnState` 在 `VpnService.kt`，`MqttConnectionState` 在 `MqttConnectionManager.kt`，`WiFiState` 在 `ModuleCoordinator.kt`
 - **风险**: 低。状态定义分散，不利于统一管理
 - **建议修复**: 统一状态定义到 `result` 包或专门的状态管理模块
 
@@ -384,7 +500,7 @@
 - **建议修复**: 统一使用一种命名规范（推荐下划线命名法）
 
 ### N7: 测试质量不高
-- **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/GatewayVpnServiceTest.kt`
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt`
 - **问题**: 存在大量测试数据类自动生成方法（`equals()`、`hashCode()`、`toString()`）的测试，对业务价值贡献极低
 - **风险**: 低。增加维护成本
 - **建议修复**: 移除对自动生成方法的测试，专注于业务逻辑测试
@@ -414,7 +530,7 @@
 - **建议修复**: 移除默认值，强制在构建时配置
 
 ### N12: 运行时配置缺失
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/GatewayVpnService.kt` (L96-99)
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L96-99)
 - **问题**: DNS 服务器列表硬编码，连接池参数硬编码，无法动态调整
 - **风险**: 低。灵活性不足
 - **建议修复**: 将配置提取到配置文件或远程配置中心
@@ -484,8 +600,12 @@
   - 实现连接保活和快速恢复机制
   - 提示用户在远程协助期间保持网络稳定
 
-### M16: 电池优化和后台执行限制
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/GatewayVpnService.kt`
+---
+
+## High Severity
+
+### H19: 电池优化和后台执行限制
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt`
 - **问题描述**: 
   - Android Doze模式和App Standby可能限制后台网络活动
   - 在某些厂商ROM（如小米、华为）上VPN服务可能被强制停止或限制网络访问
@@ -578,21 +698,32 @@
   ```
 
 ### H10: VpnService stopVpn() 竞态条件 [已验证确认]
-- **状态**: 待修复（2026-04-11 Subagents审查验证确认）
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/GatewayVpnService.kt` (L927-968)
+- **状态**: 待修复（2026-04-11 Subagents深度验证确认）
+- **验证方式**: Logic Analyzer Agent 代码审查
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L930-972)
 - **问题验证**:
   - `isStopping` 原子标志与 `_status` StateFlow 是两个独立的状态源
   - 线程A通过CAS设置`isStopping=true`后，线程B可能修改`_status`状态
-  - 状态检查和清理之间存在时间窗口，可能导致竞态条件
+  - 在L933读取isStopping和L939读取_status之间存在时间窗口
   - `finally`块中重置`isStopping`，但状态可能已被其他线程改变
-- **风险**: 高。可能导致重复清理、状态不一致或资源泄漏
+- **竞态场景**:
+  ```
+  T1: 线程A CAS成功 isStopping=true, _status=RUNNING
+  T2: 线程B CAS失败返回
+  T3: 线程A在L939前被挂起
+  T4: 其他代码修改 _status=STOPPING
+  T5: 线程A读取 currentState=STOPPING，重置isStopping=false并返回
+  T6: 线程B现在可以CAS成功，重复执行停止逻辑
+  ```
+- **风险**: 中。可能导致重复执行停止逻辑，状态不一致
+- **触发条件**: 快速连续调用stopVpn()、onRevoke()和手动停止并发、系统回收与手动停止并发
 - **代码分析**:
   ```kotlin
-  // L927-968: 问题代码
+  // L930-972: 问题代码
   private fun stopVpn() {
-      if (!isStopping.compareAndSet(false, true)) return  // 获取标志
+      if (!isStopping.compareAndSet(false, true)) return  // L933: 获取标志
       
-      val currentState = _status.value.state  // 读取状态 - 可能已被其他线程修改
+      val currentState = _status.value.state  // L939: 读取状态 - 可能已被其他线程修改
       if (currentState == VpnState.STOPPED || currentState == VpnState.STOPPING) {
           isStopping.set(false)
           return
@@ -601,86 +732,234 @@
   }
   ```
 - **建议修复**:
-  使用单个 `AtomicReference<VpnState>` 统一管理状态，替代分离的标志和状态
+  ```kotlin
+  private fun stopVpn() {
+      // 先读取当前状态
+      val currentState = _status.value.state
+      if (currentState == VpnState.STOPPED || currentState == VpnState.STOPPING) {
+          return
+      }
+      
+      // 再尝试设置停止标志
+      if (!isStopping.compareAndSet(false, true)) {
+          return
+      }
+      
+      // 双重检查
+      if (_status.value.state == VpnState.STOPPED) {
+          isStopping.set(false)
+          return
+      }
+      // ...
+  }
+  ```
 
 ### H11: writeBufferPool 线程安全问题 [已验证确认]
-- **状态**: 待修复（2026-04-11 Subagents审查验证确认）
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/GatewayVpnService.kt` (L120-121, L616-618)
+- **状态**: 待修复（2026-04-11 Subagents深度验证确认）
+- **验证方式**: Logic Analyzer Agent 代码审查
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L120-122, L619-622)
 - **问题验证**:
   - `getAndIncrement() % writeBufferPool.size` 不是原子操作
-  - 在高并发场景下，多个线程可能获取到同一个缓冲区索引
-  - 缓冲区池大小仅为4，竞争概率较高
-- **风险**: 中。高并发时可能导致数据竞争，回包数据损坏
+  - 虽然`getAndIncrement()`是原子的，但取模和数组访问是分开的操作
+  - 当并发线程数超过缓冲区池大小(4)时，多个线程可能获取到同一个缓冲区
+- **竞态场景**:
+  ```
+  线程1-4: 分别获取 buffer[0], buffer[1], buffer[2], buffer[3]
+  线程5: writeBufferIndex=4, 4%4=0, 获取buffer[0]（正在被线程1使用！）
+  ```
+- **风险**: 高。高并发时可能导致数据竞争，回包数据损坏或崩溃
+- **触发条件**: 超过4个线程同时处理回包（高流量场景）
 - **代码分析**:
   ```kotlin
-  // L616-618: 问题代码
+  // L120-122, L619-622: 问题代码
+  private val writeBufferPool = Array(4) { ByteArray(PACKET_BUFFER_SIZE) }
+  private val writeBufferIndex = AtomicInteger(0)
+  
   private fun getWriteBuffer(): ByteArray {
-      val index = writeBufferIndex.getAndIncrement() % writeBufferPool.size  // 非原子
+      val index = writeBufferIndex.getAndIncrement() % writeBufferPool.size
       return writeBufferPool[index]
   }
   ```
 - **建议修复**:
-  1. 使用 `AtomicInteger.getAndUpdate()` 或同步块确保索引计算原子性
-  2. 或使用 `ThreadLocal<ByteArray>` 为每个线程分配独立缓冲区
+  ```kotlin
+  // 方案1: 使用ThreadLocal（推荐）
+  private val writeBuffer = ThreadLocal<ByteArray>()
+  
+  private fun getWriteBuffer(): ByteArray {
+      return writeBuffer.get() ?: ByteArray(PACKET_BUFFER_SIZE).also {
+          writeBuffer.set(it)
+      }
+  }
+  
+  // 方案2: 使用同步块
+  @Synchronized
+  private fun getWriteBuffer(): ByteArray {
+      val index = writeBufferIndex.getAndIncrement() % writeBufferPool.size
+      return writeBufferPool[index]
+  }
+  ```
 
 ### H12: activeConnections 复合操作非原子 [已验证确认]
-- **状态**: 待修复（2026-04-11 Subagents审查验证确认）
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/GatewayVpnService.kt` (L426-427, L467)
+- **状态**: 待修复（2026-04-11 Subagents深度验证确认）
+- **验证方式**: Logic Analyzer Agent 代码审查
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L426-427, L467, L429-432, L470)
 - **问题验证**:
   - 虽然使用 `ConcurrentHashMap`，但"检查-获取-更新"模式不是原子的
-  - L426: `activeConnections[connectionKey]` 获取
-  - L427: `existingSession?.pooledConnection?.isValid()` 检查
-  - L467: `activeConnections[connectionKey]?.updateActivity()` 再次获取可能不同对象
+  - L429: `activeConnections[connectionKey]` 获取
+  - L430: `existingSession?.pooledConnection?.isValid()` 检查
+  - L470: `activeConnections[connectionKey]?.updateActivity()` 再次获取可能不同对象
   - 在检查和使用之间，连接可能被其他线程清理
-- **风险**: 中。可能导致使用无效连接、重复归还或遗漏清理
+- **竞态场景**:
+  ```
+  线程A (forwardViaSocks5)          线程B (cleanupStaleConnections)
+  -------------------------------   --------------------------------
+  val existing = activeConnections[key]
+                                    activeConnections.remove(key)
+                                    pool.returnConnection(conn)
+  existing.pooledConnection.isValid()  // 访问已关闭的连接！
+  ```
+- **风险**: 高。可能导致使用无效连接、空指针异常、IO异常或重复归还
+- **触发条件**: 连接刚好在30秒超时过期时、清理任务与转发并发执行、高流量场景
+- **代码分析**:
+  ```kotlin
+  // L429-432, L470: 问题代码
+  val existingSession = activeConnections[connectionKey]  // 获取
+  val pooledConn = if (existingSession?.pooledConnection?.isValid() == true) {  // 检查
+      existingSession.pooledConnection
+  } else { ... }
+  // ...
+  activeConnections[connectionKey]?.updateActivity()  // 再次获取，可能不同对象
+  ```
 - **建议修复**:
-  使用 `ConcurrentHashMap.compute()` 或 `merge()` 方法确保复合操作原子性
+  ```kotlin
+  // 使用compute保证原子性
+  activeConnections.compute(connectionKey) { key, existingSession ->
+      if (existingSession?.pooledConnection?.isValid() == true) {
+          existingSession.updateActivity()
+          existingSession
+      } else {
+          // 创建新连接
+          existingSession?.pooledConnection?.let { pool.returnConnection(it) }
+          val conn = pool.borrowConnection(...)
+          ConnectionSession(...)
+      }
+  }?.let { session ->
+      // 使用session发送数据
+  }
+  ```
 
 ### H13: constructReturnPacket 潜在数组越界 [已验证确认]
-- **状态**: 待修复（2026-04-11 Subagents审查验证确认）
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/GatewayVpnService.kt` (L625-687)
+- **状态**: 待修复（2026-04-11 Subagents深度验证确认）
+- **验证方式**: Logic Analyzer Agent 代码审查
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L628-687)
 - **问题验证**:
   - 未验证 `buffer` 的大小是否足够容纳 `totalLen`
-  - `payloadLen` 可能很大，导致 `buffer[0..totalLen-1]` 访问越界
-  - `session.virtualSrcIp.split(".")` 假设IP格式正确，如果格式错误会抛出异常
-- **风险**: 中。可能导致 `ArrayIndexOutOfBoundsException` 崩溃
+  - `payloadLen` 可能很大（SOCKS5返回大数据块），导致数组越界
+  - `session.virtualSrcIp.split(".")` 假设IP格式正确，可能抛出异常
+- **问题1 - 数组越界**:
+  - writeBufferPool大小为32KB (PACKET_BUFFER_SIZE)
+  - 如果payloadLen > 32728字节，会发生ArrayIndexOutOfBoundsException
+  - 触发条件: SOCKS5代理返回大文件数据、视频流、合并的数据包
+- **问题2 - IP解析异常**:
+  - `virtualSrcIp.split(".")`可能抛出NumberFormatException
+  - `srcIpParts[n]`可能抛出IndexOutOfBoundsException
+  - 虽然virtualSrcIp由系统生成，但缺乏防御性编程
+- **风险**: 高。可能导致ArrayIndexOutOfBoundsException或NumberFormatException崩溃
+- **代码分析**:
+  ```kotlin
+  // L628-649: 问题代码
+  private fun constructReturnPacket(buffer: ByteArray, session: ConnectionSession, payloadLen: Int): Int {
+      val totalLen = 20 + 20 + payloadLen  // 40 + payloadLen
+      // 直接写入buffer[0..totalLen-1]，没有边界检查！
+      buffer[0] = 0x45
+      // ...
+      // L648: 假设IP格式正确
+      val srcIpParts = session.virtualSrcIp.split(".").map { it.toInt() }
+  }
+  ```
 - **建议修复**:
-  1. 添加 `buffer.size >= totalLen` 检查
-  2. 使用安全的IP解析方法，处理格式错误
+  ```kotlin
+  private fun constructReturnPacket(buffer: ByteArray, session: ConnectionSession, payloadLen: Int): Int {
+      val ipHeaderLen = 20
+      val tcpHeaderLen = 20
+      val totalLen = ipHeaderLen + tcpHeaderLen + payloadLen
+      
+      // 添加边界检查
+      if (totalLen > buffer.size) {
+          logger.warn("Payload too large: $payloadLen, buffer size: ${buffer.size}")
+          return -1 // 或截断处理
+      }
+      
+      // 安全的IP解析
+      val srcIpParts = session.virtualSrcIp.split(".").mapNotNull { it.toIntOrNull() }
+      if (srcIpParts.size != 4 || srcIpParts.any { it !in 0..255 }) {
+          logger.error("Invalid virtual IP format: ${session.virtualSrcIp}")
+          return -1
+      }
+      // ...
+  }
+  ```
 
-### H14: cleanupVpnResources() 未归还连接池连接 [已验证确认]
-- **状态**: 待修复（2026-04-11 Subagents审查验证确认）
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/GatewayVpnService.kt` (L1003-1004)
-- **问题验证**:
+### H14: cleanupVpnResources() 未归还连接池连接 [已修复]
+- **状态**: ✅ **已修复**（2026-04-11 提交 4f58619）
+- **修复验证**: Subagents代码审查确认修复正确
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L1007-1029)
+- **原问题**:
   - `cleanupVpnResources()` 中直接调用 `activeConnections.clear()` 清空映射表
   - 但连接池中的连接（`PooledSocks5Connection`）没有被归还到连接池
   - 这导致连接池不知道这些连接已经被"丢弃"，可能造成连接池泄漏
-  - 正确的做法应该是先调用 `pool.returnConnection()` 归还所有连接，再清空映射
-- **风险**: 中。连接池资源泄漏，长期运行后可能导致连接池耗尽
-- **代码分析**:
+- **修复内容**:
   ```kotlin
-  // L1003-1004: 问题代码
-  // 清理活跃会话（连接会由连接池统一管理）- 注释错误！
-  activeConnections.clear()  // 直接清空，未归还连接
-  ```
-- **建议修复**:
-  ```kotlin
-  // 先归还所有活跃连接到连接池
+  // L1007-1029: 修复后的代码
+  // 归还所有活跃会话中的连接池连接
   val pool = socks5ConnectionPool
-  activeConnections.forEach { (_, session) ->
-      session.pooledConnection?.let { pool?.returnConnection(it) }
+  if (pool != null) {
+      activeConnections.values.forEach { session ->
+          try {
+              session.pooledConnection?.let { connection ->
+                  pool.returnConnection(connection)
+              }
+          } catch (e: Exception) {
+              logger.warn("Failed to return connection for session ${session.srcIp}:${session.srcPort}", e)
+          }
+      }
+  } else {
+      // 连接池已不存在，直接关闭所有连接
+      activeConnections.values.forEach { session ->
+          try {
+              session.pooledConnection?.close()
+          } catch (e: Exception) {
+              logger.warn("Failed to close connection for session ${session.srcIp}:${session.srcPort}", e)
+          }
+      }
   }
   activeConnections.clear()
   ```
+- **修复验证**:
+  - ✅ 先归还所有连接到连接池，再清空映射表
+  - ✅ 处理连接池已关闭的优雅降级场景
+  - ✅ 每个连接归还操作独立try-catch，防止错误传播
+  - ✅ 单元测试全部通过
 
-### H15: onDestroy() 重复取消 serviceScope [已验证确认]
-- **状态**: 待修复（2026-04-11 Subagents审查验证确认）
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/GatewayVpnService.kt` (L1045)
-- **问题验证**:
-  - `stopVpn()` 方法中已经调用了 `serviceScope.cancel()` (L950)
-  - `onDestroy()` 方法中又调用了 `serviceScope.cancel()` (L1045)
+### H15: onDestroy() 重复取消 serviceScope [已修复]
+- **状态**: ✅ **已修复**（2026-04-11 提交 4f58619）
+- **修复验证**: Subagents代码审查确认修复正确
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L1069-1071)
+- **原问题**:
+  - `stopVpn()` 方法中已经调用了 `serviceScope.cancel()` (L953)
+  - `onDestroy()` 方法中又调用了 `serviceScope.cancel()` (L1070)
   - 虽然 `cancel()` 是幂等的，但这种设计模式不够清晰
   - 如果 `stopVpn()` 被调用，`onDestroy()` 会再次执行清理逻辑
-- **风险**: 低。设计模式问题，可能导致代码维护困难
+- **修复内容**:
+  - 将 `serviceScope` 从 `val` 改为 `var`，支持重新创建
+  - `stopVpn()` 中取消后置 `null`：`serviceScope?.cancel(); serviceScope = null`
+  - `onDestroy()` 中安全调用：`serviceScope?.cancel(); serviceScope = null`
+  - 通过置null避免重复取消同一作用域
+- **修复验证**:
+  - ✅ serviceScope在onCreate()中创建，支持服务重启
+  - ✅ stopVpn()中取消并置null
+  - ✅ onDestroy()中安全调用，不会重复取消
+  - ✅ 使用 `?.` 安全调用避免NPE
+  - ✅ 单元测试全部通过
 - **建议修复**:
   统一资源清理逻辑，提取 `performCleanup()` 方法，确保 `stopVpn()` 和 `onDestroy()` 使用相同的清理顺序

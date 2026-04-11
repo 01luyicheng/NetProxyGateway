@@ -46,7 +46,7 @@
 - **关键缺陷**: MQTT 心跳失败检测机制完全失效（docs/ISSUES.md H1），会导致网络异常时无法自动触发重连。
 - **并发风险**: 同步块内更新 StateFlow（docs/ISSUES.md H3）可能导致死锁；SOCKS5 连接池读取未设置超时（docs/ISSUES.md H7）可能导致线程永久阻塞。
 - **连接池竞态**: 连接池清理竞争条件（docs/ISSUES.md H5），read锁和write锁之间连接状态可能变化。
-- **生命周期缺陷**: VPN 服务 serviceScope 生命周期管理缺陷（docs/ISSUES.md H9），停止后无法重新启动。
+- **生命周期缺陷**: ✅ **已修复** VPN 服务 serviceScope 生命周期管理缺陷（docs/ISSUES.md H9），停止后无法重新启动。
 
 ### 依赖与维护风险
 - **依赖风险**: `gorilla/websocket` 库已归档不再维护（docs/ISSUES.md N14），存在安全漏洞无法及时修复的风险。
@@ -110,4 +110,5 @@
 - 每个通过验证的合并提交必须注明Agent使用的模型名称和日期
 - 在开始工作前，必须验证：`android\gradlew.bat -p android :app:testDebugUnitTest` 通过
 - 如果 main 分支测试失败，通过在第 5 节（技术风险）中提交明确的阻塞问题来解除阻塞
+- 2026-04-11: H9已修复验证 - serviceScope从val改为var并在onCreate中创建 (Kimi-K2.5)
 

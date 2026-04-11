@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "skills": {
+    "debug-pro": {
+      "version": "1.0.0",
+      "installedAt": 1775877559341
+    },
+    "self-improving": {
+      "version": "1.2.16",
+      "installedAt": 1775877570256
+    },
+    "seo": {
+      "version": "1.0.3",
+      "installedAt": 1775877574671
+    },
+    "test-runner": {
+      "version": "1.0.0",
+      "installedAt": 1775877579629
+    },
+    "laravel": {
+      "version": "1.0.1",
+      "installedAt": 1775877607865
+    }
+  }
+}

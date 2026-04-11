@@ -50,23 +50,13 @@
 - **风险**: 中。不一致的清理顺序可能导致竞态条件或资源泄漏
 - **建议**: 提取统一的清理方法，确保两处使用相同的清理顺序和逻辑
 
-### C9: Tunnel Gateway 单点部署限制
-- **位置**: `server/tunnel/main.go`
-- **问题描述**: 隧道连接状态存储在单机内存中（`map[string]*TunnelConn`），没有使用 Redis 等共享存储，无法实现多实例负载均衡
-- **风险**: 中。影响高可用部署，单点故障时服务完全不可用
-- **建议**: 引入 Redis 存储连接状态，支持多实例部署和负载均衡
+<!-- C9和C11已移至ISSUES.md，避免重复 -->
 
 ### C10: 缺少 Makefile 统一构建流程
 - **位置**: `server/`
 - **问题描述**: 项目没有 Makefile，Go 服务构建需要通过手动执行 `go build` 或使用 Docker，没有统一的测试、构建、发布流程
 - **风险**: 低。开发效率受影响，新成员上手困难
 - **建议**: 添加 Makefile，提供统一的 build、test、lint、docker-build 等命令
-
-### C11: 服务间硬编码地址
-- **位置**: `server/socks5-proxy/main.go`, `server/tunnel/main.go`
-- **问题描述**: 服务间通信使用硬编码的 localhost 地址（如 `--api=http://localhost:8080`），没有使用服务发现机制
-- **风险**: 低-中。容器化/Kubernetes 环境下需要手动配置环境变量
-- **建议**: 支持通过环境变量或配置中心动态配置服务地址，或引入 Consul/etcd 服务发现
 
 ### C12: VpnServiceTest 未验证关键生命周期场景 [已验证确认]
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt`
@@ -80,48 +70,6 @@
   1. 添加 `stopVpn()` 后 `startVpn()` 重新启动的集成测试
   2. 添加并发安全问题的压力测试
   3. 使用真实（但隔离的）依赖替代纯模拟测试
-
-### C1: 双重连接风险（理论风险，实际影响低）[LOW]
-
-**问题描述**:
-`connect()` 方法中，两个同步块之间存在时间窗口：
-1. 第一个同步块：清空 `mqttClient`
-2. 同步块外：关闭旧客户端、创建新客户端
-3. 第二个同步块：设置新客户端
-
-在此期间，如果另一个线程也调用 `connect()`，可能导致两个连接同时创建。
-
-**代码位置**:
-- `MqttConnectionManager.kt:181-196`
-
-**当前代码**:
-```kotlin
-// 1. 在同步块内只获取旧客户端引用并清空 mqttClient
-val oldClient = synchronized(this@MqttConnectionManager) {
-    mqttClient.also { mqttClient = null }
-}
-
-// 2. 在同步块外执行 close() IO 操作
-oldClient?.close()
-
-// 3. 在同步块外创建新客户端
-val newClient = MqttClient(brokerUrl, clientId, MemoryPersistence())
-
-// 4. 在新同步块内设置新客户端
-val localClient = synchronized(this@MqttConnectionManager) {
-    mqttClient = newClient
-    newClient
-}
-```
-
-**验证结果** (2026-04-10):
-- **风险存在性**: 理论上有双重连接风险
-- **现有保护机制**:
-  1. `connectionGeneration` 机制在 `connect()` 开始时就递增，后完成的线程会因为 generation 不匹配而放弃
-  2. L255-274 的同步块在连接成功后检查 `mqttClient === localClient`，确保只有当前有效连接才能设置 `Connected` 状态
-- **实际风险**: **已有效缓解**。虽然理论上可能创建两个 `MqttClient` 实例，但 `connectionGeneration` 和引用检查机制能防止状态混乱
-
-**状态**: 已验证，风险可控，作为可选优化项保留
 
 ---
 
