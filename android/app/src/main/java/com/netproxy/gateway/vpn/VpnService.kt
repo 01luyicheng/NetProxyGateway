@@ -99,7 +99,8 @@ class GatewayVpnService : AndroidVpnService() {
         )
     }
 
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // serviceScope 使用 var 以便在服务停止后可以重新创建
+    private var serviceScope: CoroutineScope? = null
 
     @Inject
     lateinit var authSessionStore: AuthSessionStore
@@ -135,10 +136,15 @@ class GatewayVpnService : AndroidVpnService() {
     
     // 原子标志，防止 stopVpn() 重复执行
     private val isStopping = AtomicBoolean(false)
+    
+    // 原子标志，防止 cleanupVpnResources() 重复执行
+    private val isCleaningUp = AtomicBoolean(false)
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        // 创建协程作用域
+        serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -156,6 +162,8 @@ class GatewayVpnService : AndroidVpnService() {
         
         // 重置停止标志，允许新的停止流程
         isStopping.set(false)
+        // 重置清理标志，允许新的清理流程
+        isCleaningUp.set(false)
 
         startForeground(NOTIFICATION_ID, createNotification())
 
@@ -196,12 +204,12 @@ class GatewayVpnService : AndroidVpnService() {
                 vpnOutputStream = FileOutputStream(vpnInterface!!.fileDescriptor)
                 
                 // 启动TUN读取协程
-                serviceScope.launch {
+                serviceScope?.launch {
                     processVpnTraffic()
                 }
-                
+
                 // 启动回包处理协程
-                serviceScope.launch {
+                serviceScope?.launch {
                     processReturnTraffic()
                 }
                 
@@ -920,39 +928,48 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     private fun stopVpn() {
-        // 使用原子操作确保状态转换的原子性，防止重复调用
+        // 使用单一原子操作：先尝试设置停止标志，只有成功才继续
+        // 这确保了"检查是否正在停止"和"标记为正在停止"是原子性的
         if (!isStopping.compareAndSet(false, true)) {
             // 已经在停止过程中，直接返回
             return
         }
 
-        // 检查当前状态，如果已经停止或正在停止则重置标志并返回
+        // 获取当前状态并检查
         val currentState = _status.value.state
         if (currentState == VpnState.STOPPED || currentState == VpnState.STOPPING) {
+            // 已经停止或正在停止，重置标志并返回
             isStopping.set(false)
             return
         }
 
-        // 立即更新状态为 STOPPING，通知其他观察者服务正在停止
-        // 这可以防止其他线程误判服务状态，避免在停止过程中发起新操作
-        _status.value = VpnStatus(state = VpnState.STOPPING)
+        try {
+            // 立即更新状态为 STOPPING，通知其他观察者服务正在停止
+            // 这可以防止其他线程误判服务状态，避免在停止过程中发起新操作
+            _status.value = VpnStatus(state = VpnState.STOPPING)
 
-        // 先取消协程作用域，停止所有后台任务
-        // 这会导致阻塞在 inputStream.read() 的协程抛出 CancellationException
-        serviceScope.cancel()
+            // 先取消协程作用域，停止所有后台任务
+            // 这会导致阻塞在 inputStream.read() 的协程抛出 CancellationException
+            serviceScope?.cancel()
+            serviceScope = null
 
-        // 清理资源
-        cleanupVpnResources()
+            // 清理资源
+            cleanupVpnResources()
 
-        stopProxyService()
+            stopProxyService()
 
-        // stopForeground() 让服务脱离前台状态，但不停止服务本身
-        // STOP_FOREGROUND_REMOVE: 移除通知并从 FOREGROUND 状态移除（服务变为普通后台服务）
-        // STOP_FOREGROUND_DETACH: 保留通知但从 FOREGROUND 状态移除（Android 12+ 行为）
-        stopForeground(STOP_FOREGROUND_REMOVE)
+            // stopForeground() 让服务脱离前台状态，但不停止服务本身
+            // STOP_FOREGROUND_REMOVE: 移除通知并从 FOREGROUND 状态移除（服务变为普通后台服务）
+            // STOP_FOREGROUND_DETACH: 保留通知但从 FOREGROUND 状态移除（Android 12+ 行为）
+            stopForeground(STOP_FOREGROUND_REMOVE)
 
-        // 所有资源清理完成后，更新状态为 STOPPED
-        _status.value = VpnStatus(state = VpnState.STOPPED)
+            // 所有资源清理完成后，更新状态为 STOPPED
+            _status.value = VpnStatus(state = VpnState.STOPPED)
+        } finally {
+            // 无论成功与否，重置停止标志，允许下次停止操作
+            // 注意：这里重置标志，配合 startVpn() 中的重置，确保状态一致性
+            isStopping.set(false)
+        }
 
         // 注意：不调用 stopSelf()，让系统自动管理服务生命周期
         // 调用 stopSelf() 会触发 onDestroy()，而 onDestroy() 中也包含清理逻辑
@@ -962,8 +979,17 @@ class GatewayVpnService : AndroidVpnService() {
     /**
      * 清理 VPN 相关资源
      * 提取为独立方法以便在 stopVpn() 和 onDestroy() 中复用
+     * 使用原子标志确保只执行一次，避免重复清理导致的资源泄漏或状态不一致
      */
     private fun cleanupVpnResources() {
+        // 使用原子操作确保资源清理只执行一次
+        if (!isCleaningUp.compareAndSet(false, true)) {
+            logger.debug("cleanupVpnResources() already executed, skipping")
+            return
+        }
+
+        logger.debug("Executing cleanupVpnResources()")
+
         try {
             vpnOutputStream?.close()
             vpnOutputStream = null
@@ -978,7 +1004,28 @@ class GatewayVpnService : AndroidVpnService() {
             logger.warn("Failed to close VPN interface", e)
         }
 
-        // 清理活跃会话（连接会由连接池统一管理）
+        // 归还所有活跃会话中的连接池连接
+        val pool = socks5ConnectionPool
+        if (pool != null) {
+            activeConnections.values.forEach { session ->
+                try {
+                    session.pooledConnection?.let { connection ->
+                        pool.returnConnection(connection)
+                    }
+                } catch (e: Exception) {
+                    logger.warn("Failed to return connection for session ${session.srcIp}:${session.srcPort}", e)
+                }
+            }
+        } else {
+            // 连接池已不存在，直接关闭所有连接
+            activeConnections.values.forEach { session ->
+                try {
+                    session.pooledConnection?.close()
+                } catch (e: Exception) {
+                    logger.warn("Failed to close connection for session ${session.srcIp}:${session.srcPort}", e)
+                }
+            }
+        }
         activeConnections.clear()
 
         // 关闭连接池
@@ -1003,19 +1050,30 @@ class GatewayVpnService : AndroidVpnService() {
         // 注意：不要在这里调用 stopVpn()，因为 stopVpn() 会调用 stopSelf() 再次触发 onDestroy() 造成循环
         // 因此直接执行资源清理，避免重复停止逻辑
 
-        // 如果 stopVpn() 没有被调用过（如系统强制回收服务），需要兜底清理资源
-        if (isStopping.compareAndSet(false, true)) {
+        // 检查 stopVpn() 是否已被调用过
+        val stopVpnNotCalled = isStopping.compareAndSet(false, true)
+
+        if (stopVpnNotCalled) {
+            // stopVpn() 没有被调用过（如系统强制回收服务），需要兜底清理资源
             logger.warn("onDestroy() called without stopVpn(), performing cleanup")
             // 更新状态为 STOPPED
             _status.value = VpnStatus(state = VpnState.STOPPED)
-            // 执行资源清理
-            cleanupVpnResources()
             // 停止代理服务
             stopProxyService()
         }
 
-        // 取消协程作用域，停止所有后台任务
-        serviceScope.cancel()
+        // 无论 stopVpn() 是否被调用过，都执行资源清理
+        // cleanupVpnResources() 内部有 isCleaningUp 保护，确保只执行一次
+        cleanupVpnResources()
+
+        // 取消协程作用域，停止所有后台任务，并置null
+        serviceScope?.cancel()
+        serviceScope = null
+
+        // 重置 isStopping 标志，避免影响后续服务重启
+        if (stopVpnNotCalled) {
+            isStopping.set(false)
+        }
 
         super.onDestroy()
     }

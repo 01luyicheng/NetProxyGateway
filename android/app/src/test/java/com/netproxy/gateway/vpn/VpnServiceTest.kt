@@ -1686,4 +1686,5 @@ class VpnServiceTest {
             pooledConnection?.markUsed()
         }
     }
+
 }
