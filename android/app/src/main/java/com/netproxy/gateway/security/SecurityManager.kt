@@ -12,8 +12,7 @@ class SecurityManager(private val context: Context) {
     companion object {
         private const val TAG = "SecurityManager"
 
-        @Volatile
-        private var instance: SecurityManager? = null
+        @Volatile private var instance: SecurityManager? = null
 
         fun getInstance(context: Context): SecurityManager {
             return instance ?: synchronized(this) {
