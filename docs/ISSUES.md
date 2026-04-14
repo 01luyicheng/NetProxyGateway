@@ -245,24 +245,6 @@
   }
   ```
 
-### H18: MQTT连接客户端创建竞态条件 [已从TECH_DEBT.md C1迁移]
-- **状态**: 待修复（2026-04-11 Subagents深度验证确认）
-- **验证时间**: 2026-04-11
-- **验证方式**: Logic Analyzer Agent 代码审查
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L181-196)
-- **问题验证**:
-  - 创建新客户端（L190）和设置`mqttClient`（L193-196）之间有时间窗口
-  - 两个操作不在同一个同步块内，可能被其他线程打断
-  - 当并发执行`connect()`时，后创建的客户端可能覆盖先创建的客户端
-- **竞态场景**:
-  ```
-  T1: 线程A创建newClientA，在获取锁之前被挂起
-  T2: 线程B创建newClientB，获取锁并设置mqttClient = newClientB
-  T3: 线程A恢复，获取锁并设置mqttClient = newClientA（覆盖了B的客户端）
-  ```
-- **风险**: 高。可能导致客户端引用丢失、状态不一致、心跳异常、回调错乱
-- **建议修复**: 在同步块内完成客户端创建和赋值
-
 ### H4: SOCKS5代理DNS重绑定攻击风险
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt` (L107-131)
 - **问题**: 代码已有IP范围验证（拒绝回环、链路本地、广播、保留地址，仅允许RFC1918私有地址），但DNS重绑定风险仍然存在。攻击者可能通过快速切换DNS记录绕过IP验证窗口
@@ -946,15 +928,14 @@
 - **修复验证**: Subagents代码审查确认修复正确
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L1069-1071)
 - **原问题**:
-  - `stopVpn()` 方法中已经调用了 `serviceScope.cancel()` (L953)
-  - `onDestroy()` 方法中又调用了 `serviceScope.cancel()` (L1070)
-  - 虽然 `cancel()` 是幂等的，但这种设计模式不够清晰
+  - `serviceScope` 使用 `val` 定义，一旦创建无法重新赋值
+  - `stopVpn()` 和 `onDestroy()` 都可能尝试取消同一作用域
   - 如果 `stopVpn()` 被调用，`onDestroy()` 会再次执行清理逻辑
 - **修复内容**:
   - 将 `serviceScope` 从 `val` 改为 `var`，支持重新创建
   - `stopVpn()` 中取消后置 `null`：`serviceScope?.cancel(); serviceScope = null`
   - `onDestroy()` 中安全调用：`serviceScope?.cancel(); serviceScope = null`
-  - 通过置null避免重复取消同一作用域
+  - 通过将 `serviceScope` 置为 `null`，`onDestroy()` 中的安全调用不会执行实际操作，确保清理逻辑清晰
 - **修复验证**:
   - ✅ serviceScope在onCreate()中创建，支持服务重启
   - ✅ stopVpn()中取消并置null

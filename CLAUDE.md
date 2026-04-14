@@ -56,8 +56,8 @@
 ### 工程化与架构债务
 - **测试缺口**: 核心业务逻辑（`processVpnTraffic`、`forwardViaSocks5`、`startHeartbeat`）缺乏测试覆盖（docs/ISSUES.md N8）。
 - **监控缺失**: 没有性能指标收集、健康检查端点、错误上报机制（docs/ISSUES.md N10）。
-- **构建流程**: 缺少 Makefile 统一构建流程（docs/TECH_DEBT.md C10）。
-- **服务发现**: 服务间使用硬编码地址通信（docs/TECH_DEBT.md C11）。
+- **构建流程**: 缺少 Makefile 统一构建流程（docs/TECH_DEBT.md C11）。
+- **服务发现**: 服务间使用硬编码地址通信（docs/TECH_DEBT.md C10）。
 - **单点故障**: Tunnel Gateway 单点部署，无法水平扩展（docs/TECH_DEBT.md C9）。
 - **代码组织**: Go 项目结构不规范，未按标准分层（docs/TECH_DEBT.md C7）；VpnService 过于庞大（1036行，docs/ISSUES.md N2）。
 - 任何超出这两点的声明必须先在代码中验证。
@@ -111,4 +111,6 @@
 - 在开始工作前，必须验证：`android\gradlew.bat -p android :app:testDebugUnitTest` 通过
 - 如果 main 分支测试失败，通过在第 5 节（技术风险）中提交明确的阻塞问题来解除阻塞
 - 2026-04-11: H9已修复验证 - serviceScope从val改为var并在onCreate中创建 (Kimi-K2.5)
+- 2026-04-11: H14已修复验证 - cleanupVpnResources()正确归还连接池连接 (Kimi-K2.5)
+- 2026-04-11: H15已修复验证 - onDestroy()使用安全调用避免重复操作 (Kimi-K2.5)
 
