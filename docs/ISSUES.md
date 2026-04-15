@@ -25,28 +25,6 @@
   ```
 - **建议修复**: 添加构建时Lint静态检查或Gradle插件验证，确保release构建配置中`MQTT_TRUST_ALL_CERTS=false`
 
-### C3: 虚拟IP分配线程不安全 [已修复]
-- **状态**: 已修复（2026-04-01）
-- **位置**:
-  - `android/app/src/main/java/com/netproxy/gateway/vpn/VirtualIpAllocator.kt`
-  - `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt`
-- **问题描述**: 原实现在 `ipNum=255` 时可能分配广播地址 `10.0.0.255`，且并发语义不清晰。
-- **修复说明**: 已提取 `VirtualIpAllocator` 统一分配逻辑，溢出时先重置再回退到 `10.0.0.1`，并通过同步临界区保证分配与映射更新一致性。
-- **验证**: 新增 `VirtualIpAllocatorTest`（边界与并发回归），并通过 `VpnServiceTest`、全量 Android 单测与 `assembleDebug`。
-- **代码（修复后）**:
-  ```kotlin
-  // VpnService.kt
-  private fun getOrAllocateVirtualIp(realDstIp: String): String {
-      return VirtualIpAllocator.getOrAllocateVirtualIp(
-          realDstIp = realDstIp,
-          virtualIpPool = virtualIpPool,
-          reverseIpMap = reverseIpMap,
-          nextVirtualIp = nextVirtualIp,
-          onPoolReset = { logger.error("Virtual IP pool exhausted! Resetting pool.") }
-      )
-  }
-  ```
-
 ### C4: SOCKS5代理JSON注入风险 [待修复]
 - **状态**: 待修复（2026-04-15 Subagents代码审查发现）
 - **位置**: `server/socks5-proxy/main.go` (L140)
@@ -72,83 +50,6 @@
 
 ## High
 
-### H1: 心跳失败检测失效 [已修复]
-- **状态**: ✅ 已修复
-- **修复时间**: 2026-04-14
-- **验证时间**: 2026-04-10
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt`（`startHeartbeat()`）
-- **问题验证**: 
-  - `publish()` 方法调用 `publishWithResult()` 并忽略返回值
-  - `publishWithResult()` 内部捕获所有异常并返回 `AppResult`，不抛出异常
-  - 外部 `try-catch` 块永远不会捕获到异常
-  - **心跳连续失败检测机制完全失效**
-- **风险**: **Critical**。当网络异常时，无法自动触发重连，连接可能处于"假死"状态而不被感知。
-- **原因分析（修复前）**:
-  ```kotlin
-  // 问题代码（修复前）：publish() 不抛异常，try-catch 永远捕获不到
-  try {
-      publish("device/$deviceId/heartbeat", "{\"status\":\"alive\"}")  // 内部捕获所有异常
-      consecutiveFailures = 0
-  } catch (e: Exception) {  // 永远不会执行到这里
-      // ...
-  }
-  
-  // L348-364: publish() 和 publishWithResult() 实现
-  fun publish(topic: String, payload: String, qos: Int = 0) {
-      publishWithResult(topic, payload, qos)  // 返回 AppResult，不抛出异常
-  }
-  
-  fun publishWithResult(...): AppResult<Unit> {
-      return try {
-          // ...
-      } catch (e: Exception) {  // 所有异常被捕获
-          AppResult.error(e)  // 返回错误结果，不抛出
-      }
-  }
-  ```
-- **修复说明**:
-  - `startHeartbeat()` 改为检查 `publishWithResult()` 的 `AppResult` 返回值（不再依赖异常抛出）
-  - 连续失败达到阈值后设置 `connectionState=Error` 并触发 `scheduleReconnect()`
-  - 新增回归测试：`android/app/src/test/java/com/netproxy/gateway/connection/MqttConnectionManagerHeartbeatTest.kt`
-- **验证**:
-  - `android\\gradlew.bat -p android :app:testDebugUnitTest --stacktrace --no-daemon`
-  - `android\\gradlew.bat -p android assembleDebug --stacktrace --no-daemon`
-
-### H6: connectionLost 回调状态竞态 [已修复]
-- **状态**: ✅ 已修复
-- **修复时间**: 2026-04-14
-- **验证时间**: 2026-04-10
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt`（`connect()` 内回调 `connectionLost()`）
-- **修复说明**:
-  - 在更新 `_connectionState` 之前增加二次校验（`shouldStayConnected` + `generation`），避免旧回调覆盖新连接状态。
-- **验证**:
-  - `android\\gradlew.bat -p android :app:testDebugUnitTest --stacktrace --no-daemon`
-  - `android\\gradlew.bat -p android assembleDebug --stacktrace --no-daemon`
-
-### H16: MQTT连接客户端创建竞态条件 [已修复]
-- **状态**: ✅ 已修复
-- **修复时间**: 2026-04-14
-- **验证时间**: 2026-04-11
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt`（`connect()`）
-- **修复说明**:
-  - 在同一个 `synchronized(this@MqttConnectionManager)` 临界区内完成：generation 校验 + 创建 `MqttClient` + 交换 `mqttClient` 引用，避免并发 `connect()` 覆盖窗口。
-  - 旧 client 的 `disconnect()/close()` 在锁外 best-effort 执行，降低锁竞争并避免阻塞其他调用。
-- **验证**:
-  - `android\\gradlew.bat -p android :app:testDebugUnitTest --stacktrace --no-daemon`
-  - `android\\gradlew.bat -p android assembleDebug --stacktrace --no-daemon`
-
-### H17: MQTT连接失败资源泄漏 [已修复]
-- **状态**: ✅ 已修复
-- **修复时间**: 2026-04-14
-- **验证时间**: 2026-04-11
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt`（`connect()` 异常路径）
-- **修复说明**:
-  - `connect()` 的异常路径会先 best-effort `disconnect()/close()` 本次创建的 client，并在需要时清空 `mqttClient` 引用；不再因为 generation 不匹配而跳过清理。
-  - 新增回归单测：`android/app/src/test/java/com/netproxy/gateway/connection/MqttConnectionManagerConnectCleanupTest.kt`
-- **验证**:
-  - `android\\gradlew.bat -p android :app:testDebugUnitTest --stacktrace --no-daemon`
-  - `android\\gradlew.bat -p android assembleDebug --stacktrace --no-daemon`
-
 ### H4: SOCKS5代理DNS重绑定攻击风险
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt` (L107-131)
 - **问题**: 代码已有IP范围验证（拒绝回环、链路本地、广播、保留地址，仅允许RFC1918私有地址），但DNS重绑定风险仍然存在。攻击者可能通过快速切换DNS记录绕过IP验证窗口
@@ -168,59 +69,6 @@
       IpAddressUtils.isPrivateIpv4Rfc1918(ip)
   }
   ```
-
-### H3: 同步块内更新 StateFlow 可能导致死锁 [已修复]
-- **状态**: ✅ 已修复
-- **修复时间**: 2026-04-14
-- **验证时间**: 2026-04-10
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt`（`connect()`）
-- **修复说明**:
-  - `synchronized` 块内只做引用一致性/代际校验与字段更新；所有 `_connectionState.value = ...` 都在锁外执行。
-  - 为避免 `disconnect()` 后状态回跳，在写入 Connecting/Connected/Error 前增加 `shouldStayConnected + generation` 二次校验。
-- **验证**:
-  - `android\\gradlew.bat -p android :app:testDebugUnitTest --stacktrace --no-daemon`
-  - `android\\gradlew.bat -p android assembleDebug --stacktrace --no-daemon`
-
-### H9: VPN服务 serviceScope 生命周期管理缺陷 [已修复]
-- **状态**: ✅ **已修复**（2026-04-11 提交 4f58619）
-- **修复验证**: Subagents代码审查确认修复正确
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L103, L146-148, L207-214, L953-954, L1070-1071)
-- **原问题**:
-  - `serviceScope` 使用 `val` 在类实例化时创建，一旦取消无法再次使用
-  - `stopVpn()` 调用 `serviceScope.cancel()` 后，协程作用域处于取消状态
-  - 如果服务停止后再次启动，`startVpn()` 中 `serviceScope.launch { ... }` 会立即失败
-  - 这导致 VPN 服务无法停止后再启动，必须重新创建服务实例
-- **风险**: 高。用户停止 VPN 后无法重新启动
-- **修复内容**:
-  ```kotlin
-  // L103: 将 val 改为 var nullable
-  private var serviceScope: CoroutineScope? = null
-  
-  // L146-148: 在 onCreate 中创建
-  override fun onCreate() {
-      super.onCreate()
-      createNotificationChannel()
-      serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-  }
-  
-  // L207-214: 使用安全调用
-  serviceScope?.launch { processVpnTraffic() }
-  serviceScope?.launch { processReturnTraffic() }
-  
-  // L953-954: stopVpn中取消并置null
-  serviceScope?.cancel()
-  serviceScope = null
-  
-  // L1070-1071: onDestroy中安全调用
-  serviceScope?.cancel()
-  serviceScope = null
-  ```
-- **修复验证**:
-  - ✅ serviceScope从val改为var，支持重新创建
-  - ✅ 在onCreate()中延迟创建，确保每次服务创建都有新作用域
-  - ✅ 使用安全调用?.launch避免NPE
-  - ✅ stopVpn()和onDestroy()中正确清理
-  - ✅ 单元测试全部通过
 
 ### H5: 连接池清理竞争条件
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (L355-378)
@@ -273,61 +121,9 @@
   2. 在返回前关闭连接以终止另一个方向的io.Copy
   3. 添加超时保护避免永久阻塞
 
-### S2: ConnectThroughTunnel资源清理不完整 [已修复]
-- **状态**: ✅ 已修复（2026-04-15）
-- **修复验证**: Kimi-K2.5 on Claude code，2026-04-15
-- **位置**: `server/socks5-proxy/main.go` (L715-749)
-- **原问题**:
-  - 超时或连接失败时，只从`tc.streams`中删除`streamConn`
-  - 没有调用`streamConn.Close()`关闭channel资源
-  - `DataChan`、`CloseChan`、`Connected`等channel可能无法被GC
-- **风险**: 中低。高并发场景下（大量连接超时或失败）会导致内存泄漏
-- **修复内容**: 在4处错误处理路径中添加`streamConn.Close()`调用
-  - JSON序列化失败 (L716-721)
-  - 发送连接请求失败 (L727-732)
-  - 连接超时 (L737-742)
-  - 连接被拒绝 (L744-749)
-- **修复代码**:
-  ```go
-  case <-time.After(30 * time.Second):
-      tc.mu.Lock()
-      delete(tc.streams, streamID)
-      tc.mu.Unlock()
-      streamConn.Close()  // 新增：确保资源释放
-      return nil, fmt.Errorf("connection timeout")
-  ```
-- **验证**: 通过Go单元测试 `go test -v .`
-
-### S3: handleConnectResponse内存泄漏 [已修复]
-- **状态**: ✅ 已修复（2026-04-15）
-- **修复验证**: Kimi-K2.5 on Claude code，2026-04-15
-- **位置**: `server/socks5-proxy/main.go` (L612-626)
-- **原问题**:
-  - 当连接失败时（`resp.Success == false`），只调用`stream.Close()`
-  - 没有从`tc.streams`映射中删除该stream
-  - 导致已关闭的连接残留在映射中，造成内存泄漏
-- **风险**: 中。连接失败时会造成内存泄漏，长期运行可能导致内存增长
-- **修复代码**:
-  ```go
-  if !resp.Success {
-      log.Printf("Connection failed for stream %s: %s", resp.StreamID, resp.Error)
-      select {
-      case stream.Connected <- false:
-      default:
-      }
-      stream.Close()
-      // 从streams映射中删除，避免内存泄漏
-      tc.mu.Lock()
-      delete(tc.streams, resp.StreamID)
-      tc.mu.Unlock()
-      return
-  }
-  ```
-- **验证**: 通过Go单元测试 `go test -v .`
-
 ### H20: API服务JWT令牌验证不完善 [待修复]
 - **状态**: 待修复（2026-04-15 Subagents代码审查发现）
-- **位置**: `server/api/main.go` (L469-484)
+- **位置**: `server/api/main.go` (L528-537)
 - **问题描述**: JWT解析后未明确验证 `exp`（过期时间）、`iat`（签发时间）、`nbf`（生效时间）等声明。虽然 `jwt.Parse` 默认会验证 `exp`，但代码没有明确检查验证失败的具体原因，可能混淆不同类型的认证错误
 - **风险**: 高。无法区分令牌过期、无效签名、格式错误等不同错误类型，不利于调试和安全审计
 - **代码**:
@@ -618,31 +414,6 @@
 - **风险**: 中。新功能和 bug 修复可能延迟
 - **建议修复**: 评估迁移到 HiveMQ MQTT Client 或 KMQTT
 
-### L14: SSL 证书安全检查注释不准确 [已修复]
-- **状态**: 已修复（2026-04-03）
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L91-L104)
-- **问题**: 注释使用"生产环境/开发环境"术语，但代码检查的是 `BuildConfig.DEBUG`。虽然基本正确，但不够精确，可能引起误解
-- **风险**: 低，术语不准确可能导致开发者对构建配置的理解混淆
-- **修复说明**: 将"生产环境/开发环境"改为"release 构建/debug 构建"，将"生产环境 (DEBUG=false)"改为"非调试版本 (DEBUG=false)"，更准确地反映代码逻辑
-- **代码（修复后）**:
-  ```kotlin
-  /**
-   * 根据 BuildConfig 配置决定使用哪种证书验证方式：
-   * - release 构建：使用系统默认 CA 证书（验证服务器证书）
-   * - debug 构建：信任所有证书（仅用于开发测试自签名证书）
-   * TODO: 上线前将 BuildConfig.MQTT_TRUST_ALL_CERTS 改为 false
-   */
-  private fun createSecureSocketFactory(): SSLSocketFactory {
-      // 安全检查：非调试版本 (DEBUG=false) 不允许启用信任所有证书
-      if (!BuildConfig.DEBUG && BuildConfig.MQTT_TRUST_ALL_CERTS) {
-          throw IllegalStateException(
-              "TRUST_ALL_CERTS is not allowed in production builds. " +
-              "Please set MQTT_TRUST_ALL_CERTS to false in build configuration."
-          )
-      }
-  }
-  ```
-
 ---
 
 ## Medium Severity
@@ -827,13 +598,14 @@
   - `getAndIncrement() % writeBufferPool.size` 不是原子操作
   - 虽然`getAndIncrement()`是原子的，但取模和数组访问是分开的操作
   - 当并发线程数超过缓冲区池大小(4)时，多个线程可能获取到同一个缓冲区
+  - **整数溢出风险**: `writeBufferIndex.getAndIncrement()`在达到`Int.MAX_VALUE`时溢出变为负数，取模后产生负数索引，导致`ArrayIndexOutOfBoundsException`
 - **竞态场景**:
   ```
   线程1-4: 分别获取 buffer[0], buffer[1], buffer[2], buffer[3]
   线程5: writeBufferIndex=4, 4%4=0, 获取buffer[0]（正在被线程1使用！）
   ```
-- **风险**: 高。高并发时可能导致数据竞争，回包数据损坏或崩溃
-- **触发条件**: 超过4个线程同时处理回包（高流量场景）
+- **风险**: 高。高并发时可能导致数据竞争、回包数据损坏、崩溃；整数溢出时直接导致`ArrayIndexOutOfBoundsException`
+- **触发条件**: 超过4个线程同时处理回包（高流量场景）；或长时间运行后索引溢出
 - **代码分析**:
   ```kotlin
   // L120-122, L619-622: 问题代码
@@ -842,7 +614,7 @@
   
   private fun getWriteBuffer(): ByteArray {
       val index = writeBufferIndex.getAndIncrement() % writeBufferPool.size
-      return writeBufferPool[index]
+      return writeBufferPool[index]  // 可能抛出负数索引异常
   }
   ```
 - **建议修复**:
@@ -860,6 +632,12 @@
   @Synchronized
   private fun getWriteBuffer(): ByteArray {
       val index = writeBufferIndex.getAndIncrement() % writeBufferPool.size
+      return writeBufferPool[index]
+  }
+  
+  // 方案3: 修复整数溢出（如果保留原方案）
+  private fun getWriteBuffer(): ByteArray {
+      val index = (writeBufferIndex.getAndIncrement().toLong() and 0xFFFFFFFFL % writeBufferPool.size).toInt()
       return writeBufferPool[index]
   }
   ```
@@ -928,6 +706,7 @@
 - **问题2 - IP解析异常**:
   - `virtualSrcIp.split(".")`可能抛出NumberFormatException
   - `srcIpParts[n]`可能抛出IndexOutOfBoundsException
+  - **IP格式验证缺失**: `split(".")`和`toInt()`没有验证IP格式，非法IP格式可能导致崩溃
   - 虽然virtualSrcIp由系统生成，但缺乏防御性编程
 - **风险**: 高。可能导致ArrayIndexOutOfBoundsException或NumberFormatException崩溃
 - **代码分析**:
@@ -938,8 +717,9 @@
       // 直接写入buffer[0..totalLen-1]，没有边界检查！
       buffer[0] = 0x45
       // ...
-      // L648: 假设IP格式正确
+      // L648: 假设IP格式正确，缺少验证
       val srcIpParts = session.virtualSrcIp.split(".").map { it.toInt() }
+      buffer[12] = srcIpParts[0].toByte()  // 可能越界
   }
   ```
 - **建议修复**:
@@ -955,7 +735,7 @@
           return -1 // 或截断处理
       }
       
-      // 安全的IP解析
+      // 安全的IP解析，添加格式验证
       val srcIpParts = session.virtualSrcIp.split(".").mapNotNull { it.toIntOrNull() }
       if (srcIpParts.size != 4 || srcIpParts.any { it !in 0..255 }) {
           logger.error("Invalid virtual IP format: ${session.virtualSrcIp}")
@@ -965,79 +745,24 @@
   }
   ```
 
-### H14: cleanupVpnResources() 未归还连接池连接 [已修复]
-- **状态**: ✅ **已修复**（2026-04-11 提交 4f58619）
-- **修复验证**: Subagents代码审查确认修复正确
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L1007-1029)
-- **原问题**:
-  - `cleanupVpnResources()` 中直接调用 `activeConnections.clear()` 清空映射表
-  - 但连接池中的连接（`PooledSocks5Connection`）没有被归还到连接池
-  - 这导致连接池不知道这些连接已经被"丢弃"，可能造成连接池泄漏
-- **修复内容**:
-  ```kotlin
-  // L1007-1029: 修复后的代码
-  // 归还所有活跃会话中的连接池连接
-  val pool = socks5ConnectionPool
-  if (pool != null) {
-      activeConnections.values.forEach { session ->
-          try {
-              session.pooledConnection?.let { connection ->
-                  pool.returnConnection(connection)
-              }
-          } catch (e: Exception) {
-              logger.warn("Failed to return connection for session ${session.srcIp}:${session.srcPort}", e)
-          }
-      }
-  } else {
-      // 连接池已不存在，直接关闭所有连接
-      activeConnections.values.forEach { session ->
-          try {
-              session.pooledConnection?.close()
-          } catch (e: Exception) {
-              logger.warn("Failed to close connection for session ${session.srcIp}:${session.srcPort}", e)
-          }
-      }
-  }
-  activeConnections.clear()
-  ```
-- **修复验证**:
-  - ✅ 先归还所有连接到连接池，再清空映射表
-  - ✅ 处理连接池已关闭的优雅降级场景
-  - ✅ 每个连接归还操作独立try-catch，防止错误传播
-  - ✅ 单元测试全部通过
-
-### H15: onDestroy() 重复取消 serviceScope [已修复]
-- **状态**: ✅ **已修复**（2026-04-11 提交 4f58619）
-- **修复验证**: Subagents代码审查确认修复正确
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L1069-1071)
-- **原问题**:
-  - `serviceScope` 使用 `val` 定义，一旦创建无法重新赋值
-  - `stopVpn()` 和 `onDestroy()` 都可能尝试取消同一作用域
-  - 如果 `stopVpn()` 被调用，`onDestroy()` 会再次执行清理逻辑
-- **修复内容**:
-  - 将 `serviceScope` 从 `val` 改为 `var`，支持重新创建
-  - `stopVpn()` 中取消后置 `null`：`serviceScope?.cancel(); serviceScope = null`
-  - `onDestroy()` 中安全调用：`serviceScope?.cancel(); serviceScope = null`
-  - 通过将 `serviceScope` 置为 `null`，`onDestroy()` 中的安全调用不会执行实际操作，确保清理逻辑清晰
-- **修复验证**:
-  - ✅ serviceScope在onCreate()中创建，支持服务重启
-  - ✅ stopVpn()中取消并置null
-  - ✅ onDestroy()中安全调用，不会重复取消
-  - ✅ 使用 `?.` 安全调用避免NPE
-  - ✅ 单元测试全部通过
-- **建议修复**:
-  统一资源清理逻辑，提取 `performCleanup()` 方法，确保 `stopVpn()` 和 `onDestroy()` 使用相同的清理顺序
-
 ---
 
 ## Medium Severity
 
 ### M16: API服务敏感信息可能泄露 [待修复]
 - **状态**: 待修复（2026-04-15 Subagents代码审查发现）
-- **位置**: `server/api/main.go` (L310-342)
-- **问题描述**: 数据库错误可能包含敏感信息（如连接字符串、表结构等），直接返回给调用者
-- **风险**: 中。可能泄露数据库内部信息，帮助攻击者进行针对性攻击
-- **建议修复**: 记录详细错误日志，但向客户端返回通用错误消息
+- **位置**: `server/api/main.go` (L546, L628, L701, L743, L818, L853 等)
+- **问题描述**: 多处使用 `c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})` 直接返回错误信息。虽然数据库错误已包装为通用消息，但请求绑定错误等仍可能包含敏感字段名或内部信息
+- **风险**: 中。可能泄露API内部结构信息，帮助攻击者进行针对性攻击
+- **代码示例**:
+  ```go
+  // 例如 L546, L628 等位置
+  c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+  ```
+- **建议修复**: 
+  1. 区分内部错误和客户端错误
+  2. 内部错误记录日志，向客户端返回通用错误消息
+  3. 客户端错误（如验证失败）可返回具体信息，但需脱敏处理
 
 ### M17: API服务配对码生成无限循环风险 [待修复]
 - **状态**: 待修复（2026-04-15 Subagents代码审查发现）
@@ -1071,12 +796,17 @@
 
 ## Low Severity
 
-### L8: SOCKS5代理随机数分布不均 [待修复]
+### L8: SOCKS5代理流ID生成可预测性 [待修复]
 - **状态**: 待修复（2026-04-15 Subagents代码审查发现）
-- **位置**: `server/socks5-proxy/main.go` (`generateRandomString` 函数)
-- **问题描述**: 使用模运算 `rand.Intn(len(chars))` 在某些情况下可能导致分布不均
-- **风险**: 低。配对码的可预测性略微增加
-- **建议修复**: 使用 `crypto/rand` 替代 `math/rand`，或使用更安全的随机数生成方式
+- **位置**: `server/socks5-proxy/main.go` (L689)
+- **问题描述**: 流ID使用 `fmt.Sprintf("%s-%d", deviceID, time.Now().UnixNano())` 生成，依赖时间戳纳秒。虽然不存在模运算分布问题，但时间戳可预测，流ID生成逻辑可被推测
+- **风险**: 低。流ID可预测性增加，可能被用于会话固定攻击
+- **代码**:
+  ```go
+  // L689
+  streamID := fmt.Sprintf("%s-%d", deviceID, time.Now().UnixNano())
+  ```
+- **建议修复**: 使用 `crypto/rand` 生成随机字符串替代时间戳
 
 ### L9: SOCKS5代理StreamConn DataChan可能阻塞 [待修复]
 - **状态**: 待修复（2026-04-15 Subagents代码审查发现）
@@ -1091,3 +821,76 @@
 - **问题描述**: `notifyDeviceStatus` 通知失败只是记录日志，没有重试机制。如果API服务暂时不可用，设备状态可能不一致
 - **风险**: 低。状态不一致，但可接受
 - **建议修复**: 添加指数退避重试机制
+
+### L11: 日志框架混用导致输出不一致 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: 
+  - `android/app/src/main/java/com/netproxy/gateway/security/SecurityManager.kt` (L88, L93, L100, L107, L118)
+  - `android/app/src/main/java/com/netproxy/gateway/NetProxyApp.kt` (L33, L38, L43, L49, L51, L66)
+- **问题描述**: SecurityManager和NetProxyApp使用Android原生`Log`类，而项目其他部分使用SLF4J。导致日志格式、输出目标和级别控制不一致
+- **风险**: 低。日志管理混乱，不利于统一监控和排查问题
+- **代码**:
+  ```kotlin
+  // SecurityManager.kt - 使用Android Log
+  Log.d(TAG, "Starting security check...")
+  Log.w(TAG, "Root detected: ${rootResult.detectedBy}")
+  
+  // MqttConnectionManager.kt - 使用SLF4J
+  logger.error("Heartbeat publish error")
+  ```
+- **建议修复**: 统一使用SLF4J日志框架，移除所有Android原生Log的使用
+
+### L12: IP地址脱敏不充分可能泄露网络拓扑 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L793-807)
+- **问题描述**: `redactIp()`方法对内网IP(192.168.x.x)只脱敏后两段，仍可能暴露网络拓扑信息
+- **风险**: 低。日志中可能泄露内网网络结构
+- **代码**:
+  ```kotlin
+  private fun redactIp(ip: String): String {
+      val parts = ip.split(".")
+      if (parts.size == 4) {
+          return "${parts[0]}.${parts[1]}.*.*"  // 192.168.x.x 仍暴露前两段
+      }
+      return if (ip.length > 6) "${ip.take(6)}***" else "***"
+  }
+  ```
+- **建议修复**: 对内网IP进一步脱敏，只保留第一段或使用统一掩码
+
+---
+
+## 新增问题（2026-04-15 Subagents交叉审查发现）
+
+### N16: 空catch块掩盖异常信息 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (L60, L299-300)
+- **问题描述**: 多处使用空的catch块完全忽略异常，包括Socket关闭异常和SOCKS5连接创建异常，可能掩盖严重错误
+- **风险**: 中。可能遗漏关键错误信息，导致问题难以排查
+- **代码**:
+  ```kotlin
+  fun close() {
+      try {
+          socket.close()
+      } catch (_: Exception) {}  // 完全忽略所有异常
+  }
+  ```
+- **建议修复**: 至少记录异常信息，区分可忽略和不可忽略的错误类型
+
+### N19: 注释与代码实现不符 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L371-375)
+- **问题描述**: `forwardViaWifi()`方法注释说明使用`Network.bindSocket()`，但实际代码使用`protect()`方法
+- **风险**: 低。误导开发者，造成理解困难
+- **代码**:
+  ```kotlin
+  /**
+   * 通过 WiFi 网卡直连（内网流量）
+   * 注意：Android VPN 模式下需要使用 Network.bindSocket()  // 注释说用bindSocket
+   */
+  private fun forwardViaWifi(...) {
+      DatagramSocket().use { socket ->
+          protect(socket)  // 实际使用的是protect
+      }
+  }
+  ```
+- **建议修复**: 更新注释，说明实际使用的是`protect()`方法及其局限性

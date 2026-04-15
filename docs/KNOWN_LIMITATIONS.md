@@ -196,6 +196,22 @@
 - **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L746-760)
 - **未来计划**: 根据需求评估是否扩展IP池大小或支持动态网段配置。
 
+### L-TECH-05: 服务端开发模式仅API服务支持
+- **描述**: `APP_ENV=development` 环境变量仅在 API 服务（`server/api`）中支持自动生成 `INTERNAL_API_KEY`。SOCKS5 代理（`server/socks5-proxy`）和 Tunnel 网关（`server/tunnel`）在 `INTERNAL_API_KEY` 未设置时直接退出，无开发模式回退。
+- **原因（设计决策）**: 
+  - 三个服务需要共享相同的 `INTERNAL_API_KEY` 进行内部认证，自动生成会导致密钥不一致
+  - 开发模式下 API 服务生成的临时密钥每次重启都会变化，其他服务无法同步
+  - `docker-compose.yml` 使用 `${INTERNAL_API_KEY:?}` 强制要求设置，开发模式在容器化部署中不会触发
+- **影响范围**: 
+  - 单独启动 API 服务进行开发调试时功能正常
+  - 需要多服务联调时，开发者必须显式设置 `INTERNAL_API_KEY` 环境变量
+  - 开发模式警告日志已明确提示此限制
+- **代码位置**: 
+  - API 服务: `server/api/main.go` (L92-121)
+  - SOCKS5 代理: `server/socks5-proxy/main.go` (L1198-1201)
+  - Tunnel 网关: `server/tunnel/main.go` (L569-572)
+- **未来计划**: 若需要完整的开发模式多服务联调支持，需实现密钥共享机制（如写入共享文件或使用配置中心）。
+
 ### L-PROTO-06: MTU固定值限制
 - **描述**: VPN MTU硬编码为1500，未根据实际网络环境自适应调整。
 - **原因（设计决策）**: 固定MTU简化了实现，1500是以太网标准MTU，适用于大多数场景。
@@ -207,7 +223,7 @@
 
 ## 文档维护说明
 
-- 本文档最后更新日期：2026-03-31
+- 本文档最后更新日期：2026-04-15
 - 新增限制应遵循本文档格式，明确说明设计决策原因
 - 当限制被解除时，应将其移至"已解除限制"章节并标注解除日期
 
@@ -222,4 +238,5 @@
 | 2026-03-31 | 文件路径修正：GatewayVpnService.kt → VpnService.kt，WifiManager.kt → GatewayWifiManager.kt；L-TECH-03描述澄清：TLS 1.2固定 → TLS加密 | AI Agent |
 | 2026-03-31 | 新增限制项：L-IPV6-08（WiFi连接信息仅获取IPv4地址）、L-TECH-01（云服务器路由未实现） | AI Agent |
 | 2026-03-31 | 文档结构优化：按IPv6支持、协议支持、产品功能、其他技术限制分类组织 | AI Agent |
+| 2026-04-15 | 新增限制项：L-TECH-05（服务端开发模式仅API服务支持），记录跨服务开发模式不一致问题 | Kimi-K2.5 |
 

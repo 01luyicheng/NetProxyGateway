@@ -88,25 +88,67 @@
   2. 添加并发安全问题的压力测试
   3. 使用真实（但隔离的）依赖替代纯模拟测试
 
----
+### C13: 魔法数字和硬编码协议常量 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L383, L391, L628-694)
+- **问题描述**: 代码中大量使用魔法数字（如协议号6/17、IP包头字段0x45、TTL值64等），没有提取为命名常量，降低可读性和可维护性
+- **风险**: 低。代码可读性差，容易出错
+- **代码**:
+  ```kotlin
+  when (protocol) {
+      17 -> {  // UDP - 魔法数字
+      6 -> {   // TCP - 魔法数字
+  }
+  buffer[0] = 0x45  // IPv4, IHL=5 - 魔法数字
+  buffer[8] = 64    // TTL - 魔法数字
+  ```
+- **建议**: 提取为命名常量：
+  ```kotlin
+  companion object {
+      private const val PROTOCOL_TCP = 6
+      private const val PROTOCOL_UDP = 17
+      private const val IP_VERSION_IPV4 = 0x45
+      private const val IP_DEFAULT_TTL = 64
+  }
+  ```
 
-## 已修复问题（历史记录）
+### C14: 函数过长且职责不单一 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: 
+  - `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L172-412, `connect()`约240行)
+  - `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L628-694, `constructReturnPacket()`约66行)
+- **问题描述**: 多个函数超过50行，包含过多职责。`connect()`方法包含同步块、任务取消、连接建立、回调设置、状态管理等；`constructReturnPacket()`包含大量逐字节操作
+- **风险**: 中。代码难以理解和测试
+- **建议**: 
+  - 将`connect()`拆分为`prepareConnection()`、`establishMqttConnection()`、`setupCallbacks()`、`startHeartbeat()`
+  - 将`constructReturnPacket`拆分为`buildIpHeader()`、`buildTcpHeader()`、`calculateChecksums()`
 
-### FIXED: 心跳失败后未触发重连
-- **修复提交**: aa1afd6
-- **修复时间**: 2026-04-10
-- **修复内容**: 修改 `startHeartbeat()` 签名，添加 `authToken` 和 `generation` 参数，在心跳失败时调用 `scheduleReconnect()`
-- **验证结果** (2026-04-10): **未完全修复**。虽然添加了 `authToken` 和 `generation` 参数，但心跳失败检测机制本身存在问题：`publish()` 内部捕获所有异常，外部 `try-catch` 块永远不会执行。需要进一步修复，参见 `ISSUES.md` H1。
+### C15: 嵌套层级过深 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L412-477, `forwardViaSocks5()`)
+- **问题描述**: 函数嵌套层级过深，包含多个if-else嵌套和try-catch块，难以跟踪逻辑流程
+- **风险**: 低。代码可读性差，容易引入bug
+- **建议**: 使用早期返回模式，将连接借用逻辑提取为独立方法
 
-### FIXED: 同步块内 IO 操作阻塞 disconnect()
-- **修复提交**: 5d0778b
-- **修复时间**: 2026-04-10
-- **修复内容**: 将 `close()` IO 操作移出同步块，避免阻塞其他线程
+### C16: 代码缺少适当分组和空行 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L289-302), `Socks5ConnectionPool.kt`
+- **问题描述**: 逻辑块之间缺少空行，属性定义没有分组，难以快速理解类结构
+- **风险**: 低。影响代码可读性
+- **建议**: 在逻辑步骤之间添加空行，使用代码分组注释（如`// ==================== Connection Pool State ====================`）
 
-### FIXED: 连接成功后竞态条件
-- **修复提交**: 702511e
-- **修复时间**: 2026-04-10
-- **修复内容**: 使用同步块保护所有状态检查和更新，确保只有当前有效连接才能设置 Connected 状态
+### C17: Go服务端代码风格不一致 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: `server/socks5-proxy/main.go`, `server/api/main.go`
+- **问题描述**: 
+  - 错误处理风格不一致，有些地方使用`fmt.Errorf`，有些使用`log.Printf`
+  - 魔法数字未命名（如SOCKS5版本0x05、认证方法0x02等）
+  - 函数参数过多（如`ConnectThroughTunnel`有4个参数）
+- **风险**: 低。维护困难
+- **建议**: 
+  - 统一错误处理风格
+  - 定义常量：`const (SocksVersion5 = 0x05; AuthMethodPassword = 0x02)`
+  - 将参数封装为结构体
 
 ---
 
