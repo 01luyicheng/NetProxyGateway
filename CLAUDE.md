@@ -43,8 +43,9 @@
 - **多网络场景处理不完善**: 手机可能同时连接多个网络（双WiFi、蓝牙PAN、OTG有线网络等），当前代码只能识别单一网络类型，无法正确处理多网络共存和切换场景。详见 `docs/TECH_DEBT.md` 中 C1 和 C3。
 
 ### 关键缺陷（需立即修复）
-- **关键缺陷**: MQTT 心跳失败检测机制完全失效（docs/ISSUES.md H1），会导致网络异常时无法自动触发重连。
-- **并发风险**: 同步块内更新 StateFlow（docs/ISSUES.md H3）可能导致死锁；SOCKS5 连接池读取未设置超时（docs/ISSUES.md H7）可能导致线程永久阻塞。
+- ✅ **已修复**: MQTT 心跳失败检测机制失效（docs/ISSUES.md H1），网络异常可通过连续心跳失败触发重连。
+- ✅ **已修复**: 避免同步块内更新 StateFlow（docs/ISSUES.md H3），降低死锁与锁竞争风险。
+- **并发风险**: SOCKS5 连接池读取未设置超时（docs/ISSUES.md H7）可能导致线程永久阻塞。
 - **连接池竞态**: 连接池清理竞争条件（docs/ISSUES.md H5），read锁和write锁之间连接状态可能变化。
 - **生命周期缺陷**: ✅ **已修复** VPN 服务 serviceScope 生命周期管理缺陷（docs/ISSUES.md H9），停止后无法重新启动。
 
@@ -54,7 +55,7 @@
 - **已弃用API**: 大量使用已弃用 API（`EncryptedSharedPreferences`、`WifiConfiguration`、`NioEventLoopGroup` 等，docs/ISSUES.md N13）。
 
 ### 工程化与架构债务
-- **测试缺口**: 核心业务逻辑（`processVpnTraffic`、`forwardViaSocks5`、`startHeartbeat`）缺乏测试覆盖（docs/ISSUES.md N8）。
+- **测试缺口**: 核心业务逻辑（`processVpnTraffic`、`forwardViaSocks5`）缺乏测试覆盖（docs/ISSUES.md N8）。
 - **监控缺失**: 没有性能指标收集、健康检查端点、错误上报机制（docs/ISSUES.md N10）。
 - **构建流程**: 缺少 Makefile 统一构建流程（docs/TECH_DEBT.md C11）。
 - **服务发现**: 服务间使用硬编码地址通信（docs/TECH_DEBT.md C10）。
@@ -107,10 +108,15 @@
 
 为维护跨会话的连续性：
 
-- 每个通过验证的合并提交必须注明Agent使用的模型名称和日期
+- 每个通过验证的合并提交必须注明Agent使用的模型名称、工具名称和日期（示例：Kimi-K2.5 on Claude code，2026-04-11）
 - 在开始工作前，必须验证：`android\gradlew.bat -p android :app:testDebugUnitTest` 通过
 - 如果 main 分支测试失败，通过在第 5 节（技术风险）中提交明确的阻塞问题来解除阻塞
 - 2026-04-11: H9已修复验证 - serviceScope从val改为var并在onCreate中创建 (Kimi-K2.5)
 - 2026-04-11: H14已修复验证 - cleanupVpnResources()正确归还连接池连接 (Kimi-K2.5)
 - 2026-04-11: H15已修复验证 - onDestroy()使用安全调用避免重复操作 (Kimi-K2.5)
+- 2026-04-14: H1已修复验证 - startHeartbeat() 检测 AppResult 连续失败触发重连，并新增回归单测 (GPT-5.2)
+- 2026-04-14: H6/H16/H17/H3已修复验证 - connect 原子交换/失败清理/锁外状态发射，并通过门禁构建与单测 (GPT-5.2)
+- 2026-04-15: S2已修复验证 - ConnectThroughTunnel错误处理路径添加streamConn.Close()资源清理，并通过Go单测 (Kimi-K2.5)
+- 2026-04-15: S1已验证确认 - relay函数goroutine泄漏问题经Subagents验证存在，已记录至ISSUES.md待修复 (Kimi-K2.5)
+- 2026-04-15: S3已修复验证 - handleConnectResponse连接失败时添加delete(tc.streams)避免内存泄漏，并新增4个单元测试 (Kimi-K2.5)
 
