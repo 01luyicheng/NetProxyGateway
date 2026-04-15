@@ -551,8 +551,11 @@ class MqttConnectionManager @Inject constructor(
         }
 
         scope.launch {
+            ensureActive()
             try {
                 client.disconnect()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: MqttException) {
                 logger.error("Disconnect error", e)
             } finally {

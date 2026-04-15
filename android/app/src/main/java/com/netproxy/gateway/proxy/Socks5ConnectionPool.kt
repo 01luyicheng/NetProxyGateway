@@ -4,6 +4,7 @@ import org.slf4j.LoggerFactory
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.atomic.AtomicBoolean
@@ -140,9 +141,11 @@ class Socks5ConnectionPool(
         if (invalidConnections.isNotEmpty()) {
             poolLock.write {
                 invalidConnections.forEach { conn ->
-                    allConnections.remove(conn)
-                    totalConnections.decrementAndGet()
-                    conn.close()
+                    // Re-check in use state under write lock to avoid racing with a concurrent borrow.
+                    if (!conn.inUse.get() && allConnections.remove(conn) != null) {
+                        totalConnections.decrementAndGet()
+                        conn.close()
+                    }
                 }
             }
         }
@@ -163,27 +166,38 @@ class Socks5ConnectionPool(
             connection.close()
             return
         }
-        
-        if (!connection.isValid()) {
-            removeConnection(connection)
-            return
-        }
-        
-        connection.markReturned()
-        
+
         val destKey = "${connection.destinationIp}:${connection.destinationPort}"
-        
+
         poolLock.write {
+            if (isShutdown.get()) {
+                connection.close()
+                return@write
+            }
+
+            // Connection might have been concurrently cleaned up before returning.
+            if (!allConnections.containsKey(connection)) {
+                connection.close()
+                return@write
+            }
+
+            if (!connection.isValid()) {
+                removeConnection(connection)
+                return@write
+            }
+
+            connection.markReturned()
+
             val queue = availableConnections.getOrPut(destKey) { LinkedBlockingQueue() }
-            
+
             // 检查该目标地址的连接数是否超过限制
-            val currentCount = queue.count { !it.inUse.get() } + 
-                              allConnections.keys.count { 
-                                  it.destinationIp == connection.destinationIp && 
-                                  it.destinationPort == connection.destinationPort &&
-                                  it.inUse.get()
-                              }
-            
+            val currentCount = queue.count { !it.inUse.get() } +
+                allConnections.keys.count {
+                    it.destinationIp == connection.destinationIp &&
+                        it.destinationPort == connection.destinationPort &&
+                        it.inUse.get()
+                }
+
             if (currentCount >= config.maxConnectionsPerDestination) {
                 // 超过限制，关闭此连接
                 removeConnection(connection)
@@ -201,32 +215,57 @@ class Socks5ConnectionPool(
         destinationPort: Int,
         protectSocket: ((Socket) -> Unit)?
     ): PooledSocks5Connection? {
-        // 检查总连接数限制
-        if (totalConnections.get() >= config.maxConnections) {
-            logger.warn("Connection pool exhausted, max=$config.maxConnections")
-            return null
-        }
-        
-        val credentials = credentialProvider()
-        if (credentials == null) {
-            logger.warn("No credentials available for SOCKS5 connection")
-            return null
-        }
-        
-        val (username, password) = credentials
-        
-        return try {
+        // 使用 try-finally 确保连接计数一致性
+        var connectionEstablished = false
+        var trackedConnection: PooledSocks5Connection? = null
+
+        try {
+            if (!tryReserveConnectionSlot()) {
+                logger.warn("Connection pool exhausted, max=$config.maxConnections")
+                return null
+            }
+
+            val credentials = credentialProvider()
+            if (credentials == null) {
+                logger.warn("No credentials available for SOCKS5 connection")
+                return null
+            }
+
+            val (username, password) = credentials
+
             val socket = createSocks5Socket(destinationIp, destinationPort, username, password, protectSocket)
             val connection = PooledSocks5Connection(socket, destinationIp, destinationPort)
             connection.markUsed()
-            
-            totalConnections.incrementAndGet()
+
+            trackedConnection = connection
             allConnections[connection] = "$destinationIp:$destinationPort"
-            
-            connection
+            connectionEstablished = true
+
+            return connection
         } catch (e: Exception) {
+            trackedConnection?.let {
+                allConnections.remove(it)
+                it.close()
+            }
             logger.error("Failed to create SOCKS5 connection to $destinationIp:$destinationPort", e)
-            null
+            return null
+        } finally {
+            // 统一在 finally 块中管理连接计数，确保一致性
+            if (!connectionEstablished) {
+                totalConnections.decrementAndGet()
+            }
+        }
+    }
+
+    private fun tryReserveConnectionSlot(): Boolean {
+        while (true) {
+            val current = totalConnections.get()
+            if (current >= config.maxConnections) {
+                return false
+            }
+            if (totalConnections.compareAndSet(current, current + 1)) {
+                return true
+            }
         }
     }
     
@@ -247,13 +286,20 @@ class Socks5ConnectionPool(
             tcpNoDelay = true
         }
         
-        val output = socket.getOutputStream()
-        val input = socket.getInputStream()
-        
-        // SOCKS5握手流程
-        performSocks5Handshake(input, output, username, password, destinationIp, destinationPort)
-        
-        return socket
+        return try {
+            val output = socket.getOutputStream()
+            val input = socket.getInputStream()
+
+            // SOCKS5握手流程
+            performSocks5Handshake(input, output, username, password, destinationIp, destinationPort)
+
+            socket
+        } catch (e: Exception) {
+            try {
+                socket.close()
+            } catch (_: Exception) {}
+            throw e
+        }
     }
     
     /**
@@ -329,12 +375,27 @@ class Socks5ConnectionPool(
     }
     
     private fun readFully(input: java.io.InputStream, target: ByteArray, offset: Int, length: Int) {
+        require(offset >= 0 && length >= 0 && offset + length <= target.size) {
+            "Invalid read bounds: offset=$offset, length=$length, targetSize=${target.size}"
+        }
+
         var currentOffset = offset
         val endOffset = offset + length
         while (currentOffset < endOffset) {
-            val read = input.read(target, currentOffset, endOffset - currentOffset)
+            val read = try {
+                input.read(target, currentOffset, endOffset - currentOffset)
+            } catch (e: SocketTimeoutException) {
+                throw IllegalStateException(
+                    "SOCKS5 read timeout after ${config.socketSoTimeoutMs}ms",
+                    e
+                )
+            }
+
             if (read < 0) {
                 throw IllegalStateException("Unexpected EOF while reading SOCKS5 stream")
+            }
+            if (read == 0) {
+                continue
             }
             currentOffset += read
         }
@@ -344,8 +405,9 @@ class Socks5ConnectionPool(
      * 从连接池中移除连接
      */
     private fun removeConnection(connection: PooledSocks5Connection) {
-        allConnections.remove(connection)
-        totalConnections.decrementAndGet()
+        if (allConnections.remove(connection) != null) {
+            totalConnections.decrementAndGet()
+        }
         connection.close()
     }
     
@@ -355,16 +417,15 @@ class Socks5ConnectionPool(
     private fun cleanupIdleConnections() {
         val now = System.currentTimeMillis()
         val toRemove = mutableListOf<PooledSocks5Connection>()
-        
-        poolLock.read {
+
+        // Keep selection and removal in one write lock window to avoid stale decisions.
+        poolLock.write {
             allConnections.keys.forEach { conn ->
                 if (!conn.inUse.get() && (now - conn.lastUsedAt.get() > config.idleTimeoutMs)) {
                     toRemove.add(conn)
                 }
             }
-        }
-        
-        poolLock.write {
+
             toRemove.forEach { conn ->
                 val destKey = "${conn.destinationIp}:${conn.destinationPort}"
                 availableConnections[destKey]?.remove(conn)
