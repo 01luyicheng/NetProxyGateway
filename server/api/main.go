@@ -89,6 +89,17 @@ func NewServer() (*Server, error) {
 		log.Fatalf("FATAL: ADMIN_USER and ADMIN_PASS environment variables must be set. Please configure admin credentials before starting the server.")
 	}
 
+	internalAPIKey := os.Getenv("INTERNAL_API_KEY")
+	if internalAPIKey == "" {
+		// 开发环境：自动生成随机密钥
+		if gin.Mode() == gin.DebugMode {
+			log.Println("WARN: INTERNAL_API_KEY not set, generating random key for development only")
+			internalAPIKey = generateRandomString(32)
+		} else {
+			log.Fatalf("FATAL: INTERNAL_API_KEY environment variable is not set. Please configure an internal API key before starting the server.")
+		}
+	}
+
 	// 获取数据库路径
 	dbPath := os.Getenv("DB_PATH")
 	if dbPath == "" {
@@ -112,10 +123,10 @@ func NewServer() (*Server, error) {
 	}
 
 	return &Server{
-		db:              db,
-		loginAttempts:   make(map[string]*LoginAttempt),
-		jwtSecret:       []byte(jwtSecret),
-		internalAPIKey:  []byte(os.Getenv("INTERNAL_API_KEY")),
+		db:             db,
+		loginAttempts:  make(map[string]*LoginAttempt),
+		jwtSecret:      []byte(jwtSecret),
+		internalAPIKey: []byte(internalAPIKey),
 	}, nil
 }
 
@@ -494,6 +505,29 @@ func (s *Server) internalOrUserAuthMiddleware() gin.HandlerFunc {
 	}
 }
 
+func (s *Server) internalAuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if len(s.internalAPIKey) == 0 {
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "internal api key not configured"})
+			return
+		}
+
+		internalKey := c.GetHeader("X-Internal-API-Key")
+		if internalKey == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing internal api key"})
+			return
+		}
+
+		if subtle.ConstantTimeCompare([]byte(internalKey), s.internalAPIKey) != 1 {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid internal api key"})
+			return
+		}
+
+		c.Set("role", "internal")
+		c.Next()
+	}
+}
+
 // createPairingSession 创建配对会话
 func (s *Server) createPairingSession(c *gin.Context) {
 	clientIP := c.ClientIP()
@@ -579,9 +613,15 @@ func (s *Server) getPairingSession(c *gin.Context) {
 func (s *Server) updatePairingSession(c *gin.Context) {
 	code := c.Param("code")
 
+	engineerIDValue, exists := c.Get("engineer_id")
+	engineerID, ok := engineerIDValue.(string)
+	if !exists || !ok || engineerID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing authenticated engineer"})
+		return
+	}
+
 	var req struct {
-		Status     string `json:"status" binding:"required"`
-		EngineerID string `json:"engineer_id"`
+		Status string `json:"status" binding:"required"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -597,6 +637,11 @@ func (s *Server) updatePairingSession(c *gin.Context) {
 
 	if session == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
+		return
+	}
+
+	if session.EngineerID != "" && session.EngineerID != engineerID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "unauthorized"})
 		return
 	}
 
@@ -630,9 +675,7 @@ func (s *Server) updatePairingSession(c *gin.Context) {
 	}
 
 	session.Status = req.Status
-	if req.EngineerID != "" {
-		session.EngineerID = req.EngineerID
-	}
+	session.EngineerID = engineerID
 
 	// 如果连接成功，标记为已使用
 	if req.Status == "connected" {
@@ -685,9 +728,15 @@ func (s *Server) validateSession(c *gin.Context) {
 
 // createSessionToken 创建会话令牌
 func (s *Server) createSessionToken(c *gin.Context) {
+	engineerIDValue, exists := c.Get("engineer_id")
+	engineerID, ok := engineerIDValue.(string)
+	if !exists || !ok || engineerID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing authenticated engineer"})
+		return
+	}
+
 	var req struct {
-		Code       string `json:"code" binding:"required"`
-		EngineerID string `json:"engineer_id" binding:"required"`
+		Code string `json:"code" binding:"required"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -711,7 +760,7 @@ func (s *Server) createSessionToken(c *gin.Context) {
 		return
 	}
 
-	if session.EngineerID != req.EngineerID {
+	if session.EngineerID != engineerID {
 		c.JSON(http.StatusForbidden, gin.H{"error": "unauthorized"})
 		return
 	}
@@ -721,7 +770,7 @@ func (s *Server) createSessionToken(c *gin.Context) {
 	sessionToken := &SessionToken{
 		Token:      token,
 		DeviceID:   session.DeviceID,
-		EngineerID: req.EngineerID,
+		EngineerID: engineerID,
 		CreatedAt:  time.Now(),
 		ExpiresAt:  time.Now().Add(SessionTokenTTL),
 	}
@@ -881,15 +930,15 @@ func main() {
 		// 配对会话管理
 		api.POST("/pair", server.authMiddleware(), server.createPairingSession)
 		api.GET("/pair/:code", server.getPairingSession)
-		api.PUT("/pair/:code", server.updatePairingSession)
+		api.PUT("/pair/:code", server.authMiddleware(), server.updatePairingSession)
 
 		// 会话令牌
 		api.POST("/session/token", server.authMiddleware(), server.createSessionToken)
-		api.POST("/session/validate", server.validateSession)
+		api.POST("/session/validate", server.internalAuthMiddleware(), server.validateSession)
 
 		// 设备状态
 		api.GET("/device/:id/status", server.authMiddleware(), server.getDeviceStatus)
-		api.POST("/device/status", server.internalOrUserAuthMiddleware(), server.updateDeviceStatus)
+		api.POST("/device/status", server.internalAuthMiddleware(), server.updateDeviceStatus)
 	}
 
 	port := os.Getenv("PORT")
@@ -901,6 +950,15 @@ func main() {
 	enableTLS := os.Getenv("ENABLE_TLS") == "true"
 	tlsCert := os.Getenv("TLS_CERT")
 	tlsKey := os.Getenv("TLS_KEY")
+
+	httpServer := &http.Server{
+		Addr:              ":" + port,
+		Handler:           r,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 
 	// 验证TLS配置
 	if enableTLS {
@@ -919,11 +977,11 @@ func main() {
 	}
 
 	if enableTLS {
-		if err := r.RunTLS(":"+port, tlsCert, tlsKey); err != nil {
+		if err := httpServer.ListenAndServeTLS(tlsCert, tlsKey); err != nil {
 			log.Fatalf("Server failed: %v", err)
 		}
 	} else {
-		if err := r.Run(":" + port); err != nil {
+		if err := httpServer.ListenAndServe(); err != nil {
 			log.Fatalf("Server failed: %v", err)
 		}
 	}
