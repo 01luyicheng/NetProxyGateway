@@ -49,7 +49,7 @@ class MqttConnectionManagerConnectCleanupTest {
     }
 
     @Test
-    fun connect_whenConnectThrowsAndGenerationChanges_shouldClearClientReference() {
+    fun connect_whenConnectThrowsAndGenerationChanges_shouldClearClientReferenceAndCloseClient() {
         mockkConstructor(MqttClient::class)
 
         every { anyConstructed<MqttClient>().setCallback(any()) } just runs
@@ -64,8 +64,12 @@ class MqttConnectionManagerConnectCleanupTest {
         manager.connect(deviceId = "device-1", authToken = "token-1")
         testScope.advanceUntilIdle()
 
-        // 当 connect() 抛出异常时，localClient 为 null，所以不会调用 close()
-        // 但 mqttClient 引用应该被清除（在异常处理中通过检查 mqttClient === createdClient）
+        // 当 connect() 抛出异常时：
+        // 1. 本测试模拟的是 connect() 调用时抛出异常，此时客户端已创建成功，localClient 不为 null
+        // 2. 异常处理逻辑会在 localClient != null 时调用 disconnect() 和 close()
+        // 3. mqttClient 引用会被清除（如果 mqttClient === clientToClose）
+        verify { anyConstructed<MqttClient>().disconnect() }
+        verify { anyConstructed<MqttClient>().close() }
         assertNull(manager.getPrivateMqttClient())
     }
 
