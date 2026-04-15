@@ -16,10 +16,10 @@ services:
       - "8080:8080"
     environment:
       - PORT=8080
-      - JWT_SECRET=${JWT_SECRET:-changeme-in-production}
-      - ADMIN_USER=${ADMIN_USER:-admin}
-      - ADMIN_PASS=${ADMIN_PASS:-changeme}
-      - INTERNAL_API_KEY=${INTERNAL_API_KEY:-netproxy-internal-dev-key}
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
+      - ADMIN_USER=${ADMIN_USER:?ADMIN_USER is required}
+      - ADMIN_PASS=${ADMIN_PASS:?ADMIN_PASS is required}
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
       # TLS 配置（可选）
       - ENABLE_TLS=${ENABLE_TLS:-false}
       - TLS_CERT=${TLS_CERT:-/app/certs/server.crt}
@@ -49,6 +49,7 @@ services:
     environment:
       - SOCKS5_ADDR=0.0.0.0:1080
       - API_ENDPOINT=http://api:8080
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
       # TLS 配置（可选）
       - ENABLE_TLS=${SOCKS5_ENABLE_TLS:-false}
       - TLS_CERT=${SOCKS5_TLS_CERT:-/app/certs/server.crt}
@@ -80,7 +81,7 @@ services:
     environment:
       - TUNNEL_ADDR=0.0.0.0:8443
       - API_ENDPOINT=http://api:8080
-      - INTERNAL_API_KEY=${INTERNAL_API_KEY:-netproxy-internal-dev-key}
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
       # TLS 配置（可选）
       - ENABLE_TLS=${TUNNEL_ENABLE_TLS:-false}
       - TLS_CERT=${TUNNEL_TLS_CERT:-/app/certs/server.crt}
@@ -114,8 +115,8 @@ services:
     environment:
       EMQX_NAME: emqx
       EMQX_HOST: 127.0.0.1
-      EMQX_DASHBOARD__DEFAULT_USERNAME: ${EMQX_DASHBOARD_USERNAME:-admin}
-      EMQX_DASHBOARD__DEFAULT_PASSWORD: ${EMQX_DASHBOARD_PASSWORD:-public}
+      EMQX_DASHBOARD__DEFAULT_USERNAME: ${EMQX_DASHBOARD_USERNAME:?EMQX_DASHBOARD_USERNAME is required}
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: ${EMQX_DASHBOARD_PASSWORD:?EMQX_DASHBOARD_PASSWORD is required}
       EMQX_MQTT__MAX_PACKET_SIZE: 1MB
       EMQX_MQTT__KEEPALIVE: 30s
     volumes:
