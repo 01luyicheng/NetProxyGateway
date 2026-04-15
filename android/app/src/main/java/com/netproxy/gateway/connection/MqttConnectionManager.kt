@@ -5,9 +5,12 @@ import com.netproxy.gateway.BuildConfig
 import com.netproxy.gateway.di.ApplicationScope
 import com.netproxy.gateway.result.AppResult
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -62,6 +65,7 @@ class MqttConnectionManager @Inject constructor(
     private var reconnectDelay = 5000L
     private var reconnectJob: Job? = null
     private var heartbeatJob: Job? = null
+    private var connectJob: Job? = null
     @Volatile private var shouldStayConnected: Boolean = false
     private val connectionGeneration = AtomicLong(0)
 
@@ -166,33 +170,64 @@ class MqttConnectionManager @Inject constructor(
     }
 
     fun connect(deviceId: String, authToken: String) {
-        shouldStayConnected = true
-        reconnectJob?.cancel()
-        val generation = connectionGeneration.incrementAndGet()
-        scope.launch {
-            try {
-                _connectionState.value = MqttConnectionState.Connecting
+        var generation = 0L
+        lateinit var jobToStart: Job
+        synchronized(this@MqttConnectionManager) {
+            shouldStayConnected = true
+            reconnectJob?.cancel()
+            reconnectJob = null
+            heartbeatJob?.cancel()
+            heartbeatJob = null
+            connectJob?.cancel()
+            connectJob = null
+
+            generation = connectionGeneration.incrementAndGet()
+            jobToStart = scope.launch(start = CoroutineStart.LAZY) {
+                var localClient: MqttClient? = null
+                try {
+                    if (!shouldStayConnected || generation != connectionGeneration.get()) {
+                        return@launch
+                    }
+
+                    ensureActive()
 
                 // 根据配置选择 MQTT 连接 URL
                 val brokerUrl = brokerUrl()
                 validateBrokerUrl(brokerUrl)
                 val clientId = "${CLIENT_ID}_$deviceId"
 
-                // 1. 在同步块内只获取旧客户端引用并清空 mqttClient
-                val oldClient = synchronized(this@MqttConnectionManager) {
-                    mqttClient.also { mqttClient = null }
-                }
+                // 在同一个同步块内完成"generation 校验 + 交换客户端引用"，避免并发 connect() 覆盖 mqttClient
+                val (oldClient, createdClient) = synchronized(this@MqttConnectionManager) {
+                    if (!shouldStayConnected || generation != connectionGeneration.get()) {
+                        null
+                    } else {
+                        val created = MqttClient(brokerUrl, clientId, MemoryPersistence())
+                        val old = mqttClient
+                        mqttClient = created
+                        old to created
+                    }
+                } ?: return@launch
 
-                // 2. 在同步块外执行 close() IO 操作（避免阻塞其他线程调用 disconnect()）
-                oldClient?.close()
+                // 在 generation 校验通过后更新状态，避免竞态条件
+                _connectionState.value = MqttConnectionState.Connecting
 
-                // 3. 在同步块外创建新客户端
-                val newClient = MqttClient(brokerUrl, clientId, MemoryPersistence())
+                localClient = createdClient
 
-                // 4. 在新同步块内设置新客户端
-                val localClient = synchronized(this@MqttConnectionManager) {
-                    mqttClient = newClient
-                    newClient
+                // 在同步块外执行 close() IO 操作（避免阻塞其他线程调用 disconnect()）
+                if (oldClient != null) {
+                    try {
+                        if (oldClient.isConnected) {
+                            oldClient.disconnect()
+                        }
+                    } catch (disconnectError: MqttException) {
+                        logger.error("Disconnect old MQTT client error", disconnectError)
+                    } finally {
+                        try {
+                            oldClient.close()
+                        } catch (closeError: Exception) {
+                            logger.error("Close old MQTT client error", closeError)
+                        }
+                    }
                 }
 
                 val options = MqttConnectOptions().apply {
@@ -211,9 +246,9 @@ class MqttConnectionManager @Inject constructor(
                     }
                 }
 
-                localClient.setCallback(object : MqttCallback {
+                createdClient.setCallback(object : MqttCallback {
                     override fun connectionLost(cause: Throwable?) {
-                        if (generation != connectionGeneration.get()) {
+                        if (!shouldStayConnected || generation != connectionGeneration.get()) {
                             return
                         }
                         logger.warn("Connection lost: ${cause?.message}")
@@ -224,11 +259,14 @@ class MqttConnectionManager @Inject constructor(
                     }
 
                     override fun messageArrived(topic: String?, message: MqttMessage?) {
+                        if (!shouldStayConnected || generation != connectionGeneration.get()) {
+                            return
+                        }
                         message?.let {
                             try {
                                 val payload = String(it.payload)
                                 _messages.value = payload
-                                logger.debug("Message received: $topic - $payload")
+                                logger.debug("Message received: $topic (payloadBytes=${it.payload.size})")
                                 if (topic != null) {
                                     topicCallbacks[topic]?.forEach { callback ->
                                         try {
@@ -249,21 +287,22 @@ class MqttConnectionManager @Inject constructor(
                     }
                 })
 
-                localClient.connect(options)
+                createdClient.connect(options)
+
+                ensureActive()
 
                 // 使用 synchronized 块保护所有状态检查和更新，防止竞态条件
                 val shouldProceed = synchronized(this@MqttConnectionManager) {
                     // 检查是否仍应保持连接且 generation 匹配
                     if (!shouldStayConnected || generation != connectionGeneration.get()) {
                         // 只有当前连接仍是有效引用时才清理
-                        if (mqttClient === localClient) {
+                        if (mqttClient === createdClient) {
                             mqttClient = null
                         }
                         false
                     } else {
                         // 确认是当前有效连接，可以设置为 Connected
-                        if (mqttClient === localClient) {
-                            _connectionState.value = MqttConnectionState.Connected
+                        if (mqttClient === createdClient) {
                             reconnectDelay = 5000L
                             true
                         } else {
@@ -276,12 +315,12 @@ class MqttConnectionManager @Inject constructor(
                 if (!shouldProceed) {
                     // 在同步块外执行关闭操作
                     try {
-                        localClient.disconnect()
+                        createdClient.disconnect()
                     } catch (e: MqttException) {
                         logger.error("Disconnect error", e)
                     } finally {
                         try {
-                            localClient.close()
+                            createdClient.close()
                         } catch (e: Exception) {
                             logger.error("Close error", e)
                         }
@@ -292,54 +331,151 @@ class MqttConnectionManager @Inject constructor(
                     return@launch
                 }
 
+                val shouldMarkConnected = synchronized(this@MqttConnectionManager) {
+                    shouldStayConnected &&
+                        generation == connectionGeneration.get() &&
+                        mqttClient === createdClient
+                }
+                if (!shouldMarkConnected) {
+                    synchronized(this@MqttConnectionManager) {
+                        if (mqttClient === createdClient) {
+                            mqttClient = null
+                        }
+                    }
+                    try {
+                        createdClient.disconnect()
+                    } catch (e: MqttException) {
+                        logger.error("Disconnect error", e)
+                    } finally {
+                        try {
+                            createdClient.close()
+                        } catch (e: Exception) {
+                            logger.error("Close error", e)
+                        }
+                    }
+                    return@launch
+                }
+
+                ensureActive()
+                if (!shouldStayConnected || generation != connectionGeneration.get()) {
+                    return@launch
+                }
+                _connectionState.value = MqttConnectionState.Connected
+
                 subscribe("device/$deviceId/control")
                 startHeartbeat(deviceId, authToken, generation)
 
-            } catch (e: Exception) {
-                if (generation != connectionGeneration.get()) {
-                    return@launch
-                }
-                logger.error("MQTT connection error", e)
-                _connectionState.value = MqttConnectionState.Error(e.message ?: "Connection failed")
-                if (shouldStayConnected) {
-                    scheduleReconnect(deviceId, authToken, generation)
+                } catch (e: Exception) {
+                    val clientToClose = localClient
+                    if (clientToClose != null) {
+                        synchronized(this@MqttConnectionManager) {
+                            if (mqttClient === clientToClose) {
+                                mqttClient = null
+                            }
+                        }
+
+                        try {
+                            clientToClose.disconnect()
+                        } catch (ex: MqttException) {
+                            logger.error("Disconnect error during exception handling", ex)
+                        } finally {
+                            try {
+                                clientToClose.close()
+                            } catch (ex: Exception) {
+                                logger.error("Close error during exception handling", ex)
+                            }
+                        }
+                    }
+
+                    if (e is CancellationException) {
+                        throw e
+                    }
+
+                    if (generation != connectionGeneration.get()) {
+                        return@launch
+                    }
+                    logger.error("MQTT connection error", e)
+                    if (!shouldStayConnected || generation != connectionGeneration.get()) {
+                        return@launch
+                    }
+                    _connectionState.value = MqttConnectionState.Error(e.message ?: "Connection failed")
+                    if (shouldStayConnected) {
+                        scheduleReconnect(deviceId, authToken, generation)
+                    }
                 }
             }
+
+            connectJob = jobToStart
         }
+
+        jobToStart.start()
     }
 
     private fun scheduleReconnect(deviceId: String, authToken: String, generation: Long) {
-        reconnectJob?.cancel()
-        reconnectJob = scope.launch {
-            delay(reconnectDelay)
-            if (!shouldStayConnected || generation != connectionGeneration.get()) {
-                return@launch
+        lateinit var jobToStart: Job
+        synchronized(this@MqttConnectionManager) {
+            reconnectJob?.cancel()
+            jobToStart = scope.launch(start = CoroutineStart.LAZY) {
+                val delayMs = synchronized(this@MqttConnectionManager) { reconnectDelay }
+                delay(delayMs)
+                if (!shouldStayConnected || generation != connectionGeneration.get()) {
+                    return@launch
+                }
+                synchronized(this@MqttConnectionManager) {
+                    reconnectDelay = minOf(reconnectDelay * RECONNECT_BACKOFF_MULTIPLIER, MAX_RECONNECT_DELAY)
+                }
+                connect(deviceId, authToken)
             }
-            reconnectDelay = minOf(reconnectDelay * RECONNECT_BACKOFF_MULTIPLIER, MAX_RECONNECT_DELAY)
-            connect(deviceId, authToken)
+            reconnectJob = jobToStart
         }
+        jobToStart.start()
     }
 
     private fun startHeartbeat(deviceId: String, authToken: String, generation: Long) {
+        if (!shouldStayConnected || generation != connectionGeneration.get()) {
+            return
+        }
+
         heartbeatJob?.cancel()
         heartbeatJob = scope.launch {
             var consecutiveFailures = 0
-            while (shouldStayConnected && _connectionState.value == MqttConnectionState.Connected) {
+            while (
+                shouldStayConnected &&
+                generation == connectionGeneration.get() &&
+                _connectionState.value == MqttConnectionState.Connected
+            ) {
                 delay(HEARTBEAT_INTERVAL)
-                try {
-                    publish("device/$deviceId/heartbeat", "{\"status\":\"alive\"}")
+                if (!shouldStayConnected || generation != connectionGeneration.get()) {
+                    break
+                }
+                val result = publishWithResult(
+                    "device/$deviceId/heartbeat",
+                    "{\"status\":\"alive\"}",
+                    logError = false
+                )
+                if (result.isSuccess()) {
                     consecutiveFailures = 0
-                } catch (e: Exception) {
-                    logger.error("Heartbeat publish error", e)
-                    consecutiveFailures++
-                    if (consecutiveFailures >= MAX_HEARTBEAT_FAILURES) {
-                        logger.warn("Max heartbeat failures reached, triggering reconnect")
-                        _connectionState.value = MqttConnectionState.Error("Max heartbeat failures reached")
-                        if (shouldStayConnected && generation == connectionGeneration.get()) {
-                            scheduleReconnect(deviceId, authToken, generation)
-                        }
-                        break
+                    continue
+                }
+
+                val heartbeatException = result.exceptionOrNull()
+                if (heartbeatException == null) {
+                    logger.error("Heartbeat publish error")
+                } else {
+                    val summary = when (heartbeatException) {
+                        is MqttException -> "MqttException(reasonCode=${heartbeatException.reasonCode})"
+                        else -> heartbeatException.javaClass.simpleName
                     }
+                    logger.error("Heartbeat publish error: $summary")
+                }
+                consecutiveFailures++
+                if (consecutiveFailures >= MAX_HEARTBEAT_FAILURES) {
+                    logger.warn("Max heartbeat failures reached, triggering reconnect")
+                    if (shouldStayConnected && generation == connectionGeneration.get()) {
+                        _connectionState.value = MqttConnectionState.Error("Max heartbeat failures reached")
+                        scheduleReconnect(deviceId, authToken, generation)
+                    }
+                    break
                 }
             }
         }
@@ -349,7 +485,7 @@ class MqttConnectionManager @Inject constructor(
         publishWithResult(topic, payload, qos)
     }
 
-    fun publishWithResult(topic: String, payload: String, qos: Int = 0): AppResult<Unit> {
+    fun publishWithResult(topic: String, payload: String, qos: Int = 0, logError: Boolean = true): AppResult<Unit> {
         return try {
             val client = mqttClient ?: return AppResult.error(IllegalStateException("MQTT client is not connected"))
             val message = MqttMessage(payload.toByteArray()).apply {
@@ -357,8 +493,12 @@ class MqttConnectionManager @Inject constructor(
             }
             client.publish(topic, message)
             AppResult.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            logger.error("Publish error", e)
+            if (logError) {
+                logger.error("Publish error", e)
+            }
             AppResult.error(e)
         }
     }
@@ -388,26 +528,39 @@ class MqttConnectionManager @Inject constructor(
     }
 
     fun disconnect() {
-        shouldStayConnected = false
-        connectionGeneration.incrementAndGet()
-        reconnectJob?.cancel()
-        heartbeatJob?.cancel()
-        topicCallbacks.clear()
-        val client = synchronized(this) {
+        val client = synchronized(this@MqttConnectionManager) {
+            shouldStayConnected = false
+            connectionGeneration.incrementAndGet()
+            reconnectJob?.cancel()
+            reconnectJob = null
+            heartbeatJob?.cancel()
+            heartbeatJob = null
+            connectJob?.cancel()
+            connectJob = null
+            reconnectDelay = 5000L
+
             val c = mqttClient
             mqttClient = null
             c
         }
+        topicCallbacks.clear()
         _connectionState.value = MqttConnectionState.Disconnected
-        try {
-            client?.disconnect()
-        } catch (e: MqttException) {
-            logger.error("Disconnect error", e)
-        } finally {
+
+        if (client == null) {
+            return
+        }
+
+        scope.launch {
             try {
-                client?.close()
-            } catch (e: Exception) {
-                logger.error("Close error", e)
+                client.disconnect()
+            } catch (e: MqttException) {
+                logger.error("Disconnect error", e)
+            } finally {
+                try {
+                    client.close()
+                } catch (e: Exception) {
+                    logger.error("Close error", e)
+                }
             }
         }
     }
