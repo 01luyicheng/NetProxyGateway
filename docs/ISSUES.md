@@ -47,23 +47,45 @@
   }
   ```
 
+### C4: SOCKS5代理JSON注入风险 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: `server/socks5-proxy/main.go` (L140)
+- **问题描述**: 使用 `fmt.Sprintf` 直接拼接JSON字符串，如果 `deviceID` 或 `token` 包含特殊字符（如 `"`、换行符等），会导致JSON格式错误或注入攻击
+- **风险**: Critical。可能导致API请求格式错误，或在极端情况下存在注入风险
+- **代码**:
+  ```go
+  // L140: 问题代码
+  reqBody := fmt.Sprintf(`{"device_id":"%s","token":"%s"}`, deviceID, token)
+  ```
+- **建议修复**:
+  ```go
+  payload := map[string]string{"device_id": deviceID, "token": token}
+  reqBodyBytes, err := json.Marshal(payload)
+  if err != nil {
+      return false, fmt.Errorf("failed to marshal request: %w", err)
+  }
+  req, err := http.NewRequest("POST", u.String(), bytes.NewReader(reqBodyBytes))
+  ```
+- **验证方式**: 代码审查
+
 ---
 
 ## High
 
-### H1: 心跳失败检测失效 [已验证确认]
-- **状态**: 待修复（已验证确认存在）
+### H1: 心跳失败检测失效 [已修复]
+- **状态**: ✅ 已修复
+- **修复时间**: 2026-04-14
 - **验证时间**: 2026-04-10
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L329-343)
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt`（`startHeartbeat()`）
 - **问题验证**: 
   - `publish()` 方法调用 `publishWithResult()` 并忽略返回值
   - `publishWithResult()` 内部捕获所有异常并返回 `AppResult`，不抛出异常
   - 外部 `try-catch` 块永远不会捕获到异常
   - **心跳连续失败检测机制完全失效**
 - **风险**: **Critical**。当网络异常时，无法自动触发重连，连接可能处于"假死"状态而不被感知。
-- **代码分析**:
+- **原因分析（修复前）**:
   ```kotlin
-  // L329-343: 问题代码
+  // 问题代码（修复前）：publish() 不抛异常，try-catch 永远捕获不到
   try {
       publish("device/$deviceId/heartbeat", "{\"status\":\"alive\"}")  // 内部捕获所有异常
       consecutiveFailures = 0
@@ -84,166 +106,48 @@
       }
   }
   ```
-- **建议修复**:
-  ```kotlin
-  val result = publishWithResult("device/$deviceId/heartbeat", "{\"status\":\"alive\"}")
-  if (result.isSuccess) {
-      consecutiveFailures = 0
-  } else {
-      logger.error("Heartbeat publish error", result.exceptionOrNull())
-      consecutiveFailures++
-      if (consecutiveFailures >= MAX_HEARTBEAT_FAILURES) {
-          logger.warn("Max heartbeat failures reached, triggering reconnect")
-          _connectionState.value = MqttConnectionState.Error("Max heartbeat failures reached")
-          if (shouldStayConnected && generation == connectionGeneration.get()) {
-              scheduleReconnect(deviceId, authToken, generation)
-          }
-          break
-      }
-  }
-  ```
+- **修复说明**:
+  - `startHeartbeat()` 改为检查 `publishWithResult()` 的 `AppResult` 返回值（不再依赖异常抛出）
+  - 连续失败达到阈值后设置 `connectionState=Error` 并触发 `scheduleReconnect()`
+  - 新增回归测试：`android/app/src/test/java/com/netproxy/gateway/connection/MqttConnectionManagerHeartbeatTest.kt`
+- **验证**:
+  - `android\\gradlew.bat -p android :app:testDebugUnitTest --stacktrace --no-daemon`
+  - `android\\gradlew.bat -p android assembleDebug --stacktrace --no-daemon`
 
-### H6: connectionLost 回调状态竞态 [已验证确认]
-- **状态**: 待修复（已验证确认存在，风险较低）
+### H6: connectionLost 回调状态竞态 [已修复]
+- **状态**: ✅ 已修复
+- **修复时间**: 2026-04-14
 - **验证时间**: 2026-04-10
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L214-224)
-- **问题验证**:
-  - L216 已检查 `generation`，但 L220 设置状态前没有再次验证
-  - 在检查 generation 和设置状态之间存在时间窗口
-  - 由于 MQTT 回调在单线程队列中执行，实际并发风险较低
-- **风险**: 中。UI 可能显示错误状态，即使新连接已成功建立。
-- **代码分析**:
-  ```kotlin
-  override fun connectionLost(cause: Throwable?) {
-      if (generation != connectionGeneration.get()) {  // 第1次检查
-          return
-      }
-      logger.warn("Connection lost: ${cause?.message}")
-      // 此处可能 generation 已变化，但状态仍被设置
-      _connectionState.value = MqttConnectionState.Error(cause?.message ?: "Connection lost")
-      // ...
-  }
-  ```
-- **建议修复**:
-  ```kotlin
-  override fun connectionLost(cause: Throwable?) {
-      if (generation != connectionGeneration.get()) {
-          return
-      }
-      logger.warn("Connection lost: ${cause?.message}")
-      // 使用同步块保护状态设置，或再次检查 generation
-      synchronized(this@MqttConnectionManager) {
-          if (generation == connectionGeneration.get()) {
-              _connectionState.value = MqttConnectionState.Error(cause?.message ?: "Connection lost")
-          }
-      }
-      if (shouldStayConnected && generation == connectionGeneration.get()) {
-          scheduleReconnect(deviceId, authToken, generation)
-      }
-  }
-  ```
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt`（`connect()` 内回调 `connectionLost()`）
+- **修复说明**:
+  - 在更新 `_connectionState` 之前增加二次校验（`shouldStayConnected` + `generation`），避免旧回调覆盖新连接状态。
+- **验证**:
+  - `android\\gradlew.bat -p android :app:testDebugUnitTest --stacktrace --no-daemon`
+  - `android\\gradlew.bat -p android assembleDebug --stacktrace --no-daemon`
 
-### H16: MQTT连接客户端创建竞态条件 [已验证确认]
-- **状态**: 待修复（2026-04-11 Subagents深度验证确认）
+### H16: MQTT连接客户端创建竞态条件 [已修复]
+- **状态**: ✅ 已修复
+- **修复时间**: 2026-04-14
 - **验证时间**: 2026-04-11
-- **验证方式**: Logic Analyzer Agent 代码审查
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L181-196)
-- **问题验证**:
-  - 创建新客户端（L190）和设置`mqttClient`（L193-196）之间有时间窗口
-  - 两个操作不在同一个同步块内，可能被其他线程打断
-  - 当并发执行`connect()`时，后创建的客户端可能覆盖先创建的客户端
-- **竞态场景**:
-  ```
-  T1: 线程A创建newClientA，在获取锁之前被挂起
-  T2: 线程B创建newClientB，获取锁并设置mqttClient = newClientB
-  T3: 线程A恢复，获取锁并设置mqttClient = newClientA（覆盖了B的客户端）
-  ```
-- **风险**: 高。可能导致：
-  - 客户端引用丢失，`newClientB`被覆盖后无法访问，造成资源泄露
-  - 状态不一致，`_connectionState`被设置为`Connected`，但实际使用的是旧客户端
-  - 心跳异常，两个线程可能同时运行心跳，或一个线程的心跳覆盖了另一个
-  - 回调错乱，`connectionLost`回调中的generation检查可能无法正确处理
-- **代码分析**:
-  ```kotlin
-  // L181-196: 问题代码
-  val oldClient = synchronized(this@MqttConnectionManager) {
-      mqttClient.also { mqttClient = null }
-  }
-  oldClient?.close()
-  
-  // 在同步块外创建新客户端
-  val newClient = MqttClient(brokerUrl, clientId, MemoryPersistence())
-  
-  // 在新同步块内设置新客户端（可能被其他线程覆盖）
-  val localClient = synchronized(this@MqttConnectionManager) {
-      mqttClient = newClient
-      newClient
-  }
-  ```
-- **建议修复**:
-  ```kotlin
-  // 方案1: 在同步块内完成客户端创建和赋值（推荐）
-  val newClient = synchronized(this@MqttConnectionManager) {
-      // 关闭旧客户端
-      mqttClient?.close()
-      
-      // 创建并设置新客户端（原子操作）
-      val client = MqttClient(brokerUrl, clientId, MemoryPersistence())
-      mqttClient = client
-      client
-  }
-  ```
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt`（`connect()`）
+- **修复说明**:
+  - 在同一个 `synchronized(this@MqttConnectionManager)` 临界区内完成：generation 校验 + 创建 `MqttClient` + 交换 `mqttClient` 引用，避免并发 `connect()` 覆盖窗口。
+  - 旧 client 的 `disconnect()/close()` 在锁外 best-effort 执行，降低锁竞争并避免阻塞其他调用。
+- **验证**:
+  - `android\\gradlew.bat -p android :app:testDebugUnitTest --stacktrace --no-daemon`
+  - `android\\gradlew.bat -p android assembleDebug --stacktrace --no-daemon`
 
-### H17: MQTT连接失败资源泄漏 [已验证确认]
-- **状态**: 待修复（2026-04-11 Subagents深度验证确认）
+### H17: MQTT连接失败资源泄漏 [已修复]
+- **状态**: ✅ 已修复
+- **修复时间**: 2026-04-14
 - **验证时间**: 2026-04-11
-- **验证方式**: Logic Analyzer Agent 代码审查
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L298-307)
-- **问题验证**:
-  - 在`connect()`方法的`catch`块中，如果`generation != connectionGeneration.get()`，会直接`return@launch`
-  - 此时`localClient`（已经创建的MqttClient）可能没有被关闭
-  - `MqttClient`内部持有网络连接资源（Socket、线程等），如果不调用`close()`，这些资源将一直占用
-- **风险**: 高。在频繁重连场景下可能导致资源耗尽，影响系统稳定性。
-- **代码分析**:
-  ```kotlin
-  // L298-307: 问题代码
-  } catch (e: Exception) {
-      if (generation != connectionGeneration.get()) {
-          return@launch  // 直接返回，localClient可能未被关闭！
-      }
-      logger.error("MQTT connection error", e)
-      _connectionState.value = MqttConnectionState.Error(e.message ?: "Connection failed")
-      if (shouldStayConnected) {
-          scheduleReconnect(deviceId, authToken, generation)
-      }
-  }
-  ```
-- **建议修复**:
-  ```kotlin
-  } catch (e: Exception) {
-      // 无论generation是否匹配，都应该尝试关闭localClient
-      try {
-          localClient.disconnect()
-      } catch (ex: MqttException) {
-          logger.error("Disconnect error during exception handling", ex)
-      } finally {
-          try {
-              localClient.close()
-          } catch (ex: Exception) {
-              logger.error("Close error during exception handling", ex)
-          }
-      }
-      
-      if (generation != connectionGeneration.get()) {
-          return@launch
-      }
-      logger.error("MQTT connection error", e)
-      _connectionState.value = MqttConnectionState.Error(e.message ?: "Connection failed")
-      if (shouldStayConnected) {
-          scheduleReconnect(deviceId, authToken, generation)
-      }
-  }
-  ```
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt`（`connect()` 异常路径）
+- **修复说明**:
+  - `connect()` 的异常路径会先 best-effort `disconnect()/close()` 本次创建的 client，并在需要时清空 `mqttClient` 引用；不再因为 generation 不匹配而跳过清理。
+  - 新增回归单测：`android/app/src/test/java/com/netproxy/gateway/connection/MqttConnectionManagerConnectCleanupTest.kt`
+- **验证**:
+  - `android\\gradlew.bat -p android :app:testDebugUnitTest --stacktrace --no-daemon`
+  - `android\\gradlew.bat -p android assembleDebug --stacktrace --no-daemon`
 
 ### H4: SOCKS5代理DNS重绑定攻击风险
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt` (L107-131)
@@ -265,57 +169,17 @@
   }
   ```
 
-### H3: 同步块内更新 StateFlow 可能导致死锁 [已验证确认]
-- **状态**: 待修复（已验证确认存在）
+### H3: 同步块内更新 StateFlow 可能导致死锁 [已修复]
+- **状态**: ✅ 已修复
+- **修复时间**: 2026-04-14
 - **验证时间**: 2026-04-10
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L254-274)
-- **问题验证**:
-  - `synchronized` 块内直接更新 `_connectionState.value`
-  - StateFlow 的 `value` 设置会触发所有观察者（collect/collectLatest）的回调
-  - 如果观察者在回调中也尝试获取同一把锁（`synchronized(this@MqttConnectionManager)`），会导致死锁
-  - 即使不发生死锁，长时间持有锁也会影响其他线程调用 `connect()`/`disconnect()`
-- **风险**: 中。可能导致 UI 线程阻塞或死锁，影响用户体验。
-- **代码分析**:
-  ```kotlin
-  // L255-274: 问题代码
-  val shouldProceed = synchronized(this@MqttConnectionManager) {
-      // ...
-      if (mqttClient === localClient) {
-          _connectionState.value = MqttConnectionState.Connected  // 在同步块内更新 StateFlow！
-          reconnectDelay = 5000L
-          true
-      } else {
-          false
-      }
-  }
-  ```
-- **建议修复**:
-  ```kotlin
-  val (shouldProceed, currentClient) = synchronized(this@MqttConnectionManager) { 
-      if (!shouldStayConnected || generation != connectionGeneration.get()) {
-          if (mqttClient === localClient) {
-              mqttClient = null
-          }
-          Pair(false, localClient)
-      } else {
-          if (mqttClient === localClient) {
-              // 只在同步块内做引用检查，不更新 StateFlow
-              Pair(true, localClient)
-          } else {
-              Pair(false, localClient)
-          }
-      }
-  }
-  
-  if (shouldProceed) {
-      _connectionState.value = MqttConnectionState.Connected  // 在同步块外更新
-      reconnectDelay = 5000L
-      subscribe("device/$deviceId/control")
-      startHeartbeat(deviceId, authToken, generation)
-  } else {
-      // 清理操作...
-  }
-  ```
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt`（`connect()`）
+- **修复说明**:
+  - `synchronized` 块内只做引用一致性/代际校验与字段更新；所有 `_connectionState.value = ...` 都在锁外执行。
+  - 为避免 `disconnect()` 后状态回跳，在写入 Connecting/Connected/Error 前增加 `shouldStayConnected + generation` 二次校验。
+- **验证**:
+  - `android\\gradlew.bat -p android :app:testDebugUnitTest --stacktrace --no-daemon`
+  - `android\\gradlew.bat -p android assembleDebug --stacktrace --no-daemon`
 
 ### H9: VPN服务 serviceScope 生命周期管理缺陷 [已修复]
 - **状态**: ✅ **已修复**（2026-04-11 提交 4f58619）
@@ -384,6 +248,225 @@
   1. 生产环境强制要求配置证书固定
   2. 空配置时抛出异常而非仅警告
   3. 添加构建时检查确保配置正确
+
+### S1: SOCKS5代理relay函数goroutine泄漏 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents验证确认）
+- **验证方式**: Logic Analyzer Agent 代码审查
+- **位置**: `server/socks5-proxy/main.go` (L1148-1164)
+- **问题验证**:
+  - `relay`函数启动两个goroutine处理双向数据转发
+  - 函数等待`errChan`接收第一个错误后立即返回
+  - 另一个方向的`io.Copy`可能仍在运行（阻塞在读写操作上），导致goroutine泄漏
+- **风险**: 中-高。长期运行会导致goroutine泄漏和内存增长
+- **代码分析**:
+  ```go
+  func (s *SOCKS5Server) relay(clientConn, targetConn net.Conn) error {
+      errChan := make(chan error, 2)
+      go func() { _, err := io.Copy(targetConn, clientConn); errChan <- err }()
+      go func() { _, err := io.Copy(clientConn, targetConn); errChan <- err }()
+      err := <-errChan  // 只等待第一个错误就返回
+      return err       // 另一个goroutine可能仍在运行！
+  }
+  ```
+- **建议修复**:
+  1. 使用`sync.WaitGroup`等待两个goroutine完成
+  2. 在返回前关闭连接以终止另一个方向的io.Copy
+  3. 添加超时保护避免永久阻塞
+
+### S2: ConnectThroughTunnel资源清理不完整 [已修复]
+- **状态**: ✅ 已修复（2026-04-15）
+- **修复验证**: Kimi-K2.5 on Claude code，2026-04-15
+- **位置**: `server/socks5-proxy/main.go` (L715-749)
+- **原问题**:
+  - 超时或连接失败时，只从`tc.streams`中删除`streamConn`
+  - 没有调用`streamConn.Close()`关闭channel资源
+  - `DataChan`、`CloseChan`、`Connected`等channel可能无法被GC
+- **风险**: 中低。高并发场景下（大量连接超时或失败）会导致内存泄漏
+- **修复内容**: 在4处错误处理路径中添加`streamConn.Close()`调用
+  - JSON序列化失败 (L716-721)
+  - 发送连接请求失败 (L727-732)
+  - 连接超时 (L737-742)
+  - 连接被拒绝 (L744-749)
+- **修复代码**:
+  ```go
+  case <-time.After(30 * time.Second):
+      tc.mu.Lock()
+      delete(tc.streams, streamID)
+      tc.mu.Unlock()
+      streamConn.Close()  // 新增：确保资源释放
+      return nil, fmt.Errorf("connection timeout")
+  ```
+- **验证**: 通过Go单元测试 `go test -v .`
+
+### S3: handleConnectResponse内存泄漏 [已修复]
+- **状态**: ✅ 已修复（2026-04-15）
+- **修复验证**: Kimi-K2.5 on Claude code，2026-04-15
+- **位置**: `server/socks5-proxy/main.go` (L612-626)
+- **原问题**:
+  - 当连接失败时（`resp.Success == false`），只调用`stream.Close()`
+  - 没有从`tc.streams`映射中删除该stream
+  - 导致已关闭的连接残留在映射中，造成内存泄漏
+- **风险**: 中。连接失败时会造成内存泄漏，长期运行可能导致内存增长
+- **修复代码**:
+  ```go
+  if !resp.Success {
+      log.Printf("Connection failed for stream %s: %s", resp.StreamID, resp.Error)
+      select {
+      case stream.Connected <- false:
+      default:
+      }
+      stream.Close()
+      // 从streams映射中删除，避免内存泄漏
+      tc.mu.Lock()
+      delete(tc.streams, resp.StreamID)
+      tc.mu.Unlock()
+      return
+  }
+  ```
+- **验证**: 通过Go单元测试 `go test -v .`
+
+### H20: API服务JWT令牌验证不完善 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: `server/api/main.go` (L469-484)
+- **问题描述**: JWT解析后未明确验证 `exp`（过期时间）、`iat`（签发时间）、`nbf`（生效时间）等声明。虽然 `jwt.Parse` 默认会验证 `exp`，但代码没有明确检查验证失败的具体原因，可能混淆不同类型的认证错误
+- **风险**: 高。无法区分令牌过期、无效签名、格式错误等不同错误类型，不利于调试和安全审计
+- **代码**:
+  ```go
+  // L469-484: 问题代码
+  token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+      if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+          return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+      }
+      return s.jwtSecret, nil
+  })
+
+  if err != nil || !token.Valid {
+      c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+      return
+  }
+  ```
+- **建议修复**:
+  ```go
+  if claims, ok := token.Claims.(jwt.MapClaims); ok {
+      // 验证过期时间
+      if exp, ok := claims["exp"].(float64); ok {
+          if time.Now().Unix() > int64(exp) {
+              c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token expired"})
+              return
+          }
+      }
+      // 验证生效时间
+      if nbf, ok := claims["nbf"].(float64); ok {
+          if time.Now().Unix() < int64(nbf) {
+              c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token not yet valid"})
+              return
+          }
+      }
+  }
+  ```
+
+### H21: API服务登录限流器内存泄漏 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: `server/api/main.go` (L71-72)
+- **问题描述**: `loginAttempts` 映射表没有定期清理机制。如果攻击者使用大量不同IP进行尝试，可能导致内存无限增长
+- **风险**: 高。潜在的DoS攻击向量，可能导致服务OOM
+- **代码**:
+  ```go
+  // L71-72
+  loginAttempts   map[string]*LoginAttempt // ip -> attempts
+  loginAttemptsMu sync.RWMutex
+  ```
+- **建议修复**: 添加定期清理协程，类似于 `cleanupExpiredSessions()`:
+  ```go
+  func (s *Server) cleanupExpiredLoginAttempts() {
+      s.loginAttemptsMu.Lock()
+      defer s.loginAttemptsMu.Unlock()
+      
+      now := time.Now()
+      for ip, attempt := range s.loginAttempts {
+          if now.Sub(attempt.LastAttempt) > 24*time.Hour {
+              delete(s.loginAttempts, ip)
+          }
+      }
+  }
+  ```
+
+### H22: SOCKS5代理WebSocket读取无超时 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: `server/socks5-proxy/main.go` (L552-558)
+- **问题描述**: WebSocket `ReadMessage()` 没有设置超时，如果客户端发送部分数据后停止，连接可能永远挂起
+- **风险**: 高。连接泄漏，可能导致goroutine和资源耗尽
+- **代码**:
+  ```go
+  // L552-558
+  for {
+      messageType, data, err := conn.ReadMessage()
+      if err != nil {
+          if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+              log.Printf("WebSocket error for device %s: %v", deviceID, err)
+          }
+          return
+      }
+  ```
+- **建议修复**: 使用 `SetReadDeadline` 定期设置读取超时:
+  ```go
+  conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+  conn.SetPongHandler(func(string) error {
+      conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+      return nil
+  })
+  ```
+
+### H23: SOCKS5代理StreamConn双重锁嵌套 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: `server/socks5-proxy/main.go` (`StreamConn.Write` 方法)
+- **问题描述**: `StreamConn.Write` 方法在持有锁的情况下调用其他可能获取锁的方法，存在死锁风险
+- **风险**: 高。可能导致服务死锁，无法处理新连接
+- **建议修复**: 重构锁策略，使用更细粒度的锁或避免在锁内调用外部方法
+
+### H24: Tunnel服务CheckOrigin允许所有来源 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: `server/tunnel/main.go` (L222-225)
+- **问题描述**: `CheckOrigin` 返回 `true` 允许所有来源，可能导致CSRF攻击
+- **风险**: 高。WebSocket连接可能被恶意网站利用
+- **代码**:
+  ```go
+  // L222-225
+  upgrader: websocket.Upgrader{
+      CheckOrigin: func(r *http.Request) bool {
+          // 在生产环境中应该检查来源
+          return true
+      },
+  ```
+- **建议修复**:
+  ```go
+  CheckOrigin: func(r *http.Request) bool {
+      origin := r.Header.Get("Origin")
+      allowedOrigins := []string{"https://trusted-domain.com", "https://app.example.com"}
+      for _, allowed := range allowedOrigins {
+          if origin == allowed {
+              return true
+          }
+      }
+      return false
+  },
+  ```
+
+### H25: Tunnel服务心跳检测竞态条件 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: `server/tunnel/main.go` (L336-359)
+- **问题描述**: `tunnel.Conn` 可能在 `WriteControl` 调用期间被其他goroutine设置为 `nil` 或关闭，导致panic
+- **风险**: 中-高。可能导致服务panic崩溃
+- **代码**:
+  ```go
+  // L336-359
+  if err := tunnel.Conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(10*time.Second)); err != nil {
+      log.Printf("Failed to send ping: %v", err)
+      tunnel.Close()
+      return
+  }
+  ```
+- **建议修复**: 在调用前检查并加锁保护
 
 ---
 
@@ -944,3 +1027,67 @@
   - ✅ 单元测试全部通过
 - **建议修复**:
   统一资源清理逻辑，提取 `performCleanup()` 方法，确保 `stopVpn()` 和 `onDestroy()` 使用相同的清理顺序
+
+---
+
+## Medium Severity
+
+### M16: API服务敏感信息可能泄露 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: `server/api/main.go` (L310-342)
+- **问题描述**: 数据库错误可能包含敏感信息（如连接字符串、表结构等），直接返回给调用者
+- **风险**: 中。可能泄露数据库内部信息，帮助攻击者进行针对性攻击
+- **建议修复**: 记录详细错误日志，但向客户端返回通用错误消息
+
+### M17: API服务配对码生成无限循环风险 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: `server/api/main.go` (L558-564)
+- **问题描述**: 在极端情况下（数据库中已有大量配对码），`generateCode` 循环可能成为无限循环或长时间阻塞
+- **风险**: 中。可能导致服务无响应
+- **建议修复**: 添加最大重试次数限制
+
+### M18: SOCKS5代理IP过滤器CIDR检查可绕过 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: `server/socks5-proxy/main.go` (L273-297)
+- **问题描述**: IPv6映射的IPv4地址（如 `::ffff:192.168.1.1`）可能无法正确匹配CIDR规则
+- **风险**: 中。可能绕过IP访问控制
+- **建议修复**: 统一将IPv6映射地址转换为IPv4后再匹配
+
+### M19: Tunnel服务消息处理无速率限制 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: `server/tunnel/main.go` (L390-413)
+- **问题描述**: 没有限制单个连接的消息速率，恶意客户端可能发送大量消息导致DoS
+- **风险**: 中。可能导致服务资源耗尽
+- **建议修复**: 添加基于令牌桶或滑动窗口的速率限制
+
+### M20: Tunnel服务统计信息端点无认证 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: `server/tunnel/main.go` (L502-512)
+- **问题描述**: `/stats` 端点是公开的，可能泄露敏感信息（在线设备数量）
+- **风险**: 中。信息泄露
+- **建议修复**: 添加认证检查或限制为本地访问
+
+---
+
+## Low Severity
+
+### L8: SOCKS5代理随机数分布不均 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: `server/socks5-proxy/main.go` (`generateRandomString` 函数)
+- **问题描述**: 使用模运算 `rand.Intn(len(chars))` 在某些情况下可能导致分布不均
+- **风险**: 低。配对码的可预测性略微增加
+- **建议修复**: 使用 `crypto/rand` 替代 `math/rand`，或使用更安全的随机数生成方式
+
+### L9: SOCKS5代理StreamConn DataChan可能阻塞 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: `server/socks5-proxy/main.go` (L320, L654-657)
+- **问题描述**: 如果 `DataChan` 已满且 `CloseChan` 未关闭，数据发送会阻塞或丢弃
+- **风险**: 低。可能导致数据丢失或延迟
+- **建议修复**: 添加默认分支处理丢弃情况，或增加缓冲区大小并监控
+
+### L10: Tunnel服务设备状态通知无重试 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: `server/tunnel/main.go` (L146-181)
+- **问题描述**: `notifyDeviceStatus` 通知失败只是记录日志，没有重试机制。如果API服务暂时不可用，设备状态可能不一致
+- **风险**: 低。状态不一致，但可接受
+- **建议修复**: 添加指数退避重试机制

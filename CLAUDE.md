@@ -75,13 +75,14 @@
 - 构建：`android\\gradlew.bat -p android assembleDebug --stacktrace --no-daemon`
 - 单元测试：`android\\gradlew.bat -p android :app:testDebugUnitTest --stacktrace --no-daemon`
 - 对于有针对性的更改，先运行最窄相关的测试，然后根据需要运行更广泛的测试套件。
+- 任何更改都要让subagents交叉审查，确保代码质量。
 
 ## 8) AI 变更输出格式
 
 - 从说明变更内容和原因开始。
 - 包含受影响的文件路径。
 - 包含实际运行的验证命令及结果。
-- 明确说明未解决的阻塞问题。
+- 明确说明未解决的阻塞问题和发现的新问题（新发现的问题应该记录到对应的文档）。
 
 ## 9) 文档极简主义规则
 
@@ -111,12 +112,3 @@
 - 每个通过验证的合并提交必须注明Agent使用的模型名称、工具名称和日期（示例：Kimi-K2.5 on Claude code，2026-04-11）
 - 在开始工作前，必须验证：`android\gradlew.bat -p android :app:testDebugUnitTest` 通过
 - 如果 main 分支测试失败，通过在第 5 节（技术风险）中提交明确的阻塞问题来解除阻塞
-- 2026-04-11: H9已修复验证 - serviceScope从val改为var并在onCreate中创建 (Kimi-K2.5)
-- 2026-04-11: H14已修复验证 - cleanupVpnResources()正确归还连接池连接 (Kimi-K2.5)
-- 2026-04-11: H15已修复验证 - onDestroy()使用安全调用避免重复操作 (Kimi-K2.5)
-- 2026-04-14: H1已修复验证 - startHeartbeat() 检测 AppResult 连续失败触发重连，并新增回归单测 (GPT-5.2)
-- 2026-04-14: H6/H16/H17/H3已修复验证 - connect 原子交换/失败清理/锁外状态发射，并通过门禁构建与单测 (GPT-5.2)
-- 2026-04-15: S2已修复验证 - ConnectThroughTunnel错误处理路径添加streamConn.Close()资源清理，并通过Go单测 (Kimi-K2.5)
-- 2026-04-15: S1已验证确认 - relay函数goroutine泄漏问题经Subagents验证存在，已记录至ISSUES.md待修复 (Kimi-K2.5)
-- 2026-04-15: S3已修复验证 - handleConnectResponse连接失败时添加delete(tc.streams)避免内存泄漏，并新增4个单元测试 (Kimi-K2.5)
-
