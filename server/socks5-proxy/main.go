@@ -24,6 +24,7 @@ import (
 type Config struct {
 	Addr           string
 	APIEndpoint    string
+	InternalAPIKey string
 	TunnelEndpoint string
 	TLSCert        string
 	TLSKey         string
@@ -39,10 +40,11 @@ type SessionStore interface {
 
 // APISessionStore 通过API验证会话
 type APISessionStore struct {
-	apiEndpoint string
-	tokenCache  map[string]*TokenInfo
-	cacheMu     sync.RWMutex
-	httpClient  *http.Client
+	apiEndpoint    string
+	internalAPIKey string
+	tokenCache     map[string]*TokenInfo
+	cacheMu        sync.RWMutex
+	httpClient     *http.Client
 }
 
 // TokenInfo 令牌信息
@@ -53,10 +55,11 @@ type TokenInfo struct {
 }
 
 // NewAPISessionStore 创建API会话存储
-func NewAPISessionStore(apiEndpoint string) *APISessionStore {
+func NewAPISessionStore(apiEndpoint string, internalAPIKey string) *APISessionStore {
 	s := &APISessionStore{
-		apiEndpoint: apiEndpoint,
-		tokenCache:  make(map[string]*TokenInfo),
+		apiEndpoint:    apiEndpoint,
+		internalAPIKey: internalAPIKey,
+		tokenCache:     make(map[string]*TokenInfo),
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 			Transport: &http.Transport{
@@ -106,8 +109,10 @@ func (s *APISessionStore) ValidateToken(deviceID, token string) (bool, error) {
 		// API失败时使用缓存（如果有）
 		s.cacheMu.RLock()
 		if info, ok := s.tokenCache[cacheKey]; ok {
-			s.cacheMu.RUnlock()
-			return info.Valid, nil
+			if time.Now().Before(info.ExpiresAt) {
+				s.cacheMu.RUnlock()
+				return info.Valid, nil
+			}
 		}
 		s.cacheMu.RUnlock()
 		return false, err
@@ -138,6 +143,9 @@ func (s *APISessionStore) validateWithAPI(deviceID, token string) (bool, error) 
 		return false, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if s.internalAPIKey != "" {
+		req.Header.Set("X-Internal-API-Key", s.internalAPIKey)
+	}
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
@@ -290,26 +298,28 @@ func (f *IPFilter) IsAllowed(ip string) bool {
 
 // StreamConn 隧道流连接
 type StreamConn struct {
-	StreamID    string
-	DeviceID    string
-	TunnelConn  *websocket.Conn
-	DataChan    chan []byte
-	CloseChan   chan struct{}
-	Connected   chan bool
-	Closed      int32
-	WriteBuffer []byte
-	mu          sync.Mutex
+	StreamID      string
+	DeviceID      string
+	TunnelConn    *websocket.Conn
+	tunnelWriteMu *sync.Mutex
+	DataChan      chan []byte
+	CloseChan     chan struct{}
+	Connected     chan bool
+	Closed        int32
+	WriteBuffer   []byte
+	mu            sync.Mutex
 }
 
 // NewStreamConn 创建新的流连接
-func NewStreamConn(streamID, deviceID string, tunnelConn *websocket.Conn) *StreamConn {
+func NewStreamConn(streamID, deviceID string, tunnelConn *websocket.Conn, tunnelWriteMu *sync.Mutex) *StreamConn {
 	return &StreamConn{
-		StreamID:   streamID,
-		DeviceID:   deviceID,
-		TunnelConn: tunnelConn,
-		DataChan:   make(chan []byte, 100),
-		CloseChan:  make(chan struct{}),
-		Connected:  make(chan bool, 1),
+		StreamID:      streamID,
+		DeviceID:      deviceID,
+		TunnelConn:    tunnelConn,
+		tunnelWriteMu: tunnelWriteMu,
+		DataChan:      make(chan []byte, 100),
+		CloseChan:     make(chan struct{}),
+		Connected:     make(chan bool, 1),
 	}
 }
 
@@ -358,6 +368,11 @@ func (s *StreamConn) Write(p []byte) (n int, err error) {
 		return 0, fmt.Errorf("tunnel connection not available")
 	}
 
+	if s.tunnelWriteMu != nil {
+		s.tunnelWriteMu.Lock()
+		defer s.tunnelWriteMu.Unlock()
+	}
+
 	err = s.TunnelConn.WriteMessage(websocket.BinaryMessage, data)
 	if err != nil {
 		return 0, err
@@ -389,6 +404,10 @@ func (s *StreamConn) Close() error {
 		data, _ := json.Marshal(msg)
 		s.mu.Lock()
 		if s.TunnelConn != nil {
+			if s.tunnelWriteMu != nil {
+				s.tunnelWriteMu.Lock()
+				defer s.tunnelWriteMu.Unlock()
+			}
 			s.TunnelConn.WriteMessage(websocket.BinaryMessage, data)
 		}
 		s.mu.Unlock()
@@ -435,6 +454,7 @@ type TunnelClient struct {
 	connections    map[string]*websocket.Conn // deviceID -> websocket.Conn
 	streams        map[string]*StreamConn     // streamID -> StreamConn
 	mu             sync.RWMutex
+	writeMu        sync.Mutex
 }
 
 // NewTunnelClient 创建新的隧道客户端
@@ -480,7 +500,7 @@ func (tc *TunnelClient) GetOrConnectTunnel(deviceID, token string) (*websocket.C
 	}
 
 	// 建立新的 WebSocket 连接
-	wsURL := fmt.Sprintf("%s/tunnel?device_id=%s&token=%s", tc.tunnelEndpoint, deviceID, token)
+	wsURL := fmt.Sprintf("%s/tunnel?device_id=%s", tc.tunnelEndpoint, deviceID)
 	// 将 http/https 转换为 ws/wss
 	if strings.HasPrefix(wsURL, "https://") {
 		wsURL = "wss://" + wsURL[8:]
@@ -488,7 +508,10 @@ func (tc *TunnelClient) GetOrConnectTunnel(deviceID, token string) (*websocket.C
 		wsURL = "ws://" + wsURL[7:]
 	}
 
-	conn, _, err := tc.wsDialer.Dial(wsURL, nil)
+	headers := http.Header{}
+	headers.Set("X-Session-Token", token)
+
+	conn, _, err := tc.wsDialer.Dial(wsURL, headers)
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial tunnel: %w", err)
 	}
@@ -506,6 +529,8 @@ func (tc *TunnelClient) GetOrConnectTunnel(deviceID, token string) (*websocket.C
 // isConnAlive 检查连接是否存活
 func (tc *TunnelClient) isConnAlive(conn *websocket.Conn) bool {
 	// 尝试发送 ping
+	tc.writeMu.Lock()
+	defer tc.writeMu.Unlock()
 	if err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5*time.Second)); err != nil {
 		return false
 	}
@@ -591,6 +616,10 @@ func (tc *TunnelClient) handleConnectResponse(data json.RawMessage) {
 		default:
 		}
 		stream.Close()
+		// 从streams映射中删除，避免内存泄漏
+		tc.mu.Lock()
+		delete(tc.streams, resp.StreamID)
+		tc.mu.Unlock()
 		return
 	}
 
@@ -660,7 +689,7 @@ func (tc *TunnelClient) ConnectThroughTunnel(deviceID, token, dstAddr string, ds
 	streamID := fmt.Sprintf("%s-%d", deviceID, time.Now().UnixNano())
 
 	// 创建流连接
-	streamConn := NewStreamConn(streamID, deviceID, tunnelConn)
+	streamConn := NewStreamConn(streamID, deviceID, tunnelConn, &tc.writeMu)
 
 	tc.mu.Lock()
 	tc.streams[streamID] = streamConn
@@ -692,13 +721,18 @@ func (tc *TunnelClient) ConnectThroughTunnel(deviceID, token, dstAddr string, ds
 		tc.mu.Lock()
 		delete(tc.streams, streamID)
 		tc.mu.Unlock()
+		streamConn.Close()
 		return nil, fmt.Errorf("failed to marshal connect request: %w", err)
 	}
 
-	if err := tunnelConn.WriteMessage(websocket.BinaryMessage, reqData); err != nil {
+	tc.writeMu.Lock()
+	err = tunnelConn.WriteMessage(websocket.BinaryMessage, reqData)
+	tc.writeMu.Unlock()
+	if err != nil {
 		tc.mu.Lock()
 		delete(tc.streams, streamID)
 		tc.mu.Unlock()
+		streamConn.Close()
 		return nil, fmt.Errorf("failed to send connect request: %w", err)
 	}
 
@@ -708,12 +742,14 @@ func (tc *TunnelClient) ConnectThroughTunnel(deviceID, token, dstAddr string, ds
 		tc.mu.Lock()
 		delete(tc.streams, streamID)
 		tc.mu.Unlock()
+		streamConn.Close()
 		return nil, fmt.Errorf("connection timeout")
 	case success := <-streamConn.Connected:
 		if !success {
 			tc.mu.Lock()
 			delete(tc.streams, streamID)
 			tc.mu.Unlock()
+			streamConn.Close()
 			return nil, fmt.Errorf("connection failed")
 		}
 		return streamConn, nil
@@ -735,41 +771,41 @@ type AuthSession struct {
 
 // TunnelDialer 隧道拨号器接口
 // 用于通过隧道建立网络连接，支持测试注入
-// 
+//
 // 线程安全要求：
 // - 所有方法必须是并发安全的，可以在多个 goroutine 中同时调用
 // - 实现应该使用适当的同步机制（如 mutex）保护共享状态
-// 
+//
 // 错误处理：
 // - ConnectThroughTunnel 失败时应返回描述性错误，使用 fmt.Errorf 包装底层错误
 // - RemoveStream 对于不存在的 streamID 应该静默成功（不返回错误）
 type TunnelDialer interface {
 	// ConnectThroughTunnel 通过隧道连接到目标地址
-	// 
+	//
 	// 参数：
 	//   - deviceID: 设备唯一标识符，用于认证和路由
 	//   - token: 认证令牌，与 deviceID 配对使用
 	//   - dstAddr: 目标主机地址（域名或 IP）
 	//   - dstPort: 目标端口号
-	// 
+	//
 	// 返回：
 	//   - net.Conn: 成功时返回与目标的连接
 	//   - error: 失败时返回错误，可能的错误类型包括：
 	//     * 隧道连接失败：fmt.Errorf("failed to get tunnel: %w", err)
 	//     * 认证失败：当 deviceID/token 无效时
 	//     * 网络错误：目标不可达或连接超时
-	// 
+	//
 	// 行为约定：
 	//   - 每次调用都会创建一个新的连接
 	//   - 返回的 net.Conn 必须是并发安全的
 	//   - 调用者负责在使用完毕后关闭连接
 	ConnectThroughTunnel(deviceID, token, dstAddr string, dstPort int) (net.Conn, error)
-	
+
 	// RemoveStream 移除指定的流连接
-	// 
+	//
 	// 参数：
 	//   - streamID: 要移除的流 ID
-	// 
+	//
 	// 行为约定：
 	//   - 如果 streamID 不存在，应该静默成功（不返回错误）
 	//   - 移除后应该释放相关资源（关闭底层连接等）
@@ -779,20 +815,20 @@ type TunnelDialer interface {
 
 // SOCKS5Server SOCKS5 服务器
 type SOCKS5Server struct {
-	config        *Config
-	sessionStore  SessionStore
-	rateLimiter   *RateLimiter
-	ipFilter      *IPFilter
-	tunnelClient  TunnelDialer
-	listener      net.Listener
-	connCount     int32 // 当前活跃连接数（原子操作）
+	config       *Config
+	sessionStore SessionStore
+	rateLimiter  *RateLimiter
+	ipFilter     *IPFilter
+	tunnelClient TunnelDialer
+	listener     net.Listener
+	connCount    int32 // 当前活跃连接数（原子操作）
 }
 
 // NewSOCKS5Server 创建 SOCKS5 服务器
 func NewSOCKS5Server(config *Config) *SOCKS5Server {
 	return &SOCKS5Server{
 		config:       config,
-		sessionStore: NewAPISessionStore(config.APIEndpoint),
+		sessionStore: NewAPISessionStore(config.APIEndpoint, config.InternalAPIKey),
 		rateLimiter:  NewRateLimiter(),
 		ipFilter:     NewIPFilter(),
 		tunnelClient: NewTunnelClient(config.TunnelEndpoint),
@@ -809,7 +845,7 @@ func NewSOCKS5ServerWithDialer(config *Config, dialer TunnelDialer) (*SOCKS5Serv
 	}
 	return &SOCKS5Server{
 		config:       config,
-		sessionStore: NewAPISessionStore(config.APIEndpoint),
+		sessionStore: NewAPISessionStore(config.APIEndpoint, config.InternalAPIKey),
 		rateLimiter:  NewRateLimiter(),
 		ipFilter:     NewIPFilter(),
 		tunnelClient: dialer,
@@ -865,6 +901,11 @@ func (s *SOCKS5Server) handleConnection(conn net.Conn) {
 	}
 
 	defer conn.Close()
+
+	if err := conn.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		log.Printf("Failed to set handshake deadline: %v", err)
+		return
+	}
 
 	clientAddr := conn.RemoteAddr().String()
 	clientIP, _, _ := net.SplitHostPort(clientAddr)
@@ -1085,6 +1126,10 @@ func (s *SOCKS5Server) sendReply(conn net.Conn, rep byte) {
 func (s *SOCKS5Server) handleConnect(conn net.Conn, session AuthSession, dstAddr string, dstPort int) error {
 	log.Printf("CONNECT request from %s to %s:%d", session.DeviceID, dstAddr, dstPort)
 
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		log.Printf("Failed to clear connection deadline: %v", err)
+	}
+
 	// 通过隧道连接到目标
 	targetConn, err := s.tunnelClient.ConnectThroughTunnel(session.DeviceID, session.Token, dstAddr, dstPort)
 	if err != nil {
@@ -1150,6 +1195,10 @@ func main() {
 	if envAPI := os.Getenv("API_ENDPOINT"); envAPI != "" {
 		*apiEndpoint = envAPI
 	}
+	internalAPIKey := os.Getenv("INTERNAL_API_KEY")
+	if internalAPIKey == "" {
+		log.Fatalf("FATAL: INTERNAL_API_KEY environment variable is not set. Please configure an internal API key before starting the server.")
+	}
 	if envTunnel := os.Getenv("TUNNEL_ENDPOINT"); envTunnel != "" {
 		*tunnelEndpoint = envTunnel
 	}
@@ -1158,7 +1207,7 @@ func main() {
 	envEnableTLS := os.Getenv("ENABLE_TLS")
 	envTLSCert := os.Getenv("TLS_CERT")
 	envTLSKey := os.Getenv("TLS_KEY")
-	
+
 	// 确定是否启用TLS：环境变量设置则使用环境变量，否则根据命令行参数判断
 	enableTLS := false
 	if envEnableTLS != "" {
@@ -1166,11 +1215,11 @@ func main() {
 	} else {
 		enableTLS = *tlsCert != "" && *tlsKey != ""
 	}
-	
+
 	// 证书路径：环境变量优先
 	finalTLSCert := firstNonEmpty(envTLSCert, *tlsCert)
 	finalTLSKey := firstNonEmpty(envTLSKey, *tlsKey)
-	
+
 	// 验证TLS配置
 	if enableTLS {
 		if finalTLSCert == "" || finalTLSKey == "" {
@@ -1187,6 +1236,7 @@ func main() {
 	config := &Config{
 		Addr:           *addr,
 		APIEndpoint:    *apiEndpoint,
+		InternalAPIKey: internalAPIKey,
 		TunnelEndpoint: *tunnelEndpoint,
 		EnableTLS:      enableTLS,
 		TLSCert:        finalTLSCert,
