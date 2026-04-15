@@ -27,6 +27,16 @@ const (
 	DefaultDBPath     = "./api.db"
 )
 
+// 错误消息常量
+const (
+	ErrInvalidRequestFormat = "invalid request format"
+	ErrDatabaseError        = "database error"
+	ErrSessionNotFound      = "session not found"
+	ErrPairingSessionNotFound = "pairing session not found"
+	ErrFailedToGenerateCode = "failed to generate pairing code"
+	ErrFailedToUpdateStatus = "failed to update device status"
+)
+
 // PairingSession 配对会话
 type PairingSession struct {
 	Code       string    `json:"code"`
@@ -75,6 +85,12 @@ type Server struct {
 	internalAPIKey []byte
 }
 
+// handleBindError 统一处理请求绑定错误
+func handleBindError(c *gin.Context, component string, err error) {
+	log.Printf("[%s] Invalid request format: %v", component, err)
+	c.JSON(http.StatusBadRequest, gin.H{"error": ErrInvalidRequestFormat})
+}
+
 // NewServer 创建新服务器
 func NewServer() (*Server, error) {
 	jwtSecret := os.Getenv("JWT_SECRET")
@@ -91,12 +107,32 @@ func NewServer() (*Server, error) {
 
 	internalAPIKey := os.Getenv("INTERNAL_API_KEY")
 	if internalAPIKey == "" {
-		// 开发环境：自动生成随机密钥
-		if gin.Mode() == gin.DebugMode {
-			log.Println("WARN: INTERNAL_API_KEY not set, generating random key for development only")
-			internalAPIKey = generateRandomString(32)
+		// 严格检查：仅在明确设置 APP_ENV=development 且不是生产环境时允许自动生成密钥
+		appEnv := os.Getenv("APP_ENV")
+		if appEnv == "development" {
+			// 额外的安全检查：确保关键生产环境变量未设置，防止误用开发模式
+			if os.Getenv("ENABLE_TLS") == "true" {
+				log.Fatalf("FATAL: Cannot use APP_ENV=development when ENABLE_TLS is true. Development mode is not allowed in production configurations.")
+			}
+
+			log.Println("============================================================")
+			log.Println("  WARNING: DEVELOPMENT MODE - AUTO-GENERATED INTERNAL API KEY")
+			log.Println("  This key is ephemeral and will change on every restart.")
+			log.Println("  Internal service calls (e.g. SOCKS5 proxy) will NOT work")
+			log.Println("  unless you set INTERNAL_API_KEY explicitly.")
+			log.Println("  NEVER use APP_ENV=development in production!")
+			log.Println("============================================================")
+			key, err := generateSecureRandomString(32)
+			if err != nil {
+				log.Fatalf("FATAL: failed to generate random INTERNAL_API_KEY: %v", err)
+			}
+			internalAPIKey = key
+			log.Printf("  INTERNAL_API_KEY generated (first 8 chars: %s...)", internalAPIKey[:8])
 		} else {
-			log.Fatalf("FATAL: INTERNAL_API_KEY environment variable is not set. Please configure an internal API key before starting the server.")
+			if appEnv != "" && appEnv != "production" {
+				log.Printf("WARNING: APP_ENV is set to %q but only \"development\" enables dev mode. Treating as production.", appEnv)
+			}
+			log.Fatalf("FATAL: INTERNAL_API_KEY environment variable is not set. Set APP_ENV=development for local development only, or configure INTERNAL_API_KEY for production.")
 		}
 	}
 
@@ -202,7 +238,7 @@ func generateCode() (string, error) {
 	}
 }
 
-// generateRandomString 生成随机字符串
+// generateRandomString 生成随机字符串（用于非安全敏感场景）
 func generateRandomString(length int) string {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	b := make([]byte, length)
@@ -211,6 +247,29 @@ func generateRandomString(length int) string {
 		b[i] = charset[int(b[i])%len(charset)]
 	}
 	return string(b)
+}
+
+// generateSecureRandomString 生成加密安全的随机字符串（用于API密钥等安全敏感场景）
+// 使用拒绝采样避免模运算偏斜，确保均匀分布
+func generateSecureRandomString(length int) (string, error) {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	const charsetLen = 62
+	const threshold = 256 - (256 % charsetLen)
+
+	result := make([]byte, length)
+	for i := 0; i < length; i++ {
+		for {
+			b := make([]byte, 1)
+			if _, err := rand.Read(b); err != nil {
+				return "", fmt.Errorf("crypto/rand.Read failed: %w", err)
+			}
+			if int(b[0]) < threshold {
+				result[i] = charset[int(b[0])%charsetLen]
+				break
+			}
+		}
+	}
+	return string(result), nil
 }
 
 // generateSessionToken 生成会话令牌
@@ -543,7 +602,7 @@ func (s *Server) createPairingSession(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		handleBindError(c, "Pairing", err)
 		return
 	}
 
@@ -625,7 +684,7 @@ func (s *Server) updatePairingSession(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		handleBindError(c, "Pairing", err)
 		return
 	}
 
@@ -698,7 +757,7 @@ func (s *Server) validateSession(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		handleBindError(c, "Session", err)
 		return
 	}
 
@@ -740,7 +799,7 @@ func (s *Server) createSessionToken(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		handleBindError(c, "Session", err)
 		return
 	}
 
@@ -815,7 +874,7 @@ func (s *Server) updateDeviceStatus(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		handleBindError(c, "Device", err)
 		return
 	}
 
@@ -850,7 +909,7 @@ func (s *Server) login(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		handleBindError(c, "Admin", err)
 		return
 	}
 
