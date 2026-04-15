@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -39,6 +40,32 @@ func TestNotifyDeviceStatusAddsInternalAPIKeyHeader(t *testing.T) {
 	case <-waitDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for notifyDeviceStatus")
+	}
+
+	if headerValue != "internal-secret" {
+		t.Fatalf("expected internal api key header to be forwarded, got %q", headerValue)
+	}
+}
+
+func TestValidateDeviceTokenAddsInternalAPIKeyHeader(t *testing.T) {
+	var headerValue string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headerValue = r.Header.Get("X-Internal-API-Key")
+		_, _ = io.WriteString(w, `{"valid":true}`)
+	}))
+	defer server.Close()
+
+	tunnelServer := NewServer(&Config{
+		APIEndpoint:       server.URL,
+		InternalAPIKey:    "internal-secret",
+		HeartbeatInterval: time.Second,
+		HeartbeatTimeout:  2 * time.Second,
+	})
+
+	valid := tunnelServer.validateDeviceToken("device-123", "token-abc")
+	if !valid {
+		t.Fatal("expected token validation to succeed")
 	}
 
 	if headerValue != "internal-secret" {

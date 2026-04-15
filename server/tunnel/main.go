@@ -16,24 +16,25 @@ import (
 
 // Config 配置结构
 type Config struct {
-	Addr        string
-	APIEndpoint string
-	InternalAPIKey string
-	TLSCert     string
-	TLSKey      string
-	EnableTLS   bool
+	Addr              string
+	APIEndpoint       string
+	InternalAPIKey    string
+	TLSCert           string
+	TLSKey            string
+	EnableTLS         bool
 	HeartbeatInterval time.Duration
 	HeartbeatTimeout  time.Duration
 }
 
 // TunnelConn 隧道连接
 type TunnelConn struct {
-	DeviceID   string
-	Conn       *websocket.Conn
-	LastPing   time.Time
-	mu         sync.RWMutex
-	sendChan   chan []byte
-	closeChan  chan struct{}
+	DeviceID  string
+	Conn      *websocket.Conn
+	LastPing  time.Time
+	mu        sync.RWMutex
+	sendChan  chan []byte
+	closeChan chan struct{}
+	closeOnce sync.Once
 }
 
 // NewTunnelConn 创建新的隧道连接
@@ -75,8 +76,12 @@ func (t *TunnelConn) Send(data []byte) error {
 
 // Close 关闭连接
 func (t *TunnelConn) Close() {
-	close(t.closeChan)
-	t.Conn.Close()
+	t.closeOnce.Do(func() {
+		close(t.closeChan)
+		if t.Conn != nil {
+			_ = t.Conn.Close()
+		}
+	})
 }
 
 // TunnelManager 隧道管理器
@@ -97,7 +102,7 @@ func NewTunnelManager(config *Config) *TunnelManager {
 // Register 注册隧道
 func (m *TunnelManager) Register(deviceID string, conn *websocket.Conn) *TunnelConn {
 	tunnel := NewTunnelConn(deviceID, conn)
-	
+
 	m.mu.Lock()
 	// 关闭旧连接
 	if old, ok := m.tunnels[deviceID]; ok {
@@ -105,12 +110,12 @@ func (m *TunnelManager) Register(deviceID string, conn *websocket.Conn) *TunnelC
 	}
 	m.tunnels[deviceID] = tunnel
 	m.mu.Unlock()
-	
+
 	log.Printf("Tunnel registered for device: %s", deviceID)
-	
+
 	// 通知API服务设备上线
 	m.notifyDeviceStatus(deviceID, "online", "")
-	
+
 	return tunnel
 }
 
@@ -122,9 +127,9 @@ func (m *TunnelManager) Unregister(deviceID string) {
 		delete(m.tunnels, deviceID)
 	}
 	m.mu.Unlock()
-	
+
 	log.Printf("Tunnel unregistered for device: %s", deviceID)
-	
+
 	// 通知API服务设备离线
 	m.notifyDeviceStatus(deviceID, "offline", "")
 }
@@ -141,14 +146,18 @@ func (m *TunnelManager) Get(deviceID string) (*TunnelConn, bool) {
 func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string) {
 	go func() {
 		client := &http.Client{Timeout: 5 * time.Second}
-		
+
 		payload := map[string]string{
 			"device_id":   deviceID,
 			"status":      status,
 			"tunnel_addr": tunnelAddr,
 		}
-		
-		data, _ := json.Marshal(payload)
+
+		data, err := json.Marshal(payload)
+		if err != nil {
+			log.Printf("Failed to marshal device status payload: %v", err)
+			return
+		}
 		req, err := http.NewRequest(
 			http.MethodPost,
 			m.config.APIEndpoint+"/api/device/status",
@@ -200,9 +209,9 @@ func (m *TunnelManager) cleanupDeadTunnels() {
 
 // Server WebSocket服务器
 type Server struct {
-	manager *TunnelManager
+	manager  *TunnelManager
 	upgrader websocket.Upgrader
-	config  *Config
+	config   *Config
 }
 
 // NewServer 创建服务器
@@ -225,19 +234,19 @@ func NewServer(config *Config) *Server {
 func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 	// 获取设备ID和凭证
 	deviceID := r.URL.Query().Get("device_id")
-	token := r.URL.Query().Get("token")
-	
+	token := r.Header.Get("X-Session-Token")
+
 	if deviceID == "" || token == "" {
 		http.Error(w, "missing device_id or token", http.StatusBadRequest)
 		return
 	}
-	
+
 	// 验证设备凭证（调用API服务）
 	if !s.validateDeviceToken(deviceID, token) {
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
-	
+
 	// 升级WebSocket连接
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -245,21 +254,21 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
-	
+
 	// 注册隧道
 	tunnel := s.manager.Register(deviceID, conn)
 	defer s.manager.Unregister(deviceID)
-	
+
 	// 启动心跳检测
 	stopHeartbeat := make(chan struct{})
 	go s.heartbeat(tunnel, stopHeartbeat)
-	
+
 	// 启动发送协程
 	go s.sendLoop(tunnel)
-	
+
 	// 读取消息循环
 	s.readLoop(tunnel)
-	
+
 	close(stopHeartbeat)
 }
 
@@ -284,11 +293,21 @@ func (s *Server) validateDeviceToken(deviceID, token string) bool {
 	}
 
 	// 发送验证请求到API服务
-	resp, err := client.Post(
+	req, err := http.NewRequest(
+		http.MethodPost,
 		s.config.APIEndpoint+"/api/session/validate",
-		"application/json",
 		bytes.NewReader(data),
 	)
+	if err != nil {
+		log.Printf("Failed to build validation request: %v", err)
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if s.config.InternalAPIKey != "" {
+		req.Header.Set("X-Internal-API-Key", s.config.InternalAPIKey)
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("Failed to call validation API: %v", err)
 		return false
@@ -317,7 +336,7 @@ func (s *Server) validateDeviceToken(deviceID, token string) bool {
 func (s *Server) heartbeat(tunnel *TunnelConn, stop chan struct{}) {
 	ticker := time.NewTicker(s.config.HeartbeatInterval)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-ticker.C:
@@ -326,14 +345,14 @@ func (s *Server) heartbeat(tunnel *TunnelConn, stop chan struct{}) {
 				tunnel.Close()
 				return
 			}
-			
+
 			// 发送ping
 			if err := tunnel.Conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(10*time.Second)); err != nil {
 				log.Printf("Failed to send ping: %v", err)
 				tunnel.Close()
 				return
 			}
-			
+
 		case <-stop:
 			return
 		}
@@ -351,13 +370,13 @@ func (s *Server) sendLoop(tunnel *TunnelConn) {
 				return
 			default:
 			}
-			
+
 			// 再次检查 Conn 是否为 nil
 			if tunnel.Conn == nil {
 				log.Printf("Cannot write message: connection is nil")
 				return
 			}
-			
+
 			if err := tunnel.Conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
 				log.Printf("Failed to write message: %v", err)
 				return
@@ -374,7 +393,7 @@ func (s *Server) readLoop(tunnel *TunnelConn) {
 		tunnel.UpdatePing()
 		return nil
 	})
-	
+
 	for {
 		messageType, data, err := tunnel.Conn.ReadMessage()
 		if err != nil {
@@ -383,9 +402,9 @@ func (s *Server) readLoop(tunnel *TunnelConn) {
 			}
 			return
 		}
-		
+
 		tunnel.UpdatePing()
-		
+
 		if messageType == websocket.BinaryMessage || messageType == websocket.TextMessage {
 			// 处理消息
 			s.handleMessage(tunnel, data)
@@ -400,12 +419,12 @@ func (s *Server) handleMessage(tunnel *TunnelConn, data []byte) {
 		Type string          `json:"type"`
 		Data json.RawMessage `json:"data"`
 	}
-	
+
 	if err := json.Unmarshal(data, &msg); err != nil {
 		log.Printf("Failed to unmarshal message: %v", err)
 		return
 	}
-	
+
 	switch msg.Type {
 	case "connect_response":
 		// 设备响应连接请求
@@ -428,14 +447,14 @@ func (s *Server) handleConnectResponse(tunnel *TunnelConn, data json.RawMessage)
 		Success  bool   `json:"success"`
 		Error    string `json:"error,omitempty"`
 	}
-	
+
 	if err := json.Unmarshal(data, &resp); err != nil {
 		log.Printf("Failed to unmarshal connect response: %v", err)
 		return
 	}
-	
+
 	log.Printf("Connect response for stream %s: success=%v", resp.StreamID, resp.Success)
-	
+
 	// 这里应该将响应转发给SOCKS5服务
 	// 简化版本：直接处理
 }
@@ -446,12 +465,12 @@ func (s *Server) handleData(tunnel *TunnelConn, data json.RawMessage) {
 		StreamID string `json:"stream_id"`
 		Data     []byte `json:"data"`
 	}
-	
+
 	if err := json.Unmarshal(data, &resp); err != nil {
 		log.Printf("Failed to unmarshal data: %v", err)
 		return
 	}
-	
+
 	// 这里应该将数据转发给SOCKS5服务
 	// 简化版本：直接处理
 }
@@ -461,12 +480,12 @@ func (s *Server) handleDisconnect(tunnel *TunnelConn, data json.RawMessage) {
 	var resp struct {
 		StreamID string `json:"stream_id"`
 	}
-	
+
 	if err := json.Unmarshal(data, &resp); err != nil {
 		log.Printf("Failed to unmarshal disconnect: %v", err)
 		return
 	}
-	
+
 	log.Printf("Disconnect for stream %s", resp.StreamID)
 }
 
@@ -484,7 +503,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	s.manager.mu.RLock()
 	count := len(s.manager.tunnels)
 	s.manager.mu.RUnlock()
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"online_devices": count,
@@ -496,18 +515,28 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Run() error {
 	// 启动清理协程
 	go s.manager.cleanupDeadTunnels()
-	
+
 	// 设置路由
-	http.HandleFunc("/tunnel", s.handleTunnel)
-	http.HandleFunc("/health", s.handleHealth)
-	http.HandleFunc("/stats", s.handleStats)
-	
-	log.Printf("Tunnel server starting on %s", s.config.Addr)
-	
-	if s.config.EnableTLS {
-		return http.ListenAndServeTLS(s.config.Addr, s.config.TLSCert, s.config.TLSKey, nil)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/tunnel", s.handleTunnel)
+	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/stats", s.handleStats)
+
+	httpServer := &http.Server{
+		Addr:              s.config.Addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
-	return http.ListenAndServe(s.config.Addr, nil)
+
+	log.Printf("Tunnel server starting on %s", s.config.Addr)
+
+	if s.config.EnableTLS {
+		return httpServer.ListenAndServeTLS(s.config.TLSCert, s.config.TLSKey)
+	}
+	return httpServer.ListenAndServe()
 }
 
 // firstNonEmpty 返回第一个非空字符串（环境变量优先）
@@ -529,7 +558,7 @@ func main() {
 	heartbeatInterval := flag.Duration("heartbeat-interval", 30*time.Second, "Heartbeat interval")
 	heartbeatTimeout := flag.Duration("heartbeat-timeout", 90*time.Second, "Heartbeat timeout")
 	flag.Parse()
-	
+
 	// 从环境变量读取配置
 	if envAddr := os.Getenv("TUNNEL_ADDR"); envAddr != "" {
 		*addr = envAddr
@@ -538,24 +567,34 @@ func main() {
 		*apiEndpoint = envAPI
 	}
 	internalAPIKey := os.Getenv("INTERNAL_API_KEY")
-	
+	if internalAPIKey == "" {
+		log.Fatalf("FATAL: INTERNAL_API_KEY environment variable is not set. Please configure an internal API key before starting the server.")
+	}
+
 	// 读取TLS配置（环境变量优先）
 	envEnableTLS := os.Getenv("ENABLE_TLS")
 	envTLSCert := os.Getenv("TLS_CERT")
 	envTLSKey := os.Getenv("TLS_KEY")
-	
+
 	// 确定是否启用TLS：环境变量设置则使用环境变量，否则根据命令行参数判断
 	enableTLS := false
-	if envEnableTLS != "" {
-		enableTLS = envEnableTLS == "true"
-	} else {
-		enableTLS = *tlsCert != "" && *tlsKey != ""
+	switch envEnableTLS {
+	case "true":
+		enableTLS = true
+	case "false", "":
+		// 显式关闭或环境变量未设置时，根据命令行参数判断
+		if envEnableTLS == "" {
+			enableTLS = *tlsCert != "" && *tlsKey != ""
+		}
+	default:
+		// 非预期值，按false处理
+		log.Printf("Warning: unexpected ENABLE_TLS value '%s', treating as false", envEnableTLS)
 	}
-	
+
 	// 证书路径：环境变量优先
 	finalTLSCert := firstNonEmpty(envTLSCert, *tlsCert)
 	finalTLSKey := firstNonEmpty(envTLSKey, *tlsKey)
-	
+
 	// 验证TLS配置
 	if enableTLS {
 		if finalTLSCert == "" || finalTLSKey == "" {
@@ -568,7 +607,7 @@ func main() {
 			log.Fatalf("TLS key file not found: %s", finalTLSKey)
 		}
 	}
-	
+
 	config := &Config{
 		Addr:              *addr,
 		APIEndpoint:       *apiEndpoint,
@@ -579,11 +618,11 @@ func main() {
 		HeartbeatInterval: *heartbeatInterval,
 		HeartbeatTimeout:  *heartbeatTimeout,
 	}
-	
+
 	server := NewServer(config)
-	
+
 	log.Printf("Tunnel server starting on %s (TLS enabled: %v)", config.Addr, config.EnableTLS)
-	
+
 	if err := server.Run(); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
