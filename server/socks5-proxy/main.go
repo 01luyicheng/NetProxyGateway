@@ -42,24 +42,14 @@ type SessionStore interface {
 type APISessionStore struct {
 	apiEndpoint    string
 	internalAPIKey string
-	tokenCache     map[string]*TokenInfo
-	cacheMu        sync.RWMutex
 	httpClient     *http.Client
-}
-
-// TokenInfo 令牌信息
-type TokenInfo struct {
-	DeviceID  string
-	Valid     bool
-	ExpiresAt time.Time
 }
 
 // NewAPISessionStore 创建API会话存储
 func NewAPISessionStore(apiEndpoint string, internalAPIKey string) *APISessionStore {
-	s := &APISessionStore{
+	return &APISessionStore{
 		apiEndpoint:    apiEndpoint,
 		internalAPIKey: internalAPIKey,
-		tokenCache:     make(map[string]*TokenInfo),
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 			Transport: &http.Transport{
@@ -69,63 +59,16 @@ func NewAPISessionStore(apiEndpoint string, internalAPIKey string) *APISessionSt
 			},
 		},
 	}
-	go s.cleanupLoop()
-	return s
-}
-
-// cleanupLoop 定期清理过期的缓存条目
-func (s *APISessionStore) cleanupLoop() {
-	ticker := time.NewTicker(10 * time.Minute)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		s.cacheMu.Lock()
-		now := time.Now()
-		for key, info := range s.tokenCache {
-			if now.After(info.ExpiresAt) {
-				delete(s.tokenCache, key)
-			}
-		}
-		s.cacheMu.Unlock()
-	}
 }
 
 // ValidateToken 验证设备令牌
 func (s *APISessionStore) ValidateToken(deviceID, token string) (bool, error) {
-	cacheKey := deviceID + ":" + token
-
-	// 检查缓存
-	s.cacheMu.RLock()
-	if info, ok := s.tokenCache[cacheKey]; ok && time.Now().Before(info.ExpiresAt) {
-		s.cacheMu.RUnlock()
-		return info.Valid, nil
-	}
-	s.cacheMu.RUnlock()
-
 	// 调用API验证
 	valid, err := s.validateWithAPI(deviceID, token)
 	if err != nil {
 		log.Printf("API validation error: %v", err)
-		// API失败时使用缓存（如果有）
-		s.cacheMu.RLock()
-		if info, ok := s.tokenCache[cacheKey]; ok {
-			if time.Now().Before(info.ExpiresAt) {
-				s.cacheMu.RUnlock()
-				return info.Valid, nil
-			}
-		}
-		s.cacheMu.RUnlock()
 		return false, err
 	}
-
-	// 更新缓存
-	s.cacheMu.Lock()
-	s.tokenCache[cacheKey] = &TokenInfo{
-		DeviceID:  deviceID,
-		Valid:     valid,
-		ExpiresAt: time.Now().Add(5 * time.Minute),
-	}
-	s.cacheMu.Unlock()
 
 	return valid, nil
 }

@@ -95,28 +95,19 @@ func TestAPISessionStoreValidateTokenAddsInternalAPIKeyHeader(t *testing.T) {
 	}
 }
 
-func TestAPISessionStoreValidateTokenDoesNotUseExpiredCacheOnAPIFailure(t *testing.T) {
+func TestAPISessionStoreValidateTokenFailsClosedOnAPIFailure(t *testing.T) {
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer apiServer.Close()
 
 	store := NewAPISessionStore(apiServer.URL, "")
-	cacheKey := "device-1:token-1"
-	store.cacheMu.Lock()
-	store.tokenCache[cacheKey] = &TokenInfo{
-		DeviceID:  "device-1",
-		Valid:     true,
-		ExpiresAt: time.Now().Add(-time.Minute),
-	}
-	store.cacheMu.Unlock()
-
 	valid, err := store.ValidateToken("device-1", "token-1")
 	if err == nil {
-		t.Fatal("expected validation to fail when API returns error and cache entry is expired")
+		t.Fatal("expected validation to fail when API returns error")
 	}
 	if valid {
-		t.Fatal("expected expired cache entry to be rejected")
+		t.Fatal("expected token to be rejected when API validation fails")
 	}
 }
 
@@ -157,8 +148,8 @@ func TestStreamConn_Close_Idempotent(t *testing.T) {
 func TestHandleConnectResponse_FailedConnection_CleansUpStream(t *testing.T) {
 	writeMu := &sync.Mutex{}
 	tc := &TunnelClient{
-		streams:   make(map[string]*StreamConn),
-		writeMu:   *writeMu,
+		streams: make(map[string]*StreamConn),
+		writeMu: *writeMu,
 	}
 
 	streamID := "test-stream-cleanup"
@@ -209,8 +200,8 @@ func TestHandleConnectResponse_FailedConnection_CleansUpStream(t *testing.T) {
 func TestHandleConnectResponse_SuccessfulConnection_KeepsStream(t *testing.T) {
 	writeMu := &sync.Mutex{}
 	tc := &TunnelClient{
-		streams:   make(map[string]*StreamConn),
-		writeMu:   *writeMu,
+		streams: make(map[string]*StreamConn),
+		writeMu: *writeMu,
 	}
 
 	streamID := "test-stream-success"
