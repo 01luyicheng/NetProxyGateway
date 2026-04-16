@@ -255,20 +255,6 @@ func generateCode() (string, error) {
 	}
 }
 
-// generateRandomString 生成随机字符串
-// 注意：此函数使用 crypto/rand 生成随机字节，但存在模运算偏斜问题。
-// 对于安全敏感场景，请使用 generateSecureRandomString。
-// Deprecated: 建议使用 generateSecureRandomString 以获得更好的安全性
-func generateRandomString(length int) string {
-	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, length)
-	rand.Read(b)
-	for i := range b {
-		b[i] = charset[int(b[i])%len(charset)]
-	}
-	return string(b)
-}
-
 // generateSecureRandomString 生成加密安全的随机字符串（用于API密钥等安全敏感场景）
 // 使用拒绝采样避免模运算偏斜，确保均匀分布
 func generateSecureRandomString(length int) (string, error) {
@@ -430,6 +416,25 @@ func (s *Server) updatePairingSessionDB(session *PairingSession) error {
 		session.Code,
 	)
 	return err
+}
+
+// markSessionExpired 将会话标记为过期状态并更新数据库
+// 返回错误表示数据库更新失败
+func (s *Server) markSessionExpired(session *PairingSession) error {
+	// 先更新数据库，成功后再修改内存状态，确保状态一致性
+	if err := s.updatePairingSessionDB(&PairingSession{
+		Code:       session.Code,
+		DeviceID:   session.DeviceID,
+		Status:     "expired",
+		EngineerID: session.EngineerID,
+		CreatedAt:  session.CreatedAt,
+		ExpiresAt:  session.ExpiresAt,
+		Used:       session.Used,
+	}); err != nil {
+		return err
+	}
+	session.Status = "expired"
+	return nil
 }
 
 // createSessionTokenDB 创建会话令牌到数据库
@@ -684,8 +689,11 @@ func (s *Server) getPairingSession(c *gin.Context) {
 
 	// 检查是否过期
 	if time.Now().After(session.ExpiresAt) {
-		session.Status = "expired"
-		s.updatePairingSessionDB(session)
+		if err := s.markSessionExpired(session); err != nil {
+			log.Printf("Failed to mark session %s as expired: %v", session.Code, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateSession})
+			return
+		}
 		c.JSON(http.StatusGone, gin.H{"error": ErrSessionExpired})
 		return
 	}
@@ -731,8 +739,11 @@ func (s *Server) updatePairingSession(c *gin.Context) {
 
 	// 检查是否过期
 	if time.Now().After(session.ExpiresAt) {
-		session.Status = "expired"
-		s.updatePairingSessionDB(session)
+		if err := s.markSessionExpired(session); err != nil {
+			log.Printf("Failed to mark session %s as expired: %v", session.Code, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateSession})
+			return
+		}
 		c.JSON(http.StatusGone, gin.H{"error": ErrSessionExpired})
 		return
 	}
@@ -767,10 +778,12 @@ func (s *Server) updatePairingSession(c *gin.Context) {
 	}
 
 	if err := s.updatePairingSessionDB(session); err != nil {
+		log.Printf("Failed to update pairing session %s: %v", session.Code, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateSession})
 		return
 	}
 
+	log.Printf("Pairing session %s updated to status: %s, engineer: %s", session.Code, session.Status, session.EngineerID)
 	c.JSON(http.StatusOK, session)
 }
 
@@ -799,7 +812,9 @@ func (s *Server) validateSession(c *gin.Context) {
 
 	// 检查是否过期
 	if time.Now().After(sessionToken.ExpiresAt) {
-		s.deleteSessionTokenDB(req.Token)
+		if err := s.deleteSessionTokenDB(req.Token); err != nil {
+			log.Printf("Failed to delete expired session token %s: %v", req.Token, err)
+		}
 		c.JSON(http.StatusOK, gin.H{"valid": false})
 		return
 	}
