@@ -46,6 +46,85 @@
   ```
 - **验证方式**: 代码审查
 
+### C5: API服务updatePairingSessionDB错误被忽略 [待修复]
+- **状态**: 待修复（2026-04-16 Subagents代码审查发现）
+- **位置**: `server/api/main.go` (L688, L735)
+- **问题描述**: 在`getPairingSession`和`updatePairingSession`函数中，更新session状态为"expired"时，`s.updatePairingSessionDB(session)`的错误被忽略。如果数据库写入失败，session状态可能不一致
+- **风险**: Medium。数据库写入失败时状态不一致，可能导致过期session仍被视为有效
+- **代码**:
+  ```go
+  // L688-690: 问题代码（getPairingSession）
+  if time.Now().After(session.ExpiresAt) {
+      session.Status = "expired"
+      s.updatePairingSessionDB(session)  // 错误被忽略！
+      c.JSON(http.StatusGone, gin.H{"error": ErrSessionExpired})
+      return
+  }
+  
+  // L735-737: 问题代码（updatePairingSession）
+  if time.Now().After(session.ExpiresAt) {
+      session.Status = "expired"
+      s.updatePairingSessionDB(session)  // 错误被忽略！
+      c.JSON(http.StatusGone, gin.H{"error": ErrSessionExpired})
+      return
+  }
+  ```
+- **建议修复**:
+  ```go
+  if time.Now().After(session.ExpiresAt) {
+      session.Status = "expired"
+      if err := s.updatePairingSessionDB(session); err != nil {
+          log.Printf("Failed to update expired session: %v", err)
+          // 继续返回过期错误，因为session确实已过期
+      }
+      c.JSON(http.StatusGone, gin.H{"error": ErrSessionExpired})
+      return
+  }
+  ```
+- **修复所需修改**: 约4行（2处，每处添加错误检查和日志）
+- **验证方式**: 代码审查
+
+### C6: API服务generateRandomString错误处理缺失 [待修复]
+- **状态**: 待修复（2026-04-16 Subagents代码审查发现）
+- **位置**: `server/api/main.go` (L265)
+- **问题描述**: `generateRandomString`函数中`rand.Read(b)`的错误被忽略。虽然该函数已被标记为Deprecated，但在极端情况下（如系统熵池耗尽），可能产生不安全的随机数。当前代码仍可能在某些路径中被调用
+- **风险**: Low-Medium。函数已废弃，但错误处理缺失仍存在潜在安全风险
+- **代码**:
+  ```go
+  // L262-270: 问题代码
+  func generateRandomString(length int) string {
+      const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+      b := make([]byte, length)
+      rand.Read(b)  // 错误被忽略！
+      for i := range b {
+          b[i] = charset[int(b[i])%len(charset)]
+      }
+      return string(b)
+  }
+  ```
+- **建议修复方案1**（直接修复）：
+  ```go
+  func generateRandomString(length int) (string, error) {
+      const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+      b := make([]byte, length)
+      if _, err := rand.Read(b); err != nil {
+          return "", fmt.Errorf("failed to read random bytes: %w", err)
+      }
+      for i := range b {
+          b[i] = charset[int(b[i])%len(charset)]
+      }
+      return string(b), nil
+  }
+  ```
+- **建议修复方案2**（移除废弃函数）：
+  - 检查`generateRandomString`是否还有调用方
+  - 如果没有调用方，直接删除该函数
+  - 如果有调用方，迁移到`generateSecureRandomString`
+- **修复所需修改**: 
+  - 方案1：约3行修改（添加错误处理和返回签名）
+  - 方案2：删除约12行（整个函数）
+- **验证方式**: 代码审查 + 全局搜索调用方
+
 ---
 
 ## High

@@ -27,14 +27,31 @@ const (
 	DefaultDBPath     = "./api.db"
 )
 
-// 错误消息常量
+// 错误消息常量 - 统一使用 ErrFailedToXxx 命名风格
 const (
-	ErrInvalidRequestFormat = "invalid request format"
-	ErrDatabaseError        = "database error"
-	ErrSessionNotFound      = "session not found"
-	ErrPairingSessionNotFound = "pairing session not found"
-	ErrFailedToGenerateCode = "failed to generate pairing code"
-	ErrFailedToUpdateStatus = "failed to update device status"
+	ErrFailedToParseRequest       = "invalid request format"
+	ErrFailedToQueryDatabase      = "database error"
+	ErrFailedToFindSession        = "session not found"
+	ErrFailedToFindPairingSession = "pairing session not found"
+	ErrFailedToGenerateCode       = "failed to generate pairing code"
+	ErrFailedToCreateSession      = "failed to create pairing session"
+	ErrFailedToUpdateSession      = "failed to update session"
+	ErrFailedToUpdateStatus       = "failed to update device status"
+	ErrFailedToGenerateToken      = "failed to generate session token"
+	ErrFailedToCreateToken        = "failed to create session token"
+	ErrFailedToValidateToken      = "missing or invalid bearer token"
+	ErrFailedToAuthenticate       = "invalid credentials"
+	ErrUnauthorized               = "unauthorized"
+	ErrForbidden                  = "forbidden"
+	ErrSessionExpired             = "session expired"
+	ErrPairingNotCompleted        = "pairing not completed"
+	ErrInvalidStatusTransition    = "invalid status transition"
+	ErrRateLimitExceeded          = "rate limit exceeded, please try again later"
+	ErrRateLimit                  = "rate limit exceeded"
+	ErrMissingEngineer            = "missing authenticated engineer"
+	ErrInternalAPIKeyNotConfigured = "internal api key not configured"
+	ErrMissingInternalAPIKey      = "missing internal api key"
+	ErrInvalidInternalAPIKey      = "invalid internal api key"
 )
 
 // PairingSession 配对会话
@@ -88,7 +105,7 @@ type Server struct {
 // handleBindError 统一处理请求绑定错误
 func handleBindError(c *gin.Context, component string, err error) {
 	log.Printf("[%s] Invalid request format: %v", component, err)
-	c.JSON(http.StatusBadRequest, gin.H{"error": ErrInvalidRequestFormat})
+	c.JSON(http.StatusBadRequest, gin.H{"error": ErrFailedToParseRequest})
 }
 
 // NewServer 创建新服务器
@@ -238,7 +255,10 @@ func generateCode() (string, error) {
 	}
 }
 
-// generateRandomString 生成随机字符串（用于非安全敏感场景）
+// generateRandomString 生成随机字符串
+// 注意：此函数使用 crypto/rand 生成随机字节，但存在模运算偏斜问题。
+// 对于安全敏感场景，请使用 generateSecureRandomString。
+// Deprecated: 建议使用 generateSecureRandomString 以获得更好的安全性
 func generateRandomString(length int) string {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	b := make([]byte, length)
@@ -273,8 +293,8 @@ func generateSecureRandomString(length int) (string, error) {
 }
 
 // generateSessionToken 生成会话令牌
-func generateSessionToken() string {
-	return generateRandomString(32)
+func generateSessionToken() (string, error) {
+	return generateSecureRandomString(32)
 }
 
 // checkRateLimit 检查限流
@@ -520,7 +540,7 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		auth := c.GetHeader("Authorization")
 		if len(auth) < 8 || !strings.HasPrefix(auth, "Bearer ") {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing or invalid bearer token"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToValidateToken})
 			return
 		}
 
@@ -533,7 +553,7 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 		})
 
 		if err != nil || !token.Valid {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToValidateToken})
 			return
 		}
 
@@ -556,7 +576,7 @@ func (s *Server) internalOrUserAuthMiddleware() gin.HandlerFunc {
 				return
 			}
 
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid internal api key"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrInvalidInternalAPIKey})
 			return
 		}
 
@@ -567,18 +587,18 @@ func (s *Server) internalOrUserAuthMiddleware() gin.HandlerFunc {
 func (s *Server) internalAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if len(s.internalAPIKey) == 0 {
-			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "internal api key not configured"})
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": ErrInternalAPIKeyNotConfigured})
 			return
 		}
 
 		internalKey := c.GetHeader("X-Internal-API-Key")
 		if internalKey == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing internal api key"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrMissingInternalAPIKey})
 			return
 		}
 
 		if subtle.ConstantTimeCompare([]byte(internalKey), s.internalAPIKey) != 1 {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid internal api key"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrInvalidInternalAPIKey})
 			return
 		}
 
@@ -593,7 +613,7 @@ func (s *Server) createPairingSession(c *gin.Context) {
 
 	// 检查限流
 	if !s.checkRateLimit(clientIP) {
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded, please try again later"})
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": ErrRateLimitExceeded})
 		return
 	}
 
@@ -609,7 +629,7 @@ func (s *Server) createPairingSession(c *gin.Context) {
 	// 生成配对码
 	code, err := generateCode()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate pairing code"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToGenerateCode})
 		return
 	}
 
@@ -619,7 +639,12 @@ func (s *Server) createPairingSession(c *gin.Context) {
 		if existing == nil {
 			break
 		}
-		code, _ = generateCode()
+		var err error
+		code, err = generateCode()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToGenerateCode})
+			return
+		}
 	}
 
 	session := &PairingSession{
@@ -632,7 +657,7 @@ func (s *Server) createPairingSession(c *gin.Context) {
 	}
 
 	if err := s.createPairingSessionDB(session); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create pairing session"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToCreateSession})
 		return
 	}
 
@@ -648,12 +673,12 @@ func (s *Server) getPairingSession(c *gin.Context) {
 
 	session, err := s.getPairingSessionDB(code)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToQueryDatabase})
 		return
 	}
 
 	if session == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": ErrFailedToFindSession})
 		return
 	}
 
@@ -661,7 +686,7 @@ func (s *Server) getPairingSession(c *gin.Context) {
 	if time.Now().After(session.ExpiresAt) {
 		session.Status = "expired"
 		s.updatePairingSessionDB(session)
-		c.JSON(http.StatusGone, gin.H{"error": "session expired"})
+		c.JSON(http.StatusGone, gin.H{"error": ErrSessionExpired})
 		return
 	}
 
@@ -675,7 +700,7 @@ func (s *Server) updatePairingSession(c *gin.Context) {
 	engineerIDValue, exists := c.Get("engineer_id")
 	engineerID, ok := engineerIDValue.(string)
 	if !exists || !ok || engineerID == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing authenticated engineer"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": ErrMissingEngineer})
 		return
 	}
 
@@ -690,17 +715,17 @@ func (s *Server) updatePairingSession(c *gin.Context) {
 
 	session, err := s.getPairingSessionDB(code)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToQueryDatabase})
 		return
 	}
 
 	if session == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": ErrFailedToFindSession})
 		return
 	}
 
 	if session.EngineerID != "" && session.EngineerID != engineerID {
-		c.JSON(http.StatusForbidden, gin.H{"error": "unauthorized"})
+		c.JSON(http.StatusForbidden, gin.H{"error": ErrForbidden})
 		return
 	}
 
@@ -708,7 +733,7 @@ func (s *Server) updatePairingSession(c *gin.Context) {
 	if time.Now().After(session.ExpiresAt) {
 		session.Status = "expired"
 		s.updatePairingSessionDB(session)
-		c.JSON(http.StatusGone, gin.H{"error": "session expired"})
+		c.JSON(http.StatusGone, gin.H{"error": ErrSessionExpired})
 		return
 	}
 
@@ -729,7 +754,7 @@ func (s *Server) updatePairingSession(c *gin.Context) {
 	}
 
 	if !valid {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid status transition"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": ErrInvalidStatusTransition})
 		return
 	}
 
@@ -742,7 +767,7 @@ func (s *Server) updatePairingSession(c *gin.Context) {
 	}
 
 	if err := s.updatePairingSessionDB(session); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update session"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateSession})
 		return
 	}
 
@@ -790,7 +815,7 @@ func (s *Server) createSessionToken(c *gin.Context) {
 	engineerIDValue, exists := c.Get("engineer_id")
 	engineerID, ok := engineerIDValue.(string)
 	if !exists || !ok || engineerID == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing authenticated engineer"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": ErrMissingEngineer})
 		return
 	}
 
@@ -805,27 +830,31 @@ func (s *Server) createSessionToken(c *gin.Context) {
 
 	session, err := s.getPairingSessionDB(req.Code)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToQueryDatabase})
 		return
 	}
 
 	if session == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "pairing session not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": ErrFailedToFindPairingSession})
 		return
 	}
 
 	if session.Status != "connected" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "pairing not completed"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": ErrPairingNotCompleted})
 		return
 	}
 
 	if session.EngineerID != engineerID {
-		c.JSON(http.StatusForbidden, gin.H{"error": "unauthorized"})
+		c.JSON(http.StatusForbidden, gin.H{"error": ErrForbidden})
 		return
 	}
 
 	// 创建会话令牌
-	token := generateSessionToken()
+	token, err := generateSessionToken()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToGenerateToken})
+		return
+	}
 	sessionToken := &SessionToken{
 		Token:      token,
 		DeviceID:   session.DeviceID,
@@ -835,7 +864,7 @@ func (s *Server) createSessionToken(c *gin.Context) {
 	}
 
 	if err := s.createSessionTokenDB(sessionToken); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create session token"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToCreateToken})
 		return
 	}
 
@@ -848,7 +877,7 @@ func (s *Server) getDeviceStatus(c *gin.Context) {
 
 	status, err := s.getDeviceStatusDB(deviceID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToQueryDatabase})
 		return
 	}
 
@@ -886,7 +915,7 @@ func (s *Server) updateDeviceStatus(c *gin.Context) {
 	}
 
 	if err := s.upsertDeviceStatusDB(status); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update device status"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateStatus})
 		return
 	}
 
@@ -899,7 +928,7 @@ func (s *Server) login(c *gin.Context) {
 
 	// 检查限流
 	if !s.checkRateLimit(clientIP) {
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded"})
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": ErrRateLimit})
 		return
 	}
 
@@ -918,7 +947,7 @@ func (s *Server) login(c *gin.Context) {
 	adminPass := os.Getenv("ADMIN_PASS")
 
 	if req.Username != adminUser || req.Password != adminPass {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToAuthenticate})
 		return
 	}
 
@@ -932,7 +961,7 @@ func (s *Server) login(c *gin.Context) {
 
 	tokenString, err := token.SignedString(s.jwtSecret)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToGenerateToken})
 		return
 	}
 
