@@ -150,6 +150,50 @@
   - 定义常量：`const (SocksVersion5 = 0x05; AuthMethodPassword = 0x02)`
   - 将参数封装为结构体
 
+### C18: generateSecureRandomString性能可优化 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: `server/api/main.go` (L254-273)
+- **问题描述**: 每次循环分配新内存，频繁进行系统调用。拒绝采样阈值计算正确但存在性能优化空间
+- **风险**: 低。性能开销可接受，但可优化
+- **建议**: 预分配足够大的缓冲区，批量读取随机字节，减少系统调用和内存分配
+- **代码示例**:
+  ```go
+  func generateSecureRandomString(length int) (string, error) {
+      const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+      const charsetLen = 62
+      const threshold = 256 - (256 % charsetLen)
+      
+      result := make([]byte, length)
+      buf := make([]byte, length*2) // 预分配缓冲区
+      bufIdx := 0
+      
+      for i := 0; i < length; {
+          if bufIdx >= len(buf) {
+              if _, err := rand.Read(buf); err != nil {
+                  return "", fmt.Errorf("crypto/rand.Read failed: %w", err)
+              }
+              bufIdx = 0
+          }
+          if int(buf[bufIdx]) < threshold {
+              result[i] = charset[int(buf[bufIdx])%charsetLen]
+              i++
+          }
+          bufIdx++
+      }
+      return string(result), nil
+  }
+  ```
+
+### C19: 开发模式安全检查可进一步增强 [待修复]
+- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **位置**: `server/api/main.go` (L108-137)
+- **问题描述**: 当前只检查了`ENABLE_TLS`，但还有其他生产环境指标应该检查，如端口号、域名/IP限制、日志级别等
+- **风险**: 低。当前检查已足够，但可进一步增强
+- **建议**: 添加更多生产环境检查：
+  - 检查端口号：生产环境通常使用443端口，开发环境使用8080
+  - 检查域名/IP限制：生产环境可能有特定的域名配置
+  - 检查日志级别：生产环境通常使用结构化日志
+
 ---
 
 ## 技术债务 vs 软件缺陷
