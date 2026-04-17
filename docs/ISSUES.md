@@ -162,29 +162,18 @@
   2. 空配置时抛出异常而非仅警告
   3. 添加构建时检查确保配置正确
 
-### S1: SOCKS5代理relay函数goroutine泄漏 [待修复]
-- **状态**: 待修复（2026-04-15 Subagents验证确认）
-- **验证方式**: Logic Analyzer Agent 代码审查
-- **位置**: `server/socks5-proxy/main.go` (L1148-1164)
-- **问题验证**:
-  - `relay`函数启动两个goroutine处理双向数据转发
-  - 函数等待`errChan`接收第一个错误后立即返回
-  - 另一个方向的`io.Copy`可能仍在运行（阻塞在读写操作上），导致goroutine泄漏
-- **风险**: 中-高。长期运行会导致goroutine泄漏和内存增长
-- **代码分析**:
-  ```go
-  func (s *SOCKS5Server) relay(clientConn, targetConn net.Conn) error {
-      errChan := make(chan error, 2)
-      go func() { _, err := io.Copy(targetConn, clientConn); errChan <- err }()
-      go func() { _, err := io.Copy(clientConn, targetConn); errChan <- err }()
-      err := <-errChan  // 只等待第一个错误就返回
-      return err       // 另一个goroutine可能仍在运行！
-  }
-  ```
-- **建议修复**:
-  1. 使用`sync.WaitGroup`等待两个goroutine完成
-  2. 在返回前关闭连接以终止另一个方向的io.Copy
-  3. 添加超时保护避免永久阻塞
+### S1: SOCKS5代理relay函数goroutine泄漏 [已修复]
+- **状态**: 已修复（2026-04-17 GPT-5.3-Codex）
+- **位置**: `server/socks5-proxy/main.go` (`relay`)
+- **修复内容**:
+  1. `relay` 改为等待两个方向的转发 goroutine 都退出后再返回
+  2. 使用 `sync.Once` 在首个方向结束时统一关闭两端连接，确保另一个方向可退出
+  3. 增加 `isExpectedRelayError`，过滤连接主动关闭场景下的预期错误
+- **验证结果**:
+  - 在 `server/socks5-proxy` 目录执行：`go test -run TestRelay_ClosesPeerConnectionOnHalfClose -count=1 ./...` 通过
+  - 在 `server/socks5-proxy` 目录执行：`go test -race ./...` 通过（前置：Windows 下已安装并配置 gcc）
+  - 在 `server/socks5-proxy` 目录执行：`staticcheck ./...` 通过
+- **相关测试**: `server/socks5-proxy/main_test.go` 新增 `TestRelay_ClosesPeerConnectionOnHalfClose`
 
 ### H20: API服务JWT令牌验证不完善 [待修复]
 - **状态**: 待修复（2026-04-15 Subagents代码审查发现）
@@ -252,38 +241,32 @@
   }
   ```
 
-### H22: SOCKS5代理WebSocket读取无超时 [待修复]
-- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
-- **位置**: `server/socks5-proxy/main.go` (L552-558)
-- **问题描述**: WebSocket `ReadMessage()` 没有设置超时，如果客户端发送部分数据后停止，连接可能永远挂起
-- **风险**: 高。连接泄漏，可能导致goroutine和资源耗尽
-- **代码**:
-  ```go
-  // L552-558
-  for {
-      messageType, data, err := conn.ReadMessage()
-      if err != nil {
-          if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-              log.Printf("WebSocket error for device %s: %v", deviceID, err)
-          }
-          return
-      }
-  ```
-- **建议修复**: 使用 `SetReadDeadline` 定期设置读取超时:
-  ```go
-  conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-  conn.SetPongHandler(func(string) error {
-      conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-      return nil
-  })
-  ```
+### H22: SOCKS5代理WebSocket读取无超时 [已修复]
+- **状态**: 已修复（2026-04-17 GPT-5.3-Codex）
+- **位置**: `server/socks5-proxy/main.go` (`readLoop`)
+- **修复内容**:
+  1. 在 `readLoop` 中增加 `SetReadDeadline`（初始与每次循环刷新）
+  2. 增加 `SetPongHandler` 续期读超时
+  3. 对读超时错误进行显式分支处理并退出连接循环，避免无限挂起
+- **验证结果**:
+  - 在 `server/socks5-proxy` 目录执行：`go test ./...` 通过
+  - 在 `server/socks5-proxy` 目录执行：`go test -race ./...` 通过（前置：Windows 下已安装并配置 gcc）
+  - 在 `server/socks5-proxy` 目录执行：`staticcheck ./...` 通过
+  - 注：`readLoop` 超时分支专项回归测试待补充
 
-### H23: SOCKS5代理StreamConn双重锁嵌套 [待修复]
-- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
-- **位置**: `server/socks5-proxy/main.go` (`StreamConn.Write` 方法)
-- **问题描述**: `StreamConn.Write` 方法在持有锁的情况下调用其他可能获取锁的方法，存在死锁风险
-- **风险**: 高。可能导致服务死锁，无法处理新连接
-- **建议修复**: 重构锁策略，使用更细粒度的锁或避免在锁内调用外部方法
+### H23: SOCKS5代理StreamConn双重锁嵌套 [已修复]
+- **状态**: 已修复（2026-04-17 GPT-5.3-Codex, Kimi-K2.5）
+- **位置**: `server/socks5-proxy/main.go` (`StreamConn.Write`, `StreamConn.Close`, `ConnectThroughTunnel`)
+- **修复内容**:
+  1. `StreamConn.Write` 不再在持有 `s.mu` 时执行网络写操作
+  2. 先在 `s.mu` 内复制连接/锁引用后释放，再进入写锁与 IO，降低锁嵌套风险
+  3. 为 `Write` 与 `Close` 的 websocket 写入增加 `SetWriteDeadline`，避免锁持有期间无限阻塞
+  4. **修复锁释放问题（2026-04-17 Kimi-K2.5）**: 使用 `defer` 确保 `writeMu` 在 panic 时也能释放，避免死锁
+- **验证结果**:
+  - 在 `server/socks5-proxy` 目录执行：`go test ./...` 通过
+  - 在 `server/socks5-proxy` 目录执行：`go test -race ./...` 通过（前置：Windows 下已安装并配置 gcc）
+  - 在 `server/socks5-proxy` 目录执行：`staticcheck ./...` 通过
+  - 注：`StreamConn.Write/Close` 并发竞争专项回归测试待补充
 
 ### H24: Tunnel服务CheckOrigin允许所有来源 [待修复]
 - **状态**: 待修复（2026-04-15 Subagents代码审查发现）
