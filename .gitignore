@@ -32,3 +32,11 @@ server/tunnel/tunnel
 
 # Commitlint (config is tracked, node_modules would be ignored if installed locally)
 node_modules/
+
+# Temporary files generated during development/review
+diff_output.txt
+staged.txt
+staged_diff.txt
+temp_diff.txt
+unstaged.txt
+*.tmp
