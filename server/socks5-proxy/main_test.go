@@ -6,10 +6,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 type stubTunnelDialer struct {
@@ -111,6 +114,126 @@ func TestAPISessionStoreValidateTokenFailsClosedOnAPIFailure(t *testing.T) {
 	}
 }
 
+func TestGetOrConnectTunnel_ConcurrentCallsShareSingleDial(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+
+	var acceptedConns []*websocket.Conn
+	var acceptedMu sync.Mutex
+	var dialCount atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/tunnel" {
+			http.NotFound(w, r)
+			return
+		}
+
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+
+		dialCount.Add(1)
+		acceptedMu.Lock()
+		acceptedConns = append(acceptedConns, conn)
+		acceptedMu.Unlock()
+
+		go func() {
+			defer conn.Close()
+			for {
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		}()
+	}))
+	defer server.Close()
+	defer func() {
+		acceptedMu.Lock()
+		defer acceptedMu.Unlock()
+		for _, conn := range acceptedConns {
+			_ = conn.Close()
+		}
+	}()
+
+	tc := NewTunnelClient(server.URL)
+
+	const concurrentCalls = 8
+	results := make([]*websocket.Conn, concurrentCalls)
+	errs := make([]error, concurrentCalls)
+
+	var wg sync.WaitGroup
+	wg.Add(concurrentCalls)
+	for i := 0; i < concurrentCalls; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			results[idx], errs[idx] = tc.GetOrConnectTunnel("device-1", "token-1")
+		}(i)
+	}
+	wg.Wait()
+
+	for _, err := range errs {
+		if err != nil {
+			t.Fatalf("unexpected GetOrConnectTunnel error: %v", err)
+		}
+	}
+
+	if dialCount.Load() != 1 {
+		t.Fatalf("expected exactly one dial, got %d", dialCount.Load())
+	}
+
+	first := results[0]
+	if first == nil {
+		t.Fatal("expected non-nil connection")
+	}
+	for i := 1; i < concurrentCalls; i++ {
+		if results[i] != first {
+			t.Fatalf("expected shared connection instance, got different conn at index %d", i)
+		}
+	}
+
+	_ = first.Close()
+}
+
+func TestRelay_ClosesPeerConnectionOnHalfClose(t *testing.T) {
+	server := &SOCKS5Server{}
+
+	clientConn, clientPeer := net.Pipe()
+	targetConn, targetPeer := net.Pipe()
+	defer targetPeer.Close()
+
+	relayDone := make(chan error, 1)
+	go func() {
+		relayDone <- server.relay(clientConn, targetConn)
+	}()
+
+	if err := clientPeer.Close(); err != nil {
+		t.Fatalf("failed to close client peer: %v", err)
+	}
+
+	select {
+	case relayErr := <-relayDone:
+		if relayErr != nil {
+			t.Fatalf("expected relay to return nil on normal half-close, got: %v", relayErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("relay did not return after one direction closed")
+	}
+
+	if err := targetPeer.SetWriteDeadline(time.Now().Add(200 * time.Millisecond)); err != nil && !strings.Contains(err.Error(), "closed pipe") {
+		t.Fatalf("failed to set write deadline: %v", err)
+	}
+
+	_, err := targetPeer.Write([]byte{0x01})
+	if err == nil {
+		t.Fatal("expected target peer to be closed")
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		t.Fatalf("expected target peer to be closed, got timeout: %v", err)
+	}
+}
+
 // TestStreamConn_Close_Idempotent 验证 Close() 方法的幂等性
 func TestStreamConn_Close_Idempotent(t *testing.T) {
 	writeMu := &sync.Mutex{}
@@ -146,10 +269,8 @@ func TestStreamConn_Close_Idempotent(t *testing.T) {
 
 // TestHandleConnectResponse_FailedConnection_CleansUpStream 验证连接失败时清理stream
 func TestHandleConnectResponse_FailedConnection_CleansUpStream(t *testing.T) {
-	writeMu := &sync.Mutex{}
 	tc := &TunnelClient{
 		streams: make(map[string]*StreamConn),
-		writeMu: *writeMu,
 	}
 
 	streamID := "test-stream-cleanup"
@@ -159,7 +280,7 @@ func TestHandleConnectResponse_FailedConnection_CleansUpStream(t *testing.T) {
 		DataChan:      make(chan []byte, 100),
 		CloseChan:     make(chan struct{}),
 		Connected:     make(chan bool, 1),
-		tunnelWriteMu: writeMu,
+		tunnelWriteMu: &tc.writeMu,
 	}
 
 	// 将stream添加到映射
@@ -198,10 +319,8 @@ func TestHandleConnectResponse_FailedConnection_CleansUpStream(t *testing.T) {
 
 // TestHandleConnectResponse_SuccessfulConnection_KeepsStream 验证连接成功时保留stream
 func TestHandleConnectResponse_SuccessfulConnection_KeepsStream(t *testing.T) {
-	writeMu := &sync.Mutex{}
 	tc := &TunnelClient{
 		streams: make(map[string]*StreamConn),
-		writeMu: *writeMu,
 	}
 
 	streamID := "test-stream-success"
@@ -211,7 +330,7 @@ func TestHandleConnectResponse_SuccessfulConnection_KeepsStream(t *testing.T) {
 		DataChan:      make(chan []byte, 100),
 		CloseChan:     make(chan struct{}),
 		Connected:     make(chan bool, 1),
-		tunnelWriteMu: writeMu,
+		tunnelWriteMu: &tc.writeMu,
 	}
 
 	// 将stream添加到映射
@@ -243,29 +362,11 @@ func TestHandleConnectResponse_SuccessfulConnection_KeepsStream(t *testing.T) {
 	}
 }
 
-// mockWebSocketConn 用于测试的mock WebSocket连接
-type mockWebSocketConn struct {
-	writeCount atomic.Int32
-	closed     atomic.Bool
-}
-
-func (m *mockWebSocketConn) WriteMessage(messageType int, data []byte) error {
-	m.writeCount.Add(1)
-	return nil
-}
-
-func (m *mockWebSocketConn) Close() error {
-	m.closed.Store(true)
-	return nil
-}
-
 // TestConnectThroughTunnel_CleanupOnMarshalError 验证JSON序列化失败时的资源清理
 func TestConnectThroughTunnel_CleanupOnMarshalError(t *testing.T) {
 	// 创建一个包含无法序列化数据的请求
-	writeMu := &sync.Mutex{}
 	tc := &TunnelClient{
 		streams: make(map[string]*StreamConn),
-		writeMu: *writeMu,
 	}
 
 	// 验证streams映射为空
