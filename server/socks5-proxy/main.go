@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -18,6 +19,12 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+)
+
+const (
+	tunnelReadTimeout     = 60 * time.Second
+	streamCloseWriteLimit = 2 * time.Second
+	streamWriteLimit      = 5 * time.Second
 )
 
 // Config 服务配置
@@ -306,17 +313,26 @@ func (s *StreamConn) Write(p []byte) (n int, err error) {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.TunnelConn == nil {
+	tunnelConn := s.TunnelConn
+	writeMu := s.tunnelWriteMu
+	s.mu.Unlock()
+
+	if tunnelConn == nil {
 		return 0, fmt.Errorf("tunnel connection not available")
 	}
 
-	if s.tunnelWriteMu != nil {
-		s.tunnelWriteMu.Lock()
-		defer s.tunnelWriteMu.Unlock()
+	if atomic.LoadInt32(&s.Closed) == 1 {
+		return 0, fmt.Errorf("stream closed")
 	}
 
-	err = s.TunnelConn.WriteMessage(websocket.BinaryMessage, data)
+	if writeMu != nil {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+	}
+
+	_ = tunnelConn.SetWriteDeadline(time.Now().Add(streamWriteLimit))
+	err = tunnelConn.WriteMessage(websocket.BinaryMessage, data)
+	_ = tunnelConn.SetWriteDeadline(time.Time{})
 	if err != nil {
 		return 0, err
 	}
@@ -345,15 +361,22 @@ func (s *StreamConn) Close() error {
 		}
 
 		data, _ := json.Marshal(msg)
+
 		s.mu.Lock()
-		if s.TunnelConn != nil {
-			if s.tunnelWriteMu != nil {
-				s.tunnelWriteMu.Lock()
-				defer s.tunnelWriteMu.Unlock()
-			}
-			s.TunnelConn.WriteMessage(websocket.BinaryMessage, data)
-		}
+		tunnelConn := s.TunnelConn
+		writeMu := s.tunnelWriteMu
 		s.mu.Unlock()
+
+		if tunnelConn != nil {
+			if writeMu != nil {
+				writeMu.Lock()
+				defer writeMu.Unlock()
+			}
+
+			_ = tunnelConn.SetWriteDeadline(time.Now().Add(streamCloseWriteLimit))
+			_ = tunnelConn.WriteMessage(websocket.BinaryMessage, data)
+			_ = tunnelConn.SetWriteDeadline(time.Time{})
+		}
 	}
 	return nil
 }
@@ -395,6 +418,7 @@ type TunnelClient struct {
 	httpClient     *http.Client
 	wsDialer       *websocket.Dialer
 	connections    map[string]*websocket.Conn // deviceID -> websocket.Conn
+	dialing        map[string]chan struct{}   // deviceID -> in-flight dial signal
 	streams        map[string]*StreamConn     // streamID -> StreamConn
 	mu             sync.RWMutex
 	writeMu        sync.Mutex
@@ -421,30 +445,83 @@ func NewTunnelClient(tunnelEndpoint string) *TunnelClient {
 			WriteBufferSize: 64 * 1024,
 		},
 		connections: make(map[string]*websocket.Conn),
+		dialing:     make(map[string]chan struct{}),
 		streams:     make(map[string]*StreamConn),
 	}
 }
 
 // GetOrConnectTunnel 获取或建立到设备的隧道连接
 func (tc *TunnelClient) GetOrConnectTunnel(deviceID, token string) (*websocket.Conn, error) {
-	tc.mu.RLock()
-	if conn, ok := tc.connections[deviceID]; ok {
-		tc.mu.RUnlock()
-		// 检查连接是否仍然有效
-		if tc.isConnAlive(conn) {
-			return conn, nil
-		}
-		// 连接已失效，需要重新连接
-		tc.mu.Lock()
-		delete(tc.connections, deviceID)
-		tc.mu.Unlock()
-	} else {
-		tc.mu.RUnlock()
-	}
+	for {
+		tc.mu.RLock()
+		if conn, ok := tc.connections[deviceID]; ok {
+			tc.mu.RUnlock()
+			if tc.isConnAlive(conn) {
+				return conn, nil
+			}
 
-	// 建立新的 WebSocket 连接
+			tc.mu.Lock()
+			if tc.connections[deviceID] == conn {
+				delete(tc.connections, deviceID)
+			}
+			tc.mu.Unlock()
+			continue
+		}
+
+		waitCh, dialing := tc.dialing[deviceID]
+		tc.mu.RUnlock()
+
+		if dialing {
+			<-waitCh
+			continue
+		}
+
+		tc.mu.Lock()
+		if conn, ok := tc.connections[deviceID]; ok {
+			tc.mu.Unlock()
+			if tc.isConnAlive(conn) {
+				return conn, nil
+			}
+
+			tc.mu.Lock()
+			if tc.connections[deviceID] == conn {
+				delete(tc.connections, deviceID)
+			}
+			tc.mu.Unlock()
+			continue
+		}
+
+		if waitCh, dialing = tc.dialing[deviceID]; dialing {
+			tc.mu.Unlock()
+			<-waitCh
+			continue
+		}
+
+		waitCh = make(chan struct{})
+		tc.dialing[deviceID] = waitCh
+		tc.mu.Unlock()
+
+		conn, err := tc.dialTunnel(deviceID, token)
+
+		tc.mu.Lock()
+		if err == nil {
+			tc.connections[deviceID] = conn
+		}
+		delete(tc.dialing, deviceID)
+		close(waitCh)
+		tc.mu.Unlock()
+
+		if err != nil {
+			return nil, err
+		}
+
+		go tc.readLoop(deviceID, conn)
+		return conn, nil
+	}
+}
+
+func (tc *TunnelClient) dialTunnel(deviceID, token string) (*websocket.Conn, error) {
 	wsURL := fmt.Sprintf("%s/tunnel?device_id=%s", tc.tunnelEndpoint, deviceID)
-	// 将 http/https 转换为 ws/wss
 	if strings.HasPrefix(wsURL, "https://") {
 		wsURL = "wss://" + wsURL[8:]
 	} else if strings.HasPrefix(wsURL, "http://") {
@@ -458,13 +535,6 @@ func (tc *TunnelClient) GetOrConnectTunnel(deviceID, token string) (*websocket.C
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial tunnel: %w", err)
 	}
-
-	tc.mu.Lock()
-	tc.connections[deviceID] = conn
-	tc.mu.Unlock()
-
-	// 启动读取协程
-	go tc.readLoop(deviceID, conn)
 
 	return conn, nil
 }
@@ -491,9 +561,26 @@ func (tc *TunnelClient) readLoop(deviceID string, conn *websocket.Conn) {
 		conn.Close()
 	}()
 
+	if err := conn.SetReadDeadline(time.Now().Add(tunnelReadTimeout)); err != nil {
+		log.Printf("Failed to set initial read deadline for device %s: %v", deviceID, err)
+	}
+
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(tunnelReadTimeout))
+	})
+
 	for {
+		if err := conn.SetReadDeadline(time.Now().Add(tunnelReadTimeout)); err != nil {
+			log.Printf("Failed to refresh read deadline for device %s: %v", deviceID, err)
+			return
+		}
+
 		messageType, data, err := conn.ReadMessage()
 		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				log.Printf("WebSocket read timeout for device %s: %v", deviceID, err)
+				return
+			}
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("WebSocket error for device %s: %v", deviceID, err)
 			}
@@ -669,8 +756,10 @@ func (tc *TunnelClient) ConnectThroughTunnel(deviceID, token, dstAddr string, ds
 	}
 
 	tc.writeMu.Lock()
+	defer tc.writeMu.Unlock()
+	_ = tunnelConn.SetWriteDeadline(time.Now().Add(streamWriteLimit))
 	err = tunnelConn.WriteMessage(websocket.BinaryMessage, reqData)
-	tc.writeMu.Unlock()
+	_ = tunnelConn.SetWriteDeadline(time.Time{})
 	if err != nil {
 		tc.mu.Lock()
 		delete(tc.streams, streamID)
@@ -1098,20 +1187,44 @@ func (s *SOCKS5Server) handleConnect(conn net.Conn, session AuthSession, dstAddr
 // relay 双向转发数据
 func (s *SOCKS5Server) relay(clientConn, targetConn net.Conn) error {
 	errChan := make(chan error, 2)
+	var closeOnce sync.Once
 
-	go func() {
-		_, err := io.Copy(targetConn, clientConn)
+	closeConnections := func() {
+		_ = clientConn.Close()
+		_ = targetConn.Close()
+	}
+
+	copyStream := func(dst, src net.Conn) {
+		_, err := io.Copy(dst, src)
+		closeOnce.Do(closeConnections)
 		errChan <- err
-	}()
+	}
 
-	go func() {
-		_, err := io.Copy(clientConn, targetConn)
-		errChan <- err
-	}()
+	go copyStream(targetConn, clientConn)
+	go copyStream(clientConn, targetConn)
 
-	// 等待任意一个方向完成
-	err := <-errChan
-	return err
+	var relayErr error
+	for i := 0; i < 2; i++ {
+		err := <-errChan
+		if relayErr == nil && !isExpectedRelayError(err) {
+			relayErr = err
+		}
+	}
+
+	return relayErr
+}
+
+func isExpectedRelayError(err error) bool {
+	if err == nil {
+		return true
+	}
+
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+
+	errMsg := err.Error()
+	return strings.Contains(errMsg, "use of closed network connection") || strings.Contains(errMsg, "stream closed")
 }
 
 // firstNonEmpty 返回第一个非空字符串（环境变量优先）
