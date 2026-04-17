@@ -421,19 +421,11 @@ func (s *Server) updatePairingSessionDB(session *PairingSession) error {
 // markSessionExpired 将会话标记为过期状态并更新数据库
 // 返回错误表示数据库更新失败
 func (s *Server) markSessionExpired(session *PairingSession) error {
-	// 先更新数据库，成功后再修改内存状态，确保状态一致性
-	if err := s.updatePairingSessionDB(&PairingSession{
-		Code:       session.Code,
-		DeviceID:   session.DeviceID,
-		Status:     "expired",
-		EngineerID: session.EngineerID,
-		CreatedAt:  session.CreatedAt,
-		ExpiresAt:  session.ExpiresAt,
-		Used:       session.Used,
-	}); err != nil {
+	// 先更新内存状态，再更新数据库，确保状态一致性
+	session.Status = "expired"
+	if err := s.updatePairingSessionDB(session); err != nil {
 		return err
 	}
-	session.Status = "expired"
 	return nil
 }
 
