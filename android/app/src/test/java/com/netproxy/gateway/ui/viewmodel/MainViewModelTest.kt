@@ -1,6 +1,7 @@
 package com.netproxy.gateway.ui.viewmodel
 
 import android.content.Context
+import com.netproxy.gateway.R
 import com.netproxy.gateway.connection.AuthSessionStore
 import com.netproxy.gateway.connection.MqttConnectionManager
 import com.netproxy.gateway.connection.MqttConnectionState
@@ -55,6 +56,9 @@ class MainViewModelTest {
         every { mqttConnectionManager.connect(any(), any()) } just runs
         every { authSessionStore.update(any(), any()) } just runs
         every { authSessionStore.clear() } just runs
+
+        every { context.getString(R.string.error_cellular_required) } returns "__ERR_CELLULAR_REQUIRED__"
+        every { context.getString(R.string.error_vpn_permission_required) } returns "__ERR_VPN_PERMISSION_REQUIRED__"
     }
 
     @After
@@ -105,7 +109,8 @@ class MainViewModelTest {
 
         val uiState = viewModel.uiState.value
         assertFalse(uiState.isPaired)
-        assertEquals("需要蜂窝网络连接", uiState.errorMessage)
+        assertEquals("__ERR_CELLULAR_REQUIRED__", uiState.errorMessage)
+        verify(exactly = 1) { context.getString(R.string.error_cellular_required) }
         verify(exactly = 0) { mqttConnectionManager.connect(any(), any()) }
     }
 

@@ -5,11 +5,14 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import com.netproxy.gateway.R
 import com.netproxy.gateway.connection.AuthSessionStore
+import com.netproxy.gateway.i18n.AppLocale
 import com.netproxy.gateway.ui.MainActivity
 import dagger.hilt.android.AndroidEntryPoint
 import io.netty.bootstrap.ServerBootstrap
@@ -47,14 +50,21 @@ class Socks5ProxyService : Service() {
 
     companion object {
         private val logger = LoggerFactory.getLogger(Socks5ProxyService::class.java)
+        private const val LANGUAGE_LISTENER_ID = "socks5_service"
+        private const val NOTIFICATION_ID = 1
         const val PROXY_PORT = 1080
         const val CHANNEL_ID = "proxy_service_channel"
         private const val MAX_WORKER_THREADS = 2
     }
 
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(AppLocale.wrap(newBase))
+    }
+
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var bossGroup: NioEventLoopGroup? = null
     private var workerGroup: NioEventLoopGroup? = null
+    @Volatile
     private var serverChannel: Channel? = null
 
     @Inject
@@ -63,10 +73,15 @@ class Socks5ProxyService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        
+        // H27: 注册语言变更监听，运行中的通知会自动刷新
+        // I1: 防御性注销，防止系统强制杀死后残留监听器
+        AppLocale.unregisterLanguageChangeListener(LANGUAGE_LISTENER_ID)
+        registerLanguageChangeListener()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(1, createNotification())
+        startForeground(NOTIFICATION_ID, createNotification())
         startProxyServer()
         return START_STICKY
     }
@@ -102,6 +117,8 @@ class Socks5ProxyService : Service() {
             } catch (e: Exception) {
                 logger.error("SOCKS5 server failed to start", e)
                 stopSelf()
+            } finally {
+                serverChannel = null
             }
         }
     }
@@ -110,10 +127,10 @@ class Socks5ProxyService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "SOCKS5 Proxy Service",
+                AppLocale.getString(this, R.string.notification_proxy_channel_name),
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Running SOCKS5 proxy server"
+                description = AppLocale.getString(this@Socks5ProxyService, R.string.notification_proxy_channel_description)
             }
             
             val notificationManager = getSystemService(NotificationManager::class.java)
@@ -129,16 +146,62 @@ class Socks5ProxyService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("NetProxyGateway")
-            .setContentText("SOCKS5 Proxy Running on port $PROXY_PORT")
+            .setContentTitle(AppLocale.getString(this, R.string.app_name))
+            .setContentText(AppLocale.getString(this, R.string.notification_proxy_content_text_format, PROXY_PORT))
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pendingIntent)
             .build()
     }
 
+    /**
+     * H27: 注册语言变更监听
+     * 当用户切换语言时，刷新运行中的代理服务通知文案
+     */
+    private fun registerLanguageChangeListener() {
+        AppLocale.registerLanguageChangeListener(LANGUAGE_LISTENER_ID) { _ ->
+            if (shouldRefreshNotificationOnLanguageChange()) {
+                updateNotification()
+            }
+        }
+    }
+
+    internal fun shouldRefreshNotificationOnLanguageChangeForTesting(): Boolean =
+        shouldRefreshNotificationOnLanguageChange()
+
+    private fun shouldRefreshNotificationOnLanguageChange(): Boolean = isProxyChannelActive()
+
+    internal fun isProxyChannelActiveForTesting(): Boolean = isProxyChannelActive()
+
+    internal fun setServerChannelForTesting(channel: Channel?) {
+        serverChannel = channel
+    }
+
+    private fun isProxyChannelActive(): Boolean = serverChannel?.isActive == true
+
+    /**
+     * H27: 刷新前台服务通知文案
+     * 当语言切换时调用，更新通知内容为当前语言
+     */
+    private fun updateNotification() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                createNotificationChannel()
+            }
+            val notificationManager = getSystemService(NotificationManager::class.java)
+            val updatedNotification = createNotification()
+            notificationManager.notify(NOTIFICATION_ID, updatedNotification)
+            logger.debug("Proxy service notification updated for language change")
+        } catch (e: Exception) {
+            logger.error("Failed to update proxy service notification", e)
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        // H27: 注销语言变更监听
+        AppLocale.unregisterLanguageChangeListener(LANGUAGE_LISTENER_ID)
+        
         serviceScope.cancel()
         bossGroup?.shutdownGracefully()
         workerGroup?.shutdownGracefully()

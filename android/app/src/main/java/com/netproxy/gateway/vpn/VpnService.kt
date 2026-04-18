@@ -11,7 +11,9 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
 import com.netproxy.gateway.BuildConfig
+import com.netproxy.gateway.R
 import com.netproxy.gateway.connection.AuthSessionStore
+import com.netproxy.gateway.i18n.AppLocale
 import com.netproxy.gateway.ui.MainActivity
 import com.netproxy.gateway.proxy.Socks5ProxyService
 import com.netproxy.gateway.proxy.Socks5ConnectionPool
@@ -63,6 +65,7 @@ class GatewayVpnService : AndroidVpnService() {
 
     companion object {
         private val logger = LoggerFactory.getLogger(GatewayVpnService::class.java)
+        private const val LANGUAGE_LISTENER_ID = "vpn_service"
         private const val NOTIFICATION_CHANNEL_ID = "vpn_service_channel"
         private const val NOTIFICATION_ID = 100
         private const val PACKET_BUFFER_SIZE = 32 * 1024
@@ -97,6 +100,10 @@ class GatewayVpnService : AndroidVpnService() {
             "8.8.8.8", "8.8.4.4",
             "1.1.1.1", "1.0.0.1"
         )
+    }
+
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(AppLocale.wrap(newBase))
     }
 
     // serviceScope 使用 var 以便在服务停止后可以重新创建
@@ -145,6 +152,11 @@ class GatewayVpnService : AndroidVpnService() {
         createNotificationChannel()
         // 创建协程作用域
         serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        
+        // H27: 注册语言变更监听，运行中的通知会自动刷新
+        // I1: 防御性注销，防止系统强制杀死后残留监听器
+        unregisterLanguageChangeListener()
+        registerLanguageChangeListener()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -174,7 +186,7 @@ class GatewayVpnService : AndroidVpnService() {
             resolvedDnsServers = dnsServers.toSet()
 
             val builder = Builder()
-                .setSession("NetProxyGateway")
+                .setSession(getString(R.string.app_name))
                 .setMtu(VPN_MTU)
                 .addAddress(VPN_ADDRESS, 32)
                 .addRoute(VPN_ROUTE, 0)
@@ -217,7 +229,7 @@ class GatewayVpnService : AndroidVpnService() {
             } else {
                 _status.value = VpnStatus(
                     state = VpnState.ERROR,
-                    errorMessage = "Failed to establish VPN"
+                    errorMessage = getString(R.string.error_failed_to_establish_vpn)
                 )
             }
         } catch (e: Exception) {
@@ -898,10 +910,10 @@ class GatewayVpnService : AndroidVpnService() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 NOTIFICATION_CHANNEL_ID,
-                "VPN Service",
+                AppLocale.getString(this, R.string.notification_vpn_channel_name),
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "NetProxyGateway VPN is running"
+                description = AppLocale.getString(this@GatewayVpnService, R.string.notification_vpn_channel_description)
             }
 
             val notificationManager = getSystemService(NotificationManager::class.java)
@@ -919,12 +931,50 @@ class GatewayVpnService : AndroidVpnService() {
         )
 
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("NetProxyGateway")
-            .setContentText("VPN service is running")
+            .setContentTitle(AppLocale.getString(this, R.string.app_name))
+            .setContentText(AppLocale.getString(this, R.string.notification_vpn_content_text))
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .build()
+    }
+
+    /**
+     * H27: 注册语言变更监听
+     * 当用户切换语言时，刷新运行中的 VPN 通知文案
+     */
+    private fun registerLanguageChangeListener() {
+        AppLocale.registerLanguageChangeListener(LANGUAGE_LISTENER_ID) { _ ->
+            // 仅在服务运行时刷新通知
+            if (_status.value.state == VpnState.RUNNING) {
+                updateNotification()
+            }
+        }
+    }
+
+    /**
+     * H27: 注销语言变更监听
+     */
+    private fun unregisterLanguageChangeListener() {
+        AppLocale.unregisterLanguageChangeListener(LANGUAGE_LISTENER_ID)
+    }
+
+    /**
+     * H27: 刷新运行中的前台服务通知文案
+     * 当语言切换时调用，更新通知内容为当前语言
+     */
+    private fun updateNotification() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                createNotificationChannel()
+            }
+            val notificationManager = getSystemService(NotificationManager::class.java)
+            val updatedNotification = createNotification()
+            notificationManager.notify(NOTIFICATION_ID, updatedNotification)
+            logger.debug("VPN service notification updated for language change")
+        } catch (e: Exception) {
+            logger.error("Failed to update VPN service notification", e)
+        }
     }
 
     private fun stopVpn() {
@@ -1069,6 +1119,9 @@ class GatewayVpnService : AndroidVpnService() {
         // 取消协程作用域，停止所有后台任务，并置null
         serviceScope?.cancel()
         serviceScope = null
+
+        // H27: 注销语言变更监听
+        unregisterLanguageChangeListener()
 
         // 重置 isStopping 标志，避免影响后续服务重启
         if (stopVpnNotCalled) {

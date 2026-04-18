@@ -10,6 +10,8 @@ import com.netproxy.gateway.connection.MqttConnectionManager
 import com.netproxy.gateway.connection.MqttConnectionState
 import com.netproxy.gateway.connection.NetworkStateManager
 import com.netproxy.gateway.connection.NetworkType
+import com.netproxy.gateway.R
+import com.netproxy.gateway.i18n.AppLocale
 import com.netproxy.gateway.wifi.GatewayWifiManager
 import com.netproxy.gateway.wifi.WifiNetwork
 import com.netproxy.gateway.vpn.GatewayVpnService
@@ -18,6 +20,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.security.SecureRandom
 import javax.inject.Inject
@@ -61,14 +64,12 @@ class MainViewModel @Inject constructor(
     private fun observeNetworkState() {
         viewModelScope.launch {
             networkStateManager.networkState.collect { networkState ->
-                _uiState.value = _uiState.value.copy(
-                    wifiConnected = networkState.networkType == NetworkType.Wifi,
-                    cellularConnected = networkState.networkType == NetworkType.Cellular
-                )
-                
-                wifiManager.getCurrentConnection()?.let { info ->
-                    _uiState.value = _uiState.value.copy(
-                        currentWifiSsid = info.ssid ?: ""
+                val wifiInfo = wifiManager.getCurrentConnection()
+                _uiState.update { current ->
+                    current.copy(
+                        wifiConnected = networkState.networkType == NetworkType.Wifi,
+                        cellularConnected = networkState.networkType == NetworkType.Cellular,
+                        currentWifiSsid = wifiInfo?.ssid ?: ""
                     )
                 }
             }
@@ -80,23 +81,15 @@ class MainViewModel @Inject constructor(
             mqttConnectionManager.connectionState.collect { state ->
                 when (state) {
                     is MqttConnectionState.Connected -> {
-                        _uiState.value = _uiState.value.copy(
-                            isConnected = true,
-                            isPaired = true
-                        )
+                        _uiState.update { it.copy(isConnected = true, isPaired = true) }
                     }
                     is MqttConnectionState.Disconnected -> {
-                        _uiState.value = _uiState.value.copy(
-                            isConnected = false,
-                            isPaired = false
-                        )
+                        _uiState.update { it.copy(isConnected = false, isPaired = false) }
                     }
                     is MqttConnectionState.Error -> {
-                        _uiState.value = _uiState.value.copy(
-                            isConnected = false,
-                            isPaired = false,
-                            errorMessage = state.message
-                        )
+                        _uiState.update {
+                            it.copy(isConnected = false, isPaired = false, errorMessage = state.message)
+                        }
                     }
                     else -> {}
                 }
@@ -107,13 +100,13 @@ class MainViewModel @Inject constructor(
     fun generatePairingCode() {
         viewModelScope.launch {
             val code = (secureRandom.nextInt(900_000) + 100_000).toString()
-            _uiState.value = _uiState.value.copy(peerId = code)
+            _uiState.update { it.copy(peerId = code) }
         }
     }
 
     fun pairWithCode(code: String) {
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(peerId = code)
+            _uiState.update { it.copy(peerId = code) }
             
             if (networkStateManager.isCellularConnected()) {
                 authSessionStore.update(
@@ -126,7 +119,7 @@ class MainViewModel @Inject constructor(
                 )
             } else {
                 _uiState.value = _uiState.value.copy(
-                    errorMessage = "需要蜂窝网络连接"
+                    errorMessage = AppLocale.getString(context, R.string.error_cellular_required)
                 )
             }
         }
@@ -140,7 +133,7 @@ class MainViewModel @Inject constructor(
                 context.startActivity(prepareIntent)
                 _uiState.value = _uiState.value.copy(
                     isVpnEnabled = false,
-                    errorMessage = "请先授予 VPN 权限后重试"
+                    errorMessage = AppLocale.getString(context, R.string.error_vpn_permission_required)
                 )
                 return
             }

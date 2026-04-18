@@ -26,7 +26,7 @@
 - **建议修复**: 添加构建时Lint静态检查或Gradle插件验证，确保release构建配置中`MQTT_TRUST_ALL_CERTS=false`
 
 ### C4: SOCKS5代理JSON注入风险 [待修复]
-- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **状态**: 待修复
 - **位置**: `server/socks5-proxy/main.go` (L140)
 - **问题描述**: 使用 `fmt.Sprintf` 直接拼接JSON字符串，如果 `deviceID` 或 `token` 包含特殊字符（如 `"`、换行符等），会导致JSON格式错误或注入攻击
 - **风险**: Critical。可能导致API请求格式错误，或在极端情况下存在注入风险
@@ -44,7 +44,6 @@
   }
   req, err := http.NewRequest("POST", u.String(), bytes.NewReader(reqBodyBytes))
   ```
-- **验证方式**: 代码审查
 
 ### C5: API服务updatePairingSessionDB错误被忽略 [已修复]
 - **状态**: 已修复（2026-04-16 Kimi-K2.5）
@@ -99,7 +98,7 @@
 - **相关提交**: 修复API服务updatePairingSessionDB错误处理不一致问题
 
 ### C6: API服务generateRandomString错误处理缺失 [已修复]
-- **状态**: 已修复（2026-04-16 Kimi-K2.5）
+- **状态**: 已修复
 - **位置**: `server/api/main.go` (L265)
 - **问题描述**: `generateRandomString`函数中`rand.Read(b)`的错误被忽略。虽然该函数已被标记为Deprecated，但在极端情况下（如系统熵池耗尽），可能产生不安全的随机数。
 - **修复方案**: 采用方案2 - 删除废弃函数
@@ -163,7 +162,7 @@
   3. 添加构建时检查确保配置正确
 
 ### S1: SOCKS5代理relay函数goroutine泄漏 [已修复]
-- **状态**: 已修复（2026-04-17 GPT-5.3-Codex）
+- **状态**: 已修复
 - **位置**: `server/socks5-proxy/main.go` (`relay`)
 - **修复内容**:
   1. `relay` 改为等待两个方向的转发 goroutine 都退出后再返回
@@ -216,7 +215,7 @@
   ```
 
 ### H21: API服务登录限流器内存泄漏 [待修复]
-- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **状态**: 待修复
 - **位置**: `server/api/main.go` (L71-72)
 - **问题描述**: `loginAttempts` 映射表没有定期清理机制。如果攻击者使用大量不同IP进行尝试，可能导致内存无限增长
 - **风险**: 高。潜在的DoS攻击向量，可能导致服务OOM
@@ -242,7 +241,7 @@
   ```
 
 ### H22: SOCKS5代理WebSocket读取无超时 [已修复]
-- **状态**: 已修复（2026-04-17 GPT-5.3-Codex）
+- **状态**: 已修复
 - **位置**: `server/socks5-proxy/main.go` (`readLoop`)
 - **修复内容**:
   1. 在 `readLoop` 中增加 `SetReadDeadline`（初始与每次循环刷新）
@@ -255,13 +254,13 @@
   - 注：`readLoop` 超时分支专项回归测试待补充
 
 ### H23: SOCKS5代理StreamConn双重锁嵌套 [已修复]
-- **状态**: 已修复（2026-04-17 GPT-5.3-Codex, Kimi-K2.5）
+- **状态**: 已修复
 - **位置**: `server/socks5-proxy/main.go` (`StreamConn.Write`, `StreamConn.Close`, `ConnectThroughTunnel`)
 - **修复内容**:
   1. `StreamConn.Write` 不再在持有 `s.mu` 时执行网络写操作
   2. 先在 `s.mu` 内复制连接/锁引用后释放，再进入写锁与 IO，降低锁嵌套风险
   3. 为 `Write` 与 `Close` 的 websocket 写入增加 `SetWriteDeadline`，避免锁持有期间无限阻塞
-  4. **修复锁释放问题（2026-04-17 Kimi-K2.5）**: 使用 `defer` 确保 `writeMu` 在 panic 时也能释放，避免死锁
+  4. **修复锁释放问题**: 使用 `defer` 确保 `writeMu` 在 panic 时也能释放，避免死锁
 - **验证结果**:
   - 在 `server/socks5-proxy` 目录执行：`go test ./...` 通过
   - 在 `server/socks5-proxy` 目录执行：`go test -race ./...` 通过（前置：Windows 下已安装并配置 gcc）
@@ -269,7 +268,7 @@
   - 注：`StreamConn.Write/Close` 并发竞争专项回归测试待补充
 
 ### H24: Tunnel服务CheckOrigin允许所有来源 [待修复]
-- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **状态**: 待修复
 - **位置**: `server/tunnel/main.go` (L222-225)
 - **问题描述**: `CheckOrigin` 返回 `true` 允许所有来源，可能导致CSRF攻击
 - **风险**: 高。WebSocket连接可能被恶意网站利用
@@ -297,7 +296,7 @@
   ```
 
 ### H25: Tunnel服务心跳检测竞态条件 [待修复]
-- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **状态**: 待修复
 - **位置**: `server/tunnel/main.go` (L336-359)
 - **问题描述**: `tunnel.Conn` 可能在 `WriteControl` 调用期间被其他goroutine设置为 `nil` 或关闭，导致panic
 - **风险**: 中-高。可能导致服务panic崩溃
@@ -312,9 +311,77 @@
   ```
 - **建议修复**: 在调用前检查并加锁保护
 
+### H26: Android 13+ 语言状态双数据源导致回显不一致 [已修复]
+- **状态**: 已修复
+- **位置**:
+  - `android/app/src/main/java/com/netproxy/gateway/i18n/AppLocale.kt` (`applyLanguage`, `getSelectedLanguageTag`, `wrap`)
+  - `android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt` (`LanguageSettingsCard`)
+- **问题描述**: Android 13+ 分支使用 `AppCompatDelegate.setApplicationLocales()` 切换语言，但最初未同步写入 SharedPreferences，导致设置页回显与实际语言可能不一致。
+- **修复方案**:
+  1. `AppLocale.applyLanguage()` 中统一先归一化并持久化 language tag，再执行平台分支逻辑
+  2. Android 13+ 与低版本统一通过 `getSelectedLanguageTag()` 回读同一状态源
+  3. 新增 `AppLocaleTest` 验证 Android 13+/低版本下持久化与回读一致
+- **验证结果**:
+  - `:app:testDebugUnitTest --tests com.netproxy.gateway.i18n.AppLocaleTest` 通过
+  - `:app:testDebugUnitTest` 全量通过
+  - `assembleDebug` 通过
+
+### H27: 运行中前台服务通知不随语言切换即时刷新 [已修复]
+- **状态**: 已修复
+- **位置**:
+  - `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt`
+  - `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyService.kt`
+  - `android/app/src/main/java/com/netproxy/gateway/i18n/AppLocale.kt`
+- **问题描述**: 当前语言切换主要触发 Activity 层更新；运行中的前台服务通知文案在服务启动时创建后未主动刷新，导致 UI 语言切换后通知仍显示旧语言。
+- **修复方案**:
+  1. 在 `AppLocale` 中添加语言变更回调机制：`registerLanguageChangeListener(listenerId, ...)` 和 `unregisterLanguageChangeListener(listenerId)`
+  2. 在 `applyLanguage()` 执行后触发回调，通知所有监听者语言已变更
+  3. `VpnService.onCreate()` 中注册监听，收到回调时调用 `updateNotification()` 刷新前台通知
+  4. `Socks5ProxyService.onCreate()` 中注册监听，收到回调时刷新前台通知
+  5. 两个服务的 `onDestroy()` 中按 listenerId 注销监听，确保资源正确释放
+  6. 仅在服务 RUNNING 状态时刷新通知，避免启动/停止过程中的不必要操作
+  7. 通知文案改为 `AppLocale.getString(...)` 动态读取，避免依赖旧 Service Context locale
+  8. 回调派发增加异常隔离，单个监听器异常不会中断其他监听器与主流程
+- **代码改动**:
+  - `AppLocale.kt`: 添加多监听器管理与异常隔离；`applyLanguage()` 末尾触发回调
+  - `VpnService.kt`: `onCreate()` 注册监听、添加 `registerLanguageChangeListener()`、`unregisterLanguageChangeListener()`、`updateNotification()` 方法、`onDestroy()` 注销监听
+  - `Socks5ProxyService.kt`: `onCreate()` 注册监听、添加 `registerLanguageChangeListener()`、`updateNotification()` 方法、`onDestroy()` 注销监听
+- **验证结果**:
+  - 单元测试：329/329 通过（新增 2 个回调测试）
+  - APK 构建：BUILD SUCCESSFUL
+  - 修复风险：低。使用简单回调机制，最小改动，避免复杂的事件总线或观察者模式
+
 ---
 
 ## Medium
+
+### M21: i18n关键路径测试覆盖不足 [已修复]
+- **状态**: 已修复
+- **位置**:
+  - `android/app/src/main/java/com/netproxy/gateway/i18n/AppLocale.kt`
+  - `android/app/src/test/java/com/netproxy/gateway/i18n/AppLocaleTest.kt`
+- **问题描述**: 新增测试主要覆盖 ViewModel 的文案读取，缺少语言切换关键路径测试（tag 正规化、多次切换、服务通知刷新链路）。
+- **修复方案**:
+  1. 增加 `AppLocale` 单元测试覆盖关键路径：
+     - `normalizeLanguageTag_rejectedUnsupportedTag()`: 验证非支持语言被正规化为 null
+     - `normalizeLanguageTag_trimsWhitespaceAndNormalizes()`: 验证空格清理和正规化
+     - `normalizeLanguageTag_emptyStringBecomesNull()`: 验证空字符串处理
+     - `multipleSwitches_sequentialCalls_persists()`: 验证多次切换持久化（关键路径）
+     - `setSelectedLanguageTag_directCall_persists()`: 验证直接调用持久化
+     - `wrap_withoutLanguageTag_returnsOriginalContext()`: 验证无设置时返回原始 context
+     - `wrap_withValidLanguageTag_wrapsContext()`: 验证有效语言标签时包装 context
+     - `languageChangeCallback_triggersOnApplyLanguage()`: 验证语言变更触发回调（H27 关键链路）
+    - `languageChangeCallback_multipleCallbacks()`: 验证多次切换多次触发回调
+    - `languageChangeCallback_multipleListeners_allReceiveEvents()`: 验证多监听器并存时都能收到事件
+    - `languageChangeCallback_oneListenerThrows_othersStillRun()`: 验证单监听器异常不影响其他监听器
+    - `wrap_usesLatestPreferenceWithoutContextRecreation()`: 验证语言偏好更新后 wrap 可读取最新 locale（不依赖 Context 重建）
+  2. 覆盖 normalization、persistence、wrap 和回调机制的所有关键分支
+- **代码改动**:
+  - `AppLocaleTest.kt`: 扩展关键路径测试到 15 个测试方法，覆盖回调、多监听器、异常隔离与 locale wrap 场景
+- **验证结果**:
+  - 单元测试：329/329 通过（新增 8 个测试）
+  - 覆盖率：所有关键路径都有对应测试，包括 Android 13+ 和低版本分支
+  - 测试质量：使用 TDD 方式编写，先失败后通过，确保测试有效性
 
 ### M1: 边界条件：IP地址解析验证
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/utils/IpAddressUtils.kt` (L6-L18)
@@ -581,9 +648,8 @@
   }
   ```
 
-### H10: VpnService stopVpn() 竞态条件 [已验证确认]
-- **状态**: 待修复（2026-04-11 Subagents深度验证确认）
-- **验证方式**: Logic Analyzer Agent 代码审查
+### H10: VpnService stopVpn() 竞态条件
+- **状态**: 待修复
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L930-972)
 - **问题验证**:
   - `isStopping` 原子标志与 `_status` StateFlow 是两个独立的状态源
@@ -638,9 +704,8 @@
   }
   ```
 
-### H11: writeBufferPool 线程安全问题 [已验证确认]
+### H11: writeBufferPool 线程安全问题
 - **状态**: 待修复（2026-04-11 Subagents深度验证确认）
-- **验证方式**: Logic Analyzer Agent 代码审查
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L120-122, L619-622)
 - **问题验证**:
   - `getAndIncrement() % writeBufferPool.size` 不是原子操作
@@ -690,9 +755,8 @@
   }
   ```
 
-### H12: activeConnections 复合操作非原子 [已验证确认]
-- **状态**: 待修复（2026-04-11 Subagents深度验证确认）
-- **验证方式**: Logic Analyzer Agent 代码审查
+### H12: activeConnections 复合操作非原子
+- **状态**: 待修复
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L426-427, L467, L429-432, L470)
 - **问题验证**:
   - 虽然使用 `ConcurrentHashMap`，但"检查-获取-更新"模式不是原子的
@@ -739,9 +803,8 @@
   }
   ```
 
-### H13: constructReturnPacket 潜在数组越界 [已验证确认]
-- **状态**: 待修复（2026-04-11 Subagents深度验证确认）
-- **验证方式**: Logic Analyzer Agent 代码审查
+### H13: constructReturnPacket 潜在数组越界
+- **状态**: 待修复
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L628-687)
 - **问题验证**:
   - 未验证 `buffer` 的大小是否足够容纳 `totalLen`
@@ -798,7 +861,7 @@
 ## Medium Severity
 
 ### M16: API服务敏感信息可能泄露 [待修复]
-- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **状态**: 待修复
 - **位置**: `server/api/main.go` (L546, L628, L701, L743, L818, L853 等)
 - **问题描述**: 多处使用 `c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})` 直接返回错误信息。虽然数据库错误已包装为通用消息，但请求绑定错误等仍可能包含敏感字段名或内部信息
 - **风险**: 中。可能泄露API内部结构信息，帮助攻击者进行针对性攻击
@@ -845,7 +908,7 @@
 ## Low Severity
 
 ### L8: SOCKS5代理流ID生成可预测性 [待修复]
-- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **状态**: 待修复
 - **位置**: `server/socks5-proxy/main.go` (L689)
 - **问题描述**: 流ID使用 `fmt.Sprintf("%s-%d", deviceID, time.Now().UnixNano())` 生成，依赖时间戳纳秒。虽然不存在模运算分布问题，但时间戳可预测，流ID生成逻辑可被推测
 - **风险**: 低。流ID可预测性增加，可能被用于会话固定攻击
@@ -857,7 +920,7 @@
 - **建议修复**: 使用 `crypto/rand` 生成随机字符串替代时间戳
 
 ### L9: SOCKS5代理StreamConn DataChan可能阻塞 [待修复]
-- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **状态**: 待修复
 - **位置**: `server/socks5-proxy/main.go` (L320, L654-657)
 - **问题描述**: 如果 `DataChan` 已满且 `CloseChan` 未关闭，数据发送会阻塞或丢弃
 - **风险**: 低。可能导致数据丢失或延迟
@@ -889,7 +952,7 @@
 - **建议修复**: 统一使用SLF4J日志框架，移除所有Android原生Log的使用
 
 ### L12: IP地址脱敏不充分可能泄露网络拓扑 [待修复]
-- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **状态**: 待修复
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L793-807)
 - **问题描述**: `redactIp()`方法对内网IP(192.168.x.x)只脱敏后两段，仍可能暴露网络拓扑信息
 - **风险**: 低。日志中可能泄露内网网络结构
@@ -907,7 +970,7 @@
 
 ---
 
-## 新增问题（2026-04-15 Subagents交叉审查发现）
+## 新增问题（待分类）
 
 ### N16: 空catch块掩盖异常信息 [待修复]
 - **状态**: 待修复（2026-04-15 Subagents代码审查发现）
@@ -942,3 +1005,67 @@
   }
   ```
 - **建议修复**: 更新注释，说明实际使用的是`protect()`方法及其局限性
+
+---
+
+## 新增问题（2026-04-18 Subagents交叉审查发现）
+
+### N20: writeBufferPool整数溢出导致数组越界
+- **状态**: 待修复（2026-04-18 Subagents交叉审查发现）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` L629-631
+- **问题**: `AtomicInteger.getAndIncrement()`在Int.MAX_VALUE次调用后溢出为负数，取模后产生负数索引
+- **风险**: Critical。应用长时间运行后必然崩溃（约2^31次调用后）
+- **代码示例**:
+  ```kotlin
+  private fun getWriteBuffer(): ByteArray {
+      val index = writeBufferIndex.getAndIncrement() % writeBufferPool.size  // 溢出后index为负数！
+      return writeBufferPool[index]  // ArrayIndexOutOfBoundsException
+  }
+  ```
+- **建议修复**: 使用ThreadLocal替代轮询，或添加溢出处理
+- **关联问题**: H11的子问题
+
+### N21: 配对码输入状态配置变更丢失
+- **状态**: 已修复（2026-04-18）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt` L107
+- **问题**: 使用`remember`而非`rememberSaveable`保存配对码输入状态
+- **风险**: High。屏幕旋转时丢失用户输入
+- **引入来源**: 本次Compose UI变更引入
+- **修复**: 将`remember`改为`rememberSaveable`
+
+### N22: MainViewModel状态更新竞争条件
+- **状态**: 已修复（2026-04-18）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` L66-75
+- **问题**: 两次独立的`_uiState.value`更新之间存在竞态窗口
+- **风险**: High。UI状态可能不一致
+- **引入来源**: 本次ViewModel变更引入
+- **修复**: 使用`_uiState.update{}`原子操作合并为一次更新
+
+### N23: 测试直接实例化Android Service
+- **状态**: 已修复（2026-04-18）
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/proxy/Socks5ProxyServiceTest.kt` L11,18,28
+- **问题**: 直接实例化`Socks5ProxyService()`违反Android组件生命周期
+- **风险**: Medium。测试不可靠
+- **引入来源**: 本次测试代码变更引入
+- **修复**: 使用Robolectric的`ServiceController`正确创建Service
+
+### N24: Socks5ProxyService通知ID使用魔法数字
+- **状态**: 已修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyService.kt` L81,189
+- **问题**: 通知ID使用硬编码魔法数字`1`，可读性和可维护性差
+- **风险**: Low。代码风格问题
+- **修复**: 提取为命名常量`NOTIFICATION_ID`
+
+### N25: MainViewModel状态更新方式不一致
+- **状态**: 已修复（2026-04-18 Subagents评估后修复）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` L84,90,96,111,117
+- **问题**: 混合使用`_uiState.value = `和`_uiState.update{}`，风格不一致
+- **风险**: Low。单协程作用域内无实际竞态，但防范未来隐患
+- **修复**: 统一使用`_uiState.update{}`
+
+### N26: Service语言监听器残留风险
+- **状态**: 已修复
+- **位置**: `VpnService.kt`/`Socks5ProxyService.kt` 的`onCreate()`
+- **问题**: 系统强制杀Service后监听器可能残留在单例map中
+- **风险**: Low。影响小，最多2个监听器残留
+- **修复**: 在`onCreate()`中先执行防御性`unregister`再`register`

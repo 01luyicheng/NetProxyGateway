@@ -81,6 +81,12 @@ android {
         buildConfig = true
     }
 
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
+    }
+
     lint {
         disable += "ObsoleteLintCustomCheck"
         abortOnError = false
@@ -115,6 +121,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.10.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
     implementation("androidx.activity:activity-compose:1.12.4")
+    implementation("androidx.appcompat:appcompat:1.7.0")
 
     implementation(platform("androidx.compose:compose-bom:2026.03.01"))
     implementation("androidx.compose.ui:ui")
@@ -137,7 +144,10 @@ dependencies {
     implementation("androidx.security:security-crypto:1.1.0")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("androidx.test:core:1.7.0")
+    testImplementation("com.google.dagger:hilt-android-testing:2.58")
     testImplementation("io.mockk:mockk:1.14.9")
+    testImplementation("org.robolectric:robolectric:4.16")
     testImplementation("io.netty:netty-transport:4.2.12.Final")
     testImplementation("io.netty:netty-handler:4.2.12.Final")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
