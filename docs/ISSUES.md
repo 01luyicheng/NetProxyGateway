@@ -46,7 +46,7 @@
   ```
 
 ### C5: API服务updatePairingSessionDB错误被忽略 [已修复]
-- **状态**: 已修复（2026-04-16 Kimi-K2.5）
+- **状态**: 已修复
 - **位置**: `server/api/main.go` (L688, L735)
 - **问题描述**: 在`getPairingSession`和`updatePairingSession`函数中，更新session状态为"expired"时，`s.updatePairingSessionDB(session)`的错误被忽略。如果数据库写入失败，session状态可能不一致
 - **风险**: Medium。数据库写入失败时状态不一致，可能导致过期session仍被视为有效
@@ -175,7 +175,7 @@
 - **相关测试**: `server/socks5-proxy/main_test.go` 新增 `TestRelay_ClosesPeerConnectionOnHalfClose`
 
 ### H20: API服务JWT令牌验证不完善 [待修复]
-- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **状态**: 待修复
 - **位置**: `server/api/main.go` (L528-537)
 - **问题描述**: JWT解析后未明确验证 `exp`（过期时间）、`iat`（签发时间）、`nbf`（生效时间）等声明。虽然 `jwt.Parse` 默认会验证 `exp`，但代码没有明确检查验证失败的具体原因，可能混淆不同类型的认证错误
 - **风险**: 高。无法区分令牌过期、无效签名、格式错误等不同错误类型，不利于调试和安全审计
@@ -705,7 +705,7 @@
   ```
 
 ### H11: writeBufferPool 线程安全问题
-- **状态**: 待修复（2026-04-11 Subagents深度验证确认）
+- **状态**: 待修复
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L120-122, L619-622)
 - **问题验证**:
   - `getAndIncrement() % writeBufferPool.size` 不是原子操作
@@ -876,28 +876,28 @@
   3. 客户端错误（如验证失败）可返回具体信息，但需脱敏处理
 
 ### M17: API服务配对码生成无限循环风险 [待修复]
-- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **状态**: 待修复
 - **位置**: `server/api/main.go` (L558-564)
 - **问题描述**: 在极端情况下（数据库中已有大量配对码），`generateCode` 循环可能成为无限循环或长时间阻塞
 - **风险**: 中。可能导致服务无响应
 - **建议修复**: 添加最大重试次数限制
 
 ### M18: SOCKS5代理IP过滤器CIDR检查可绕过 [待修复]
-- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **状态**: 待修复
 - **位置**: `server/socks5-proxy/main.go` (L273-297)
 - **问题描述**: IPv6映射的IPv4地址（如 `::ffff:192.168.1.1`）可能无法正确匹配CIDR规则
 - **风险**: 中。可能绕过IP访问控制
 - **建议修复**: 统一将IPv6映射地址转换为IPv4后再匹配
 
 ### M19: Tunnel服务消息处理无速率限制 [待修复]
-- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **状态**: 待修复
 - **位置**: `server/tunnel/main.go` (L390-413)
 - **问题描述**: 没有限制单个连接的消息速率，恶意客户端可能发送大量消息导致DoS
 - **风险**: 中。可能导致服务资源耗尽
 - **建议修复**: 添加基于令牌桶或滑动窗口的速率限制
 
 ### M20: Tunnel服务统计信息端点无认证 [待修复]
-- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **状态**: 待修复
 - **位置**: `server/tunnel/main.go` (L502-512)
 - **问题描述**: `/stats` 端点是公开的，可能泄露敏感信息（在线设备数量）
 - **风险**: 中。信息泄露
@@ -927,14 +927,14 @@
 - **建议修复**: 添加默认分支处理丢弃情况，或增加缓冲区大小并监控
 
 ### L10: Tunnel服务设备状态通知无重试 [待修复]
-- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **状态**: 待修复
 - **位置**: `server/tunnel/main.go` (L146-181)
 - **问题描述**: `notifyDeviceStatus` 通知失败只是记录日志，没有重试机制。如果API服务暂时不可用，设备状态可能不一致
 - **风险**: 低。状态不一致，但可接受
 - **建议修复**: 添加指数退避重试机制
 
 ### L11: 日志框架混用导致输出不一致 [待修复]
-- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **状态**: 待修复
 - **位置**: 
   - `android/app/src/main/java/com/netproxy/gateway/security/SecurityManager.kt` (L88, L93, L100, L107, L118)
   - `android/app/src/main/java/com/netproxy/gateway/NetProxyApp.kt` (L33, L38, L43, L49, L51, L66)
@@ -973,7 +973,7 @@
 ## 新增问题（待分类）
 
 ### N16: 空catch块掩盖异常信息 [待修复]
-- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **状态**: 待修复
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (L60, L299-300)
 - **问题描述**: 多处使用空的catch块完全忽略异常，包括Socket关闭异常和SOCKS5连接创建异常，可能掩盖严重错误
 - **风险**: 中。可能遗漏关键错误信息，导致问题难以排查
@@ -988,7 +988,7 @@
 - **建议修复**: 至少记录异常信息，区分可忽略和不可忽略的错误类型
 
 ### N19: 注释与代码实现不符 [待修复]
-- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **状态**: 待修复
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L371-375)
 - **问题描述**: `forwardViaWifi()`方法注释说明使用`Network.bindSocket()`，但实际代码使用`protect()`方法
 - **风险**: 低。误导开发者，造成理解困难
@@ -1008,10 +1008,10 @@
 
 ---
 
-## 新增问题（2026-04-18 Subagents交叉审查发现）
+## 新增问题
 
 ### N20: writeBufferPool整数溢出导致数组越界
-- **状态**: 待修复（2026-04-18 Subagents交叉审查发现）
+- **状态**: 待修复
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` L629-631
 - **问题**: `AtomicInteger.getAndIncrement()`在Int.MAX_VALUE次调用后溢出为负数，取模后产生负数索引
 - **风险**: Critical。应用长时间运行后必然崩溃（约2^31次调用后）
@@ -1026,7 +1026,7 @@
 - **关联问题**: H11的子问题
 
 ### N21: 配对码输入状态配置变更丢失
-- **状态**: 已修复（2026-04-18）
+- **状态**: 已修复
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt` L107
 - **问题**: 使用`remember`而非`rememberSaveable`保存配对码输入状态
 - **风险**: High。屏幕旋转时丢失用户输入
@@ -1034,7 +1034,7 @@
 - **修复**: 将`remember`改为`rememberSaveable`
 
 ### N22: MainViewModel状态更新竞争条件
-- **状态**: 已修复（2026-04-18）
+- **状态**: 已修复
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` L66-75
 - **问题**: 两次独立的`_uiState.value`更新之间存在竞态窗口
 - **风险**: High。UI状态可能不一致
@@ -1042,7 +1042,7 @@
 - **修复**: 使用`_uiState.update{}`原子操作合并为一次更新
 
 ### N23: 测试直接实例化Android Service
-- **状态**: 已修复（2026-04-18）
+- **状态**: 已修复
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/proxy/Socks5ProxyServiceTest.kt` L11,18,28
 - **问题**: 直接实例化`Socks5ProxyService()`违反Android组件生命周期
 - **风险**: Medium。测试不可靠
@@ -1057,7 +1057,7 @@
 - **修复**: 提取为命名常量`NOTIFICATION_ID`
 
 ### N25: MainViewModel状态更新方式不一致
-- **状态**: 已修复（2026-04-18 Subagents评估后修复）
+- **状态**: 已修复
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` L84,90,96,111,117
 - **问题**: 混合使用`_uiState.value = `和`_uiState.update{}`，风格不一致
 - **风险**: Low。单协程作用域内无实际竞态，但防范未来隐患
