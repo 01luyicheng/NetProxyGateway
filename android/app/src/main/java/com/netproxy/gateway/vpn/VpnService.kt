@@ -600,6 +600,12 @@ class GatewayVpnService : AndroidVpnService() {
                 if (read > 0) {
                     // 构造回包IP头+TCP头
                     val packetLen = constructReturnPacket(buffer, session, read)
+                    if (packetLen <= 0) {
+                        logger.warn("Drop invalid TCP return packet for ${redactConnectionKey(sessionKey)}")
+                        socks5ConnectionPool?.returnConnection(pooledConn)
+                        activeConnections.remove(sessionKey)
+                        return false
+                    }
                     // 注入TUN
                     injectPacket(buffer, packetLen)
                     session.updateActivity()
@@ -640,7 +646,20 @@ class GatewayVpnService : AndroidVpnService() {
     private fun constructReturnPacket(buffer: ByteArray, session: ConnectionSession, payloadLen: Int): Int {
         val ipHeaderLen = 20
         val tcpHeaderLen = 20
+        if (payloadLen <= 0) {
+            return 0
+        }
+        val maxPayloadLen = buffer.size - ipHeaderLen - tcpHeaderLen
+        if (payloadLen > maxPayloadLen) {
+            return 0
+        }
         val totalLen = ipHeaderLen + tcpHeaderLen + payloadLen
+        if (totalLen > buffer.size) {
+            return 0
+        }
+
+        val srcIpParts = parseIpv4Parts(session.virtualSrcIp) ?: return 0
+        val dstIpParts = parseIpv4Parts(session.srcIp) ?: return 0
         
         // 构造IP头（从虚拟源IP到原始源IP）
         buffer[0] = 0x45 // IPv4, IHL=5
@@ -657,14 +676,12 @@ class GatewayVpnService : AndroidVpnService() {
         buffer[11] = 0
         
         // 源IP（虚拟IP）
-        val srcIpParts = session.virtualSrcIp.split(".").map { it.toInt() }
         buffer[12] = srcIpParts[0].toByte()
         buffer[13] = srcIpParts[1].toByte()
         buffer[14] = srcIpParts[2].toByte()
         buffer[15] = srcIpParts[3].toByte()
         
         // 目标IP（原始源IP）
-        val dstIpParts = session.srcIp.split(".").map { it.toInt() }
         buffer[16] = dstIpParts[0].toByte()
         buffer[17] = dstIpParts[1].toByte()
         buffer[18] = dstIpParts[2].toByte()
@@ -703,6 +720,20 @@ class GatewayVpnService : AndroidVpnService() {
         buffer[37] = (tcpChecksum and 0xFF).toByte()
 
         return totalLen
+    }
+
+    private fun parseIpv4Parts(ip: String): List<Int>? {
+        val parts = ip.split(".")
+        if (parts.size != 4) {
+            return null
+        }
+        return parts.map { part ->
+            val value = part.toIntOrNull() ?: return null
+            if (value !in 0..255) {
+                return null
+            }
+            value
+        }
     }
     
     /**

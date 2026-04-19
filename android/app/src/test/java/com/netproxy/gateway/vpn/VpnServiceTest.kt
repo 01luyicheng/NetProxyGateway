@@ -19,6 +19,8 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.io.ByteArrayInputStream
+import java.io.FileOutputStream
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -1643,7 +1645,175 @@ class VpnServiceTest {
         assertEquals(53, VpnTestUtils.parseDestinationPort(packet, packet.size))
     }
 
+    // ==================== H13 回包健壮性测试 ====================
+
+    @Test
+    fun h13_constructReturnPacket_withOversizedPayload_returnsInvalidLength() {
+        val service = GatewayVpnService()
+        val session = createSessionForReflection(
+            service = service,
+            srcIp = "10.0.0.2",
+            virtualSrcIp = "10.0.0.100",
+            pooledConnection = null
+        )
+        val buffer = ByteArray(64)
+
+        val packetLen = invokeConstructReturnPacket(
+            service = service,
+            session = session,
+            buffer = buffer,
+            payloadLen = 65
+        )
+
+        assertTrue(packetLen <= 0)
+    }
+
+    @Test
+    fun h13_constructReturnPacket_withInvalidIp_returnsInvalidLength() {
+        val service = GatewayVpnService()
+        val buffer = ByteArray(128)
+
+        val invalidVirtualSrcSession = createSessionForReflection(
+            service = service,
+            srcIp = "10.0.0.2",
+            virtualSrcIp = "300.1.1.1",
+            pooledConnection = null
+        )
+        val lenWithInvalidVirtualSrc = invokeConstructReturnPacket(
+            service = service,
+            session = invalidVirtualSrcSession,
+            buffer = buffer,
+            payloadLen = 8
+        )
+        assertTrue(lenWithInvalidVirtualSrc <= 0)
+
+        val invalidSrcSession = createSessionForReflection(
+            service = service,
+            srcIp = "invalid.ip",
+            virtualSrcIp = "10.0.0.100",
+            pooledConnection = null
+        )
+        val lenWithInvalidSrc = invokeConstructReturnPacket(
+            service = service,
+            session = invalidSrcSession,
+            buffer = buffer,
+            payloadLen = 8
+        )
+        assertTrue(lenWithInvalidSrc <= 0)
+    }
+
+    @Test
+    fun h13_processTcpReturn_whenConstructFails_skipsInjectAndCleansSession() {
+        val service = GatewayVpnService()
+        val mockInput = ByteArrayInputStream(byteArrayOf(1, 2, 3, 4))
+        val mockSocket = mockk<Socket>(relaxed = true)
+        every { mockSocket.isClosed } returns false
+        every { mockSocket.isConnected } returns true
+        every { mockSocket.isInputShutdown } returns false
+        every { mockSocket.isOutputShutdown } returns false
+        every { mockSocket.getInputStream() } returns mockInput
+
+        val pooledConnection = PooledSocks5Connection(
+            socket = mockSocket,
+            destinationIp = "192.168.1.1",
+            destinationPort = 443
+        )
+        val session = createSessionForReflection(
+            service = service,
+            srcIp = "10.0.0.2",
+            virtualSrcIp = "bad.ip.value",
+            pooledConnection = pooledConnection
+        )
+
+        val mockPool = mockk<Socks5ConnectionPool>(relaxed = true)
+        setPrivateField(service, "socks5ConnectionPool", mockPool)
+
+        val mockOutput = mockk<FileOutputStream>(relaxed = true)
+        setPrivateField(service, "vpnOutputStream", mockOutput)
+
+        val sessionKey = "10.0.0.2:12345-192.168.1.1:443"
+        val activeConnections = getPrivateField(service, "activeConnections") as ConcurrentHashMap<String, Any>
+        activeConnections[sessionKey] = session
+
+        val result = invokeProcessTcpReturn(service, session, sessionKey)
+
+        assertFalse(result)
+        assertFalse(activeConnections.containsKey(sessionKey))
+        verify(exactly = 1) { mockPool.returnConnection(pooledConnection) }
+        verify(exactly = 0) { mockOutput.write(any<ByteArray>(), any(), any()) }
+    }
+
     // ==================== 帮助方法 ====================
+
+    private fun createSessionForReflection(
+        service: GatewayVpnService,
+        srcIp: String,
+        virtualSrcIp: String,
+        pooledConnection: PooledSocks5Connection?
+    ): Any {
+        val sessionClass = getSessionClass(service)
+        val constructor = sessionClass.declaredConstructors.first { it.parameterTypes.size == 9 }
+        constructor.isAccessible = true
+        return constructor.newInstance(
+            srcIp,
+            12345,
+            "192.168.1.1",
+            443,
+            6,
+            pooledConnection,
+            virtualSrcIp,
+            System.currentTimeMillis(),
+            System.currentTimeMillis()
+        )
+    }
+
+    private fun invokeConstructReturnPacket(
+        service: GatewayVpnService,
+        session: Any,
+        buffer: ByteArray,
+        payloadLen: Int
+    ): Int {
+        val sessionClass = getSessionClass(service)
+        val method = service.javaClass.getDeclaredMethod(
+            "constructReturnPacket",
+            ByteArray::class.java,
+            sessionClass,
+            Int::class.javaPrimitiveType
+        )
+        method.isAccessible = true
+        return method.invoke(service, buffer, session, payloadLen) as Int
+    }
+
+    private fun invokeProcessTcpReturn(
+        service: GatewayVpnService,
+        session: Any,
+        sessionKey: String
+    ): Boolean {
+        val sessionClass = getSessionClass(service)
+        val method = service.javaClass.getDeclaredMethod(
+            "processTcpReturn",
+            sessionClass,
+            String::class.java
+        )
+        method.isAccessible = true
+        return method.invoke(service, session, sessionKey) as Boolean
+    }
+
+    private fun setPrivateField(target: Any, fieldName: String, value: Any?) {
+        val field = target.javaClass.getDeclaredField(fieldName)
+        field.isAccessible = true
+        field.set(target, value)
+    }
+
+    private fun getPrivateField(target: Any, fieldName: String): Any {
+        val field = target.javaClass.getDeclaredField(fieldName)
+        field.isAccessible = true
+        return field.get(target)
+    }
+
+    private fun getSessionClass(service: GatewayVpnService): Class<*> {
+        return service.javaClass.declaredClasses.first { it.simpleName == "ConnectionSession" }
+    }
 
     /**
      * IP 脱敏（从 VpnService 复制用于测试）

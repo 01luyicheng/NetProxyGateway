@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -111,6 +112,101 @@ func TestAPISessionStoreValidateTokenFailsClosedOnAPIFailure(t *testing.T) {
 	}
 	if valid {
 		t.Fatal("expected token to be rejected when API validation fails")
+	}
+}
+
+func TestAPISessionStoreValidateTokenSendsValidJSONForSpecialCharacters(t *testing.T) {
+	deviceID := "device-\"A\"\\B\nC"
+	token := "token-\"x\"\\y\nline"
+
+	type requestBody struct {
+		DeviceID string `json:"device_id"`
+		Token    string `json:"token"`
+	}
+
+	var got requestBody
+	var pathCheckErr string
+	var pathCheckMu sync.Mutex
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/session/validate" {
+			pathCheckMu.Lock()
+			pathCheckErr = "unexpected path: " + r.URL.Path
+			pathCheckMu.Unlock()
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		defer r.Body.Close()
+
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		_, _ = io.WriteString(w, `{"valid":true}`)
+	}))
+	defer apiServer.Close()
+
+	store := NewAPISessionStore(apiServer.URL, "")
+	valid, err := store.ValidateToken(deviceID, token)
+	if err != nil {
+		t.Fatalf("expected validation to succeed with special characters, got error: %v", err)
+	}
+	if !valid {
+		t.Fatal("expected validation result to be true")
+	}
+
+	pathCheckMu.Lock()
+	defer pathCheckMu.Unlock()
+	if pathCheckErr != "" {
+		t.Fatal(pathCheckErr)
+	}
+
+	if got.DeviceID != deviceID {
+		t.Fatalf("deviceID changed during JSON encoding, got %q want %q", got.DeviceID, deviceID)
+	}
+	if got.Token != token {
+		t.Fatalf("token changed during JSON encoding, got %q want %q", got.Token, token)
+	}
+}
+
+func TestAPISessionStoreValidateTokenPreservesDeviceIDAndToken(t *testing.T) {
+	deviceID := strings.Repeat("dev-01", 128)
+	token := strings.Repeat("token-ABC123", 256)
+
+	type requestBody struct {
+		DeviceID string `json:"device_id"`
+		Token    string `json:"token"`
+	}
+
+	var got requestBody
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		_, _ = io.WriteString(w, `{"valid":true}`)
+	}))
+	defer apiServer.Close()
+
+	store := NewAPISessionStore(apiServer.URL, "")
+	valid, err := store.ValidateToken(deviceID, token)
+	if err != nil {
+		t.Fatalf("expected validation to succeed, got error: %v", err)
+	}
+	if !valid {
+		t.Fatal("expected validation result to be true")
+	}
+
+	if got.DeviceID != deviceID {
+		t.Fatalf("deviceID should be passed through unchanged, got length %d want %d", len(got.DeviceID), len(deviceID))
+	}
+	if got.Token != token {
+		t.Fatalf("token should be passed through unchanged, got length %d want %d", len(got.Token), len(token))
 	}
 }
 

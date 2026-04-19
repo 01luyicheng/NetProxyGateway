@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"bufio"
 	"crypto/tls"
 	"encoding/json"
@@ -84,13 +85,25 @@ func (s *APISessionStore) ValidateToken(deviceID, token string) (bool, error) {
 func (s *APISessionStore) validateWithAPI(deviceID, token string) (bool, error) {
 	u, err := url.Parse(s.apiEndpoint + "/api/session/validate")
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("failed to parse validate API endpoint: %w", err)
 	}
 
-	reqBody := fmt.Sprintf(`{"device_id":"%s","token":"%s"}`, deviceID, token)
-	req, err := http.NewRequest("POST", u.String(), strings.NewReader(reqBody))
+	type validateRequestBody struct {
+		DeviceID string `json:"device_id"`
+		Token    string `json:"token"`
+	}
+
+	reqBody, err := json.Marshal(validateRequestBody{
+		DeviceID: deviceID,
+		Token:    token,
+	})
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("failed to encode validate API request body: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", u.String(), bytes.NewReader(reqBody))
+	if err != nil {
+		return false, fmt.Errorf("failed to create validate API request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if s.internalAPIKey != "" {
@@ -99,7 +112,7 @@ func (s *APISessionStore) validateWithAPI(deviceID, token string) (bool, error) 
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("failed to send validate API request: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -111,7 +124,7 @@ func (s *APISessionStore) validateWithAPI(deviceID, token string) (bool, error) 
 		Valid bool `json:"valid"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return false, err
+		return false, fmt.Errorf("failed to decode validate API response: %w", err)
 	}
 
 	return result.Valid, nil

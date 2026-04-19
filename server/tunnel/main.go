@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +23,8 @@ type Config struct {
 	Addr              string
 	APIEndpoint       string
 	InternalAPIKey    string
+	StatsToken        string
+	AllowedOrigins    map[string]struct{}
 	TLSCert           string
 	TLSKey            string
 	EnableTLS         bool
@@ -216,18 +222,102 @@ type Server struct {
 
 // NewServer 创建服务器
 func NewServer(config *Config) *Server {
-	return &Server{
+	server := &Server{
 		manager: NewTunnelManager(config),
-		upgrader: websocket.Upgrader{
-			CheckOrigin: func(r *http.Request) bool {
-				// 在生产环境中应该检查来源
-				return true
-			},
-			ReadBufferSize:  64 * 1024,
-			WriteBufferSize: 64 * 1024,
-		},
-		config: config,
+		config:  config,
 	}
+
+	server.upgrader = websocket.Upgrader{
+		CheckOrigin:     server.checkOrigin,
+		ReadBufferSize:  64 * 1024,
+		WriteBufferSize: 64 * 1024,
+	}
+
+	return server
+}
+
+func (s *Server) checkOrigin(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		if s == nil || s.config == nil {
+			return true
+		}
+		return len(s.config.AllowedOrigins) == 0
+	}
+
+	normalizedOrigin, host, err := normalizeOrigin(origin)
+	if err != nil {
+		return false
+	}
+
+	if isLocalhostHost(host) {
+		return true
+	}
+
+	if s == nil || s.config == nil || len(s.config.AllowedOrigins) == 0 {
+		return false
+	}
+
+	_, allowed := s.config.AllowedOrigins[normalizedOrigin]
+	return allowed
+}
+
+func isLocalhostHost(host string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if parsedHost, _, err := net.SplitHostPort(h); err == nil {
+		h = parsedHost
+	}
+	h = strings.Trim(h, "[]")
+
+	if h == "localhost" || h == "127.0.0.1" || h == "::1" {
+		return true
+	}
+
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
+}
+
+func normalizeOrigin(origin string) (string, string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(origin))
+	if err != nil {
+		return "", "", err
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return "", "", fmt.Errorf("origin must include scheme and host")
+	}
+
+	scheme := strings.ToLower(parsed.Scheme)
+	hostname := strings.ToLower(parsed.Hostname())
+	if hostname == "" {
+		return "", "", fmt.Errorf("origin host is empty")
+	}
+
+	port := parsed.Port()
+	normalizedHost := hostname
+	if port != "" && !((scheme == "http" && port == "80") || (scheme == "https" && port == "443")) {
+		normalizedHost = net.JoinHostPort(hostname, port)
+	}
+
+	return scheme + "://" + normalizedHost, hostname, nil
+}
+
+func parseAllowedOrigins(raw string) map[string]struct{} {
+	allowedOrigins := make(map[string]struct{})
+	for _, item := range strings.Split(raw, ",") {
+		origin := strings.TrimSpace(item)
+		if origin == "" {
+			continue
+		}
+
+		normalizedOrigin, _, err := normalizeOrigin(origin)
+		if err != nil {
+			log.Printf("Warning: ignoring invalid allowed origin %q: %v", origin, err)
+			continue
+		}
+
+		allowedOrigins[normalizedOrigin] = struct{}{}
+	}
+	return allowedOrigins
 }
 
 // handleTunnel WebSocket连接处理
@@ -498,8 +588,30 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) authorizeStats(r *http.Request) bool {
+	expectedToken := ""
+	if s != nil && s.config != nil {
+		expectedToken = strings.TrimSpace(s.config.StatsToken)
+	}
+
+	if expectedToken != "" {
+		receivedToken := strings.TrimSpace(r.Header.Get("X-Stats-Token"))
+		if receivedToken == "" {
+			return false
+		}
+		return subtle.ConstantTimeCompare([]byte(receivedToken), []byte(expectedToken)) == 1
+	}
+
+	return false
+}
+
 // handleStats 统计信息
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeStats(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	s.manager.mu.RLock()
 	count := len(s.manager.tunnels)
 	s.manager.mu.RUnlock()
@@ -553,6 +665,8 @@ func main() {
 	// 解析命令行参数
 	addr := flag.String("addr", "0.0.0.0:8443", "Server address")
 	apiEndpoint := flag.String("api", "http://localhost:8080", "API endpoint URL")
+	statsTokenFlag := flag.String("stats-token", "", "Token required for all /stats requests when configured")
+	allowedOriginsFlag := flag.String("allowed-origins", "", "Comma-separated allowed origins for WebSocket upgrades")
 	tlsCert := flag.String("tls-cert", "", "TLS certificate file")
 	tlsKey := flag.String("tls-key", "", "TLS key file")
 	heartbeatInterval := flag.Duration("heartbeat-interval", 30*time.Second, "Heartbeat interval")
@@ -570,6 +684,8 @@ func main() {
 	if internalAPIKey == "" {
 		log.Fatalf("FATAL: INTERNAL_API_KEY environment variable is not set. Please configure an internal API key before starting the server.")
 	}
+	allowedOriginsRaw := firstNonEmpty(os.Getenv("TUNNEL_ALLOWED_ORIGINS"), *allowedOriginsFlag)
+	statsToken := firstNonEmpty(os.Getenv("TUNNEL_STATS_TOKEN"), *statsTokenFlag)
 
 	// 读取TLS配置（环境变量优先）
 	envEnableTLS := os.Getenv("ENABLE_TLS")
@@ -612,6 +728,8 @@ func main() {
 		Addr:              *addr,
 		APIEndpoint:       *apiEndpoint,
 		InternalAPIKey:    internalAPIKey,
+		StatsToken:        statsToken,
+		AllowedOrigins:    parseAllowedOrigins(allowedOriginsRaw),
 		EnableTLS:         enableTLS,
 		TLSCert:           finalTLSCert,
 		TLSKey:            finalTLSKey,

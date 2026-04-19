@@ -25,25 +25,19 @@
   ```
 - **建议修复**: 添加构建时Lint静态检查或Gradle插件验证，确保release构建配置中`MQTT_TRUST_ALL_CERTS=false`
 
-### C4: SOCKS5代理JSON注入风险 [待修复]
-- **状态**: 待修复
-- **位置**: `server/socks5-proxy/main.go` (L140)
-- **问题描述**: 使用 `fmt.Sprintf` 直接拼接JSON字符串，如果 `deviceID` 或 `token` 包含特殊字符（如 `"`、换行符等），会导致JSON格式错误或注入攻击
-- **风险**: Critical。可能导致API请求格式错误，或在极端情况下存在注入风险
-- **代码**:
-  ```go
-  // L140: 问题代码
-  reqBody := fmt.Sprintf(`{"device_id":"%s","token":"%s"}`, deviceID, token)
-  ```
-- **建议修复**:
-  ```go
-  payload := map[string]string{"device_id": deviceID, "token": token}
-  reqBodyBytes, err := json.Marshal(payload)
-  if err != nil {
-      return false, fmt.Errorf("failed to marshal request: %w", err)
-  }
-  req, err := http.NewRequest("POST", u.String(), bytes.NewReader(reqBodyBytes))
-  ```
+### C4: SOCKS5代理JSON注入风险 [已修复]
+- **状态**: 已修复
+- **位置**: `server/socks5-proxy/main.go` (L85-L127), `server/socks5-proxy/main_test.go` (L118-L217)
+- **问题描述**: 原实现使用 `fmt.Sprintf` 拼接JSON，请求体在特殊字符场景下可能格式破坏。
+- **修复内容**:
+  1. `validateWithAPI` 改为结构化请求体 + `json.Marshal` 编码。
+  2. 使用 `bytes.NewReader` 构建请求，避免手工字符串拼接。
+  3. 为 URL 解析、请求体编码、请求发送、响应解码增加上下文化错误包装。
+  4. 新增特殊字符与长字符串透传回归测试，覆盖 `"`、`\\`、换行和长字段场景。
+- **验证结果**:
+  - `cd server/socks5-proxy && go test -count=1 ./...` 通过
+  - `cd server/api && go test -count=1 ./...` 通过
+  - `cd server/tunnel && go test -count=1 ./...` 通过
 
 ### C5: API服务updatePairingSessionDB错误被忽略 [已修复]
 - **状态**: 已修复
@@ -267,33 +261,19 @@
   - 在 `server/socks5-proxy` 目录执行：`staticcheck ./...` 通过
   - 注：`StreamConn.Write/Close` 并发竞争专项回归测试待补充
 
-### H24: Tunnel服务CheckOrigin允许所有来源 [待修复]
-- **状态**: 待修复
-- **位置**: `server/tunnel/main.go` (L222-225)
-- **问题描述**: `CheckOrigin` 返回 `true` 允许所有来源，可能导致CSRF攻击
-- **风险**: 高。WebSocket连接可能被恶意网站利用
-- **代码**:
-  ```go
-  // L222-225
-  upgrader: websocket.Upgrader{
-      CheckOrigin: func(r *http.Request) bool {
-          // 在生产环境中应该检查来源
-          return true
-      },
-  ```
-- **建议修复**:
-  ```go
-  CheckOrigin: func(r *http.Request) bool {
-      origin := r.Header.Get("Origin")
-      allowedOrigins := []string{"https://trusted-domain.com", "https://app.example.com"}
-      for _, allowed := range allowedOrigins {
-          if origin == allowed {
-              return true
-          }
-      }
-      return false
-  },
-  ```
+### H24: Tunnel服务CheckOrigin允许所有来源 [已修复]
+- **状态**: 已修复
+- **位置**: `server/tunnel/main.go` (`NewServer`, `checkOrigin`, `parseAllowedOrigins`), `server/tunnel/main_test.go` (`TestCheckOrigin*`)
+- **问题描述**: 旧实现对所有 Origin 放行，存在来源滥用风险。
+- **修复内容**:
+  1. 将 `CheckOrigin` 从固定放行改为 `server.checkOrigin`。
+  2. 默认仅允许空 Origin（非浏览器客户端）与本地来源（localhost/127.0.0.1/::1）。
+  3. 新增白名单配置：`TUNNEL_ALLOWED_ORIGINS`（环境变量）与 `-allowed-origins`（命令行），环境变量优先。
+  4. 未配置白名单时，非本地 Origin 默认拒绝。
+  5. 新增回归测试覆盖未授权拒绝、空 Origin 允许、本地 Origin 允许、白名单允许。
+- **验证结果**:
+  - 在 `server/tunnel` 目录执行：`go test -run "TestCheckOrigin" -count=1 ./...` 通过
+  - 在 `server/tunnel` 目录执行：`go test -count=1 ./...` 通过
 
 ### H25: Tunnel服务心跳检测竞态条件 [待修复]
 - **状态**: 待修复
@@ -803,58 +783,151 @@
   }
   ```
 
-### H13: constructReturnPacket 潜在数组越界
+### H13: constructReturnPacket 潜在数组越界 [已修复]
+- **状态**: 已修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L600-L746), `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt` (L1648-L1825)
+- **问题描述**: 原实现缺少 `payloadLen/totalLen` 上界检查和 IPv4 格式防御性校验，可能触发回包构造崩溃。
+- **修复内容**:
+  1. `constructReturnPacket` 新增 `payloadLen`、`maxPayloadLen`、`totalLen` 边界检查；无效时返回 `0`。
+  2. 新增 `parseIpv4Parts`，使用 `toIntOrNull + 4段 + 0..255` 校验，IP 非法时返回 `0`。
+  3. `processTcpReturn` 在 `packetLen <= 0` 时丢弃该回包，并执行连接归还 + 会话移除，避免异常会话滞留。
+  4. 新增 H13 回归测试，覆盖超大 payload、非法 IP、失败分支不注入与资源回收行为。
+- **验证结果**:
+  - `android/gradlew.bat -p android :app:testDebugUnitTest --tests com.netproxy.gateway.vpn.VpnServiceTest --stacktrace --no-daemon` 通过
+  - `android/gradlew.bat -p android :app:testDebugUnitTest --stacktrace --no-daemon` 通过
+  - `android/gradlew.bat -p android assembleDebug --stacktrace --no-daemon` 通过
+
+### H14: constructReturnPacket 拒绝0长度payload过于严格 [新发现-已验证]
 - **状态**: 待修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L628-687)
-- **问题验证**:
-  - 未验证 `buffer` 的大小是否足够容纳 `totalLen`
-  - `payloadLen` 可能很大（SOCKS5返回大数据块），导致数组越界
-  - `session.virtualSrcIp.split(".")` 假设IP格式正确，可能抛出异常
-- **问题1 - 数组越界**:
-  - writeBufferPool大小为32KB (PACKET_BUFFER_SIZE)
-  - 如果payloadLen > 32728字节，会发生ArrayIndexOutOfBoundsException
-  - 触发条件: SOCKS5代理返回大文件数据、视频流、合并的数据包
-- **问题2 - IP解析异常**:
-  - `virtualSrcIp.split(".")`可能抛出NumberFormatException
-  - `srcIpParts[n]`可能抛出IndexOutOfBoundsException
-  - **IP格式验证缺失**: `split(".")`和`toInt()`没有验证IP格式，非法IP格式可能导致崩溃
-  - 虽然virtualSrcIp由系统生成，但缺乏防御性编程
-- **风险**: 高。可能导致ArrayIndexOutOfBoundsException或NumberFormatException崩溃
-- **代码分析**:
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L650)
+- **问题描述**: H13修复中 `if (payloadLen <= 0) return 0` 检查过于严格。0长度payload是合法的TCP场景（如ACK包、FIN包）。当前实现会丢弃这些正常包。
+- **风险**: 中。可能导致TCP连接异常，ACK包丢失，连接超时。
+- **代码**:
   ```kotlin
-  // L628-649: 问题代码
-  private fun constructReturnPacket(buffer: ByteArray, session: ConnectionSession, payloadLen: Int): Int {
-      val totalLen = 20 + 20 + payloadLen  // 40 + payloadLen
-      // 直接写入buffer[0..totalLen-1]，没有边界检查！
-      buffer[0] = 0x45
-      // ...
-      // L648: 假设IP格式正确，缺少验证
-      val srcIpParts = session.virtualSrcIp.split(".").map { it.toInt() }
-      buffer[12] = srcIpParts[0].toByte()  // 可能越界
+  // L650: 问题代码
+  if (payloadLen <= 0) {
+      return 0
   }
   ```
+- **验证结果** (2026-04-19, Kimi-K2.5):
+  - ✅ 问题真实存在：L649-650 确实包含 `if (payloadLen <= 0) return 0`
+  - ⚠️ 当前调用上下文（processTcpReturn L601 的 `read > 0` 检查）掩盖了此问题，该检查在实际运行中不会触发
+  - 🔴 根本问题是架构缺陷：当前实现完全无法处理TCP控制包（ACK、FIN、RST），固定设置PSH标志，不适合发送纯控制包
+  - 建议修复分两层：短期将 `<=` 改为 `<`；长期实现完整的TCP状态机支持控制包
 - **建议修复**:
   ```kotlin
-  private fun constructReturnPacket(buffer: ByteArray, session: ConnectionSession, payloadLen: Int): Int {
-      val ipHeaderLen = 20
-      val tcpHeaderLen = 20
-      val totalLen = ipHeaderLen + tcpHeaderLen + payloadLen
-      
-      // 添加边界检查
-      if (totalLen > buffer.size) {
-          logger.warn("Payload too large: $payloadLen, buffer size: ${buffer.size}")
-          return -1 // 或截断处理
-      }
-      
-      // 安全的IP解析，添加格式验证
-      val srcIpParts = session.virtualSrcIp.split(".").mapNotNull { it.toIntOrNull() }
-      if (srcIpParts.size != 4 || srcIpParts.any { it !in 0..255 }) {
-          logger.error("Invalid virtual IP format: ${session.virtualSrcIp}")
-          return -1
-      }
-      // ...
+  // 短期修复：仅拒绝负数payload，允许0长度
+  if (payloadLen < 0) {
+      return 0
   }
   ```
+
+### H15: VpnService测试直接实例化Android Service [新发现-已验证]
+- **状态**: 待修复
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt` (L1652, L1673, L1707)
+- **问题描述**: 测试代码直接实例化 `GatewayVpnService()`，违反Android组件生命周期规范。`VpnService`必须通过系统创建并调用`onCreate()`后才能使用。直接实例化可能导致依赖未初始化、Hilt注入失败。
+- **风险**: 高。测试不可靠，与实际运行时不一致，可能产生假阳性/假阴性结果。
+- **代码**:
+  ```kotlin
+  // 问题代码示例（L1652, L1673, L1707）
+  val service = GatewayVpnService()
+  ```
+- **验证结果** (2026-04-19, Kimi-K2.5):
+  - ✅ 问题真实存在：3处直接实例化 GatewayVpnService()
+  - ✅ GatewayVpnService 是 @AndroidEntryPoint 类，有 @Inject lateinit 字段
+  - ⚠️ 当前测试能通过是因为只测试不依赖注入的私有方法，并通过反射手动设置所需字段
+  - 🔴 隐患：如果未来测试访问注入字段（如 authSessionStore），会抛出 UninitializedPropertyAccessException
+  - 对比：项目中 Socks5ProxyServiceTest 正确使用 Robolectric 的 ServiceController
+- **建议修复**: 使用Robolectric的`ServiceController`正确创建和启动Service：
+  ```kotlin
+  @RunWith(RobolectricTestRunner::class)
+  @Config(application = HiltTestApplication::class, sdk = [33])
+  @HiltAndroidTest
+  class VpnServiceTest {
+      @get:Rule
+      val hiltRule = HiltAndroidRule(this)
+      
+      @Before
+      fun setUp() {
+          hiltRule.inject()
+      }
+      
+      @Test
+      fun testExample() {
+          val controller = Robolectric.buildService(GatewayVpnService::class.java)
+          val service = controller.create().get()
+          // 测试代码
+      }
+  }
+  ```
+
+### H16: VpnService测试过度使用反射 [新发现-已验证]
+- **状态**: 待修复
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt` (L1748-1816)
+- **问题描述**: 测试大量使用反射访问私有方法和内部类（`createSessionForReflection`、`invokeConstructReturnPacket`、`invokeProcessTcpReturn`）。代码结构变化会导致测试崩溃，重构时需要同步更新大量反射代码。
+- **风险**: 高。维护困难，重构风险大，可读性差，IDE重构工具无法识别反射引用。
+- **验证结果** (2026-04-19, Kimi-K2.5):
+  - ✅ 问题真实存在：6个反射辅助方法，11次直接反射调用
+  - 反射访问的成员：
+    - 内部类：`ConnectionSession` (private data class)
+    - 私有方法：`constructReturnPacket`, `processTcpReturn`
+    - 私有字段：`socks5ConnectionPool`, `activeConnections`, `vpnOutputStream`
+  - 具体反射方法：
+    - `createSessionForReflection` - 通过反射创建内部类（4次调用）
+    - `invokeConstructReturnPacket` - 反射调用私有方法（3次调用）
+    - `invokeProcessTcpReturn` - 反射调用私有方法（1次调用）
+    - `setPrivateField/getPrivateField` - 反射访问字段（3次调用）
+  - 脆弱性：字符串名称耦合（如 `it.simpleName == "ConnectionSession"`），IDE重构无法识别
+- **建议修复**:
+  1. 将需要测试的逻辑提取为package-private或internal方法
+  2. 使用@VisibleForTesting注解标记
+  3. 或重构代码使其更易测试（依赖注入替代内部状态访问）
+  4. 示例：
+     ```kotlin
+     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+     internal fun constructReturnPacket(...): Int { ... }
+     ```
+
+### H17: writeBufferPool整数溢出 [新发现-已验证]
+- **状态**: 待修复 (与H13独立)
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L637-639)
+- **问题描述**: `writeBufferIndex.getAndIncrement()`在应用运行约21亿次调用后必然溢出。高流量场景下可能数天至数周内触发。与H13修复的`constructReturnPacket`边界检查是独立问题。
+- **风险**: 高。长时间运行后必崩溃。
+- **代码**:
+  ```kotlin
+  private val writeBufferPool = Array(4) { ByteArray(PACKET_BUFFER_SIZE) }
+  private val writeBufferIndex = AtomicInteger(0)
+  ...
+  private fun getWriteBuffer(): ByteArray {
+      val index = writeBufferIndex.getAndIncrement() % writeBufferPool.size
+      return writeBufferPool[index]
+  }
+  ```
+- **验证结果** (2026-04-19, Kimi-K2.5):
+  - ✅ 问题真实存在：L638 使用 `AtomicInteger.getAndIncrement()` 循环递增
+  - ✅ 数学验证：Int.MAX_VALUE = 2,147,483,647，溢出后变为负数
+  - ✅ 溢出机制：`-1 % 4 = -1`（Kotlin/Java 负数取模），导致 `writeBufferPool[-1]` 越界崩溃
+  - 溢出时间估算：
+    - 轻度使用（10包/秒）：约6.8年
+    - 中度使用（100包/秒）：约248天
+    - 高流量（1,000包/秒）：约24.8天
+    - 极高流量（10,000包/秒）：约2.5天
+  - ⚠️ 与H13完全独立：H13是数组访问边界检查，H17是索引计算溢出
+- **建议修复** (方案对比)：
+  - 方案1（推荐）：使用 `Math.floorMod` 正确处理负数
+    ```kotlin
+    private fun getWriteBuffer(): ByteArray {
+        val index = Math.floorMod(writeBufferIndex.getAndIncrement(), writeBufferPool.size)
+        return writeBufferPool[index]
+    }
+    ```
+  - 方案2：使用 ThreadLocal 彻底避免竞争和溢出问题
+    ```kotlin
+    private val writeBuffer = ThreadLocal<ByteArray>()
+    private fun getWriteBuffer(): ByteArray {
+        return writeBuffer.get() ?: ByteArray(PACKET_BUFFER_SIZE).also { writeBuffer.set(it) }
+    }
+    ```
 
 ---
 
@@ -896,12 +969,20 @@
 - **风险**: 中。可能导致服务资源耗尽
 - **建议修复**: 添加基于令牌桶或滑动窗口的速率限制
 
-### M20: Tunnel服务统计信息端点无认证 [待修复]
-- **状态**: 待修复
-- **位置**: `server/tunnel/main.go` (L502-512)
-- **问题描述**: `/stats` 端点是公开的，可能泄露敏感信息（在线设备数量）
-- **风险**: 中。信息泄露
-- **建议修复**: 添加认证检查或限制为本地访问
+### M20: Tunnel服务统计信息端点无认证 [已修复]
+- **状态**: 已修复
+- **位置**: `server/tunnel/main.go` (`authorizeStats`, `handleStats`, `main`), `server/tunnel/main_test.go` (`TestAuthorizeStats`, `TestHandleStats`)
+- **问题描述**: `/stats` 原先无访问控制，可能泄露在线设备数量等运行信息。
+- **修复内容**:
+  1. 新增 `authorizeStats` 访问控制函数。
+  2. `/stats` 默认拒绝访问，只有在配置了 `TUNNEL_STATS_TOKEN` 后，携带正确 `X-Stats-Token` 的请求才允许访问。
+  3. 移除“本地回环免鉴权”路径，避免反向代理回源造成的认证旁路风险。
+  4. token 比较使用 `subtle.ConstantTimeCompare`，降低时序泄露风险。
+  5. 新增配置：`TUNNEL_STATS_TOKEN`（环境变量）与 `-stats-token`（命令行），环境变量优先。
+  6. 新增回归测试覆盖无 token 拒绝、错误 token 拒绝、正确 token 允许，以及回环/转发头场景在无 token 下拒绝。
+- **验证结果**:
+  - 在 `server/tunnel` 目录执行：`go test -run "TestHandleStats|TestAuthorizeStats" -count=1 ./...` 通过
+  - 在 `server/tunnel` 目录执行：`go test -count=1 ./...` 通过
 
 ---
 
