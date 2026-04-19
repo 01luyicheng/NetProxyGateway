@@ -1034,12 +1034,13 @@
 - **修复**: 将`remember`改为`rememberSaveable`
 
 ### N22: MainViewModel状态更新竞争条件
-- **状态**: 已修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` L66-75
+- **状态**: 已修复（2026-04-18 验证并修复）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` L58,66-75
 - **问题**: 两次独立的`_uiState.value`更新之间存在竞态窗口
 - **风险**: High。UI状态可能不一致
 - **引入来源**: 本次ViewModel变更引入
-- **修复**: 使用`_uiState.update{}`原子操作合并为一次更新
+- **修复**: 使用`_uiState.update{}`原子操作合并为一次更新；init块中的初始化也改为update形式
+- **验证**: `./gradlew.bat :app:testDebugUnitTest` 全量测试通过
 
 ### N23: 测试直接实例化Android Service
 - **状态**: 已修复
@@ -1057,11 +1058,12 @@
 - **修复**: 提取为命名常量`NOTIFICATION_ID`
 
 ### N25: MainViewModel状态更新方式不一致
-- **状态**: 已修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` L84,90,96,111,117
+- **状态**: 已修复（2026-04-18 验证并修复）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` L58,84,90,96,111,117,121,134,145,154,165,173
 - **问题**: 混合使用`_uiState.value = `和`_uiState.update{}`，风格不一致
 - **风险**: Low。单协程作用域内无实际竞态，但防范未来隐患
-- **修复**: 统一使用`_uiState.update{}`
+- **修复**: 统一使用`_uiState.update{}`，共修复7处直接赋值，全部改为原子更新操作
+- **验证**: `./gradlew.bat :app:testDebugUnitTest` 全量测试通过
 
 ### N26: Service语言监听器残留风险
 - **状态**: 已修复

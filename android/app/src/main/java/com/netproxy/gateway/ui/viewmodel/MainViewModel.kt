@@ -55,7 +55,7 @@ class MainViewModel @Inject constructor(
 
     init {
         val deviceId = authSessionStore.getOrCreateDeviceId()
-        _uiState.value = _uiState.value.copy(deviceId = deviceId)
+        _uiState.update { it.copy(deviceId = deviceId) }
         
         observeNetworkState()
         observeMqttState()
@@ -118,9 +118,9 @@ class MainViewModel @Inject constructor(
                     authToken = code
                 )
             } else {
-                _uiState.value = _uiState.value.copy(
-                    errorMessage = AppLocale.getString(context, R.string.error_cellular_required)
-                )
+                _uiState.update {
+                    it.copy(errorMessage = AppLocale.getString(context, R.string.error_cellular_required))
+                }
             }
         }
     }
@@ -131,10 +131,12 @@ class MainViewModel @Inject constructor(
             if (prepareIntent != null) {
                 prepareIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 context.startActivity(prepareIntent)
-                _uiState.value = _uiState.value.copy(
-                    isVpnEnabled = false,
-                    errorMessage = AppLocale.getString(context, R.string.error_vpn_permission_required)
-                )
+                _uiState.update {
+                    it.copy(
+                        isVpnEnabled = false,
+                        errorMessage = AppLocale.getString(context, R.string.error_vpn_permission_required)
+                    )
+                }
                 return
             }
 
@@ -142,16 +144,18 @@ class MainViewModel @Inject constructor(
                 action = "START"
             }
             context.startForegroundService(intent)
-            _uiState.value = _uiState.value.copy(
-                isVpnEnabled = true,
-                errorMessage = null
-            )
+            _uiState.update {
+                it.copy(
+                    isVpnEnabled = true,
+                    errorMessage = null
+                )
+            }
         } else {
             val intent = Intent(context, GatewayVpnService::class.java).apply {
                 action = "STOP"
             }
             context.startService(intent)
-            _uiState.value = _uiState.value.copy(isVpnEnabled = false)
+            _uiState.update { it.copy(isVpnEnabled = false) }
         }
     }
 
@@ -162,7 +166,7 @@ class MainViewModel @Inject constructor(
             kotlinx.coroutines.delay(2000)
             
             val results = wifiManager.getScanResults()
-            _uiState.value = _uiState.value.copy(wifiNetworks = results)
+            _uiState.update { it.copy(wifiNetworks = results) }
         }
     }
 
@@ -170,10 +174,12 @@ class MainViewModel @Inject constructor(
         mqttConnectionManager.disconnect()
         authSessionStore.clear()
         toggleVpn(false)
-        _uiState.value = _uiState.value.copy(
-            isConnected = false,
-            isPaired = false,
-            peerId = ""
-        )
+        _uiState.update {
+            it.copy(
+                isConnected = false,
+                isPaired = false,
+                peerId = ""
+            )
+        }
     }
 }
