@@ -1,4 +1,5 @@
 # NetProxyGateway 缺陷清单（待修复）
+不要在此文档记录问题的验证状态、建议修复方式
 ## Critical
 
 ### C1: SSL信任所有证书配置风险 [已降级为Medium]
@@ -938,33 +939,6 @@
 - **风险**: Medium。虽然当前代码无挂起点，但违背StateFlow最佳实践，后续维护可能引入竞态
 - **修复**: 使用单次快照模式：`val snapshot = _uiState.value`，然后使用`snapshot.deviceId`
 - **发现日期**: 2026-04-19（代码审查验证确认）
-
----
-
-## 引入提交: 6f3ccb5
-
-> 以下问题由提交 `6f3ccb5` 引入，详见该提交信息。
-
-### N30: MQTT日志标签硬编码
-- **状态**: 待修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` 多处
-- **问题**: 代码中多次硬编码 `"MQTT"` 字符串作为日志标签（出现7次以上）
-- **风险**: Low。维护困难，标签不一致风险
-- **建议修复**: 提取为常量 `private const val AUDIT_TAG_MQTT = "MQTT"`
-
-### N33: MainScreen状态管理问题
-- **状态**: 待修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt` L154-158
-- **问题**: `MainDashboard`直接传递 `MainViewModel` 而非回调函数
-- **风险**: Medium。降低了组件可测试性和可复用性
-- **建议修复**: 使用"状态向下传递，事件向上传递"模式，传递回调函数而非ViewModel
-
-### N34: MainScreen缺少预览函数
-- **状态**: 待修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt`
-- **问题**: 整个文件缺少 `@Preview` 函数，无法在设计时查看UI效果
-- **风险**: Low。开发效率影响
-- **建议修复**: 添加 `@Preview` 函数
 
 ---
 
