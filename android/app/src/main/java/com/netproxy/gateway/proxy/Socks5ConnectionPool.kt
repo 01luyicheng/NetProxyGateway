@@ -36,6 +36,10 @@ class PooledSocks5Connection(
     val destinationPort: Int,
     val createdAt: Long = System.currentTimeMillis()
 ) {
+    companion object {
+        private val logger = LoggerFactory.getLogger(PooledSocks5Connection::class.java)
+    }
+
     val lastUsedAt = AtomicLong(createdAt)
     val inUse = AtomicBoolean(false)
     val useCount = AtomicInteger(0)
@@ -57,7 +61,14 @@ class PooledSocks5Connection(
     fun close() {
         try {
             socket.close()
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            logger.debug(
+                "Failed to close pooled SOCKS5 socket for {}:{}, cause={}",
+                destinationIp,
+                destinationPort,
+                e.message
+            )
+        }
     }
 }
 
@@ -297,7 +308,14 @@ class Socks5ConnectionPool(
         } catch (e: Exception) {
             try {
                 socket.close()
-            } catch (_: Exception) {}
+            } catch (closeError: Exception) {
+                logger.debug(
+                    "Failed to close SOCKS5 socket after setup failure for {}:{}, cause={}",
+                    destinationIp,
+                    destinationPort,
+                    closeError.message
+                )
+            }
             throw e
         }
     }

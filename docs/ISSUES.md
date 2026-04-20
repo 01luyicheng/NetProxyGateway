@@ -824,21 +824,6 @@
 
 ## 新增问题（待分类）
 
-### N16: 空catch块掩盖异常信息 [待修复]
-- **状态**: 待修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (L60, L299-300)
-- **问题描述**: 多处使用空的catch块完全忽略异常，包括Socket关闭异常和SOCKS5连接创建异常，可能掩盖严重错误
-- **风险**: 中。可能遗漏关键错误信息，导致问题难以排查
-- **代码**:
-  ```kotlin
-  fun close() {
-      try {
-          socket.close()
-      } catch (_: Exception) {}  // 完全忽略所有异常
-  }
-  ```
-- **建议修复**: 至少记录异常信息，区分可忽略和不可忽略的错误类型
-
 ---
 
 ## 新增问题
