@@ -648,18 +648,6 @@
 
 ## Low Severity
 
-### L8: SOCKS5代理流ID生成可预测性 [待修复]
-- **状态**: 待修复
-- **位置**: `server/socks5-proxy/main.go` (L689)
-- **问题描述**: 流ID使用 `fmt.Sprintf("%s-%d", deviceID, time.Now().UnixNano())` 生成，依赖时间戳纳秒。虽然不存在模运算分布问题，但时间戳可预测，流ID生成逻辑可被推测
-- **风险**: 低。流ID可预测性增加，可能被用于会话固定攻击
-- **代码**:
-  ```go
-  // L689
-  streamID := fmt.Sprintf("%s-%d", deviceID, time.Now().UnixNano())
-  ```
-- **建议修复**: 使用 `crypto/rand` 生成随机字符串替代时间戳
-
 ### L9: SOCKS5代理StreamConn DataChan可能阻塞 [待修复]
 - **状态**: 待修复
 - **位置**: `server/socks5-proxy/main.go` (L320, L654-657)

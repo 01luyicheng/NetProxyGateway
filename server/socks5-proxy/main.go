@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"bufio"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -27,6 +29,17 @@ const (
 	streamCloseWriteLimit = 2 * time.Second
 	streamWriteLimit      = 5 * time.Second
 )
+
+var streamIDGenerator = generateRandomStreamID
+
+func generateRandomStreamID() (string, error) {
+	randomBytes := make([]byte, 16)
+	if _, err := rand.Read(randomBytes); err != nil {
+		return "", fmt.Errorf("failed to read crypto random bytes: %w", err)
+	}
+
+	return hex.EncodeToString(randomBytes), nil
+}
 
 // Config 服务配置
 type Config struct {
@@ -729,7 +742,10 @@ func (tc *TunnelClient) ConnectThroughTunnel(deviceID, token, dstAddr string, ds
 	}
 
 	// 生成唯一的流ID
-	streamID := fmt.Sprintf("%s-%d", deviceID, time.Now().UnixNano())
+	streamID, err := streamIDGenerator()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate stream id: %w", err)
+	}
 
 	// 创建流连接
 	streamConn := NewStreamConn(streamID, deviceID, tunnelConn, &tc.writeMu)

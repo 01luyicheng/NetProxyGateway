@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -472,5 +473,188 @@ func TestConnectThroughTunnel_CleanupOnMarshalError(t *testing.T) {
 
 	if streamCount != 0 {
 		t.Fatalf("expected empty streams map, got %d streams", streamCount)
+	}
+}
+
+func TestGenerateRandomStreamID_FormatAndLength(t *testing.T) {
+	streamID, err := generateRandomStreamID()
+	if err != nil {
+		t.Fatalf("expected stream id generation to succeed, got error: %v", err)
+	}
+
+	if len(streamID) != 32 {
+		t.Fatalf("expected stream id length 32, got %d", len(streamID))
+	}
+
+	decoded, err := hex.DecodeString(streamID)
+	if err != nil {
+		t.Fatalf("expected hex stream id, got decode error: %v", err)
+	}
+
+	if len(decoded) != 16 {
+		t.Fatalf("expected 16 random bytes, got %d", len(decoded))
+	}
+}
+
+func TestGenerateRandomStreamID_DoesNotContainDeviceIDPlaintext(t *testing.T) {
+	deviceID := "device-123"
+
+	streamID, err := generateRandomStreamID()
+	if err != nil {
+		t.Fatalf("expected stream id generation to succeed, got error: %v", err)
+	}
+
+	if strings.Contains(streamID, deviceID) {
+		t.Fatalf("stream id should not include plaintext device id, streamID=%q", streamID)
+	}
+}
+
+func TestConnectThroughTunnel_UsesRandomStreamID(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	streamIDCh := make(chan string, 1)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/tunnel" {
+			http.NotFound(w, r)
+			return
+		}
+
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		_, payload, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+
+		var connectReq struct {
+			Type string `json:"type"`
+			Data struct {
+				StreamID string `json:"stream_id"`
+				Address  string `json:"address"`
+				Port     int    `json:"port"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(payload, &connectReq); err != nil {
+			return
+		}
+
+		resp := struct {
+			Type string `json:"type"`
+			Data struct {
+				StreamID string `json:"stream_id"`
+				Success  bool   `json:"success"`
+			} `json:"data"`
+		}{
+			Type: "connect_response",
+			Data: struct {
+				StreamID string `json:"stream_id"`
+				Success  bool   `json:"success"`
+			}{
+				StreamID: connectReq.Data.StreamID,
+				Success:  true,
+			},
+		}
+
+		respData, err := json.Marshal(resp)
+		if err != nil {
+			return
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, respData); err != nil {
+			return
+		}
+
+		select {
+		case streamIDCh <- connectReq.Data.StreamID:
+		default:
+		}
+
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	tc := NewTunnelClient(server.URL)
+	deviceID := "device-123"
+
+	conn, err := tc.ConnectThroughTunnel(deviceID, "token-1", "10.0.0.1", 443)
+	if err != nil {
+		t.Fatalf("expected ConnectThroughTunnel to succeed, got error: %v", err)
+	}
+	defer conn.Close()
+
+	var streamID string
+	select {
+	case streamID = <-streamIDCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for connect request stream id")
+	}
+
+	if streamID == "" {
+		t.Fatal("expected non-empty stream id")
+	}
+	if len(streamID) != 32 {
+		t.Fatalf("expected stream id length 32, got %d", len(streamID))
+	}
+	if _, err := hex.DecodeString(streamID); err != nil {
+		t.Fatalf("expected hex stream id, got decode error: %v", err)
+	}
+	if strings.Contains(streamID, deviceID) {
+		t.Fatalf("stream id should not include plaintext device id, streamID=%q", streamID)
+	}
+	if strings.HasPrefix(streamID, deviceID+"-") {
+		t.Fatalf("stream id should not use legacy predictable format, streamID=%q", streamID)
+	}
+}
+
+func TestConnectThroughTunnel_ReturnsErrorWhenStreamIDGenerationFails(t *testing.T) {
+	originalGenerator := streamIDGenerator
+	streamIDGenerator = func() (string, error) {
+		return "", errors.New("random source failed")
+	}
+	t.Cleanup(func() {
+		streamIDGenerator = originalGenerator
+	})
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/tunnel" {
+			http.NotFound(w, r)
+			return
+		}
+
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	tc := NewTunnelClient(server.URL)
+	_, err := tc.ConnectThroughTunnel("device-1", "token-1", "10.0.0.1", 443)
+	if err == nil {
+		t.Fatal("expected ConnectThroughTunnel to fail when stream id generation fails")
+	}
+	if !strings.Contains(err.Error(), "failed to generate stream id") {
+		t.Fatalf("expected stream id generation error, got: %v", err)
+	}
+
+	tc.mu.RLock()
+	defer tc.mu.RUnlock()
+	if len(tc.streams) != 0 {
+		t.Fatalf("expected no streams to be created on stream id generation failure, got %d", len(tc.streams))
 	}
 }
