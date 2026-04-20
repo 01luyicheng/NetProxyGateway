@@ -873,6 +873,19 @@
 - **风险**: Low。影响小，最多2个监听器残留
 - **修复**: 在`onCreate()`中先执行防御性`unregister`再`register`
 
+### N29: VpnService脱敏测试与生产实现脱节 [待修复]
+- **状态**: 待修复
+- **位置**:
+  - `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L849)
+  - `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt` (L1526, L1832, L1837)
+- **问题**: `redactConnectionKey` 的测试使用了测试文件内复制的 helper 逻辑，而非直接验证生产实现。当前生产实现和测试输出格式存在差异，测试仍可能通过，导致假阳性
+- **风险**: Medium。回归防护不足，后续重构时可能无法及时发现脱敏逻辑偏差
+- **建议修复**:
+  1. 让测试直接验证生产实现（反射调用私有方法或提取可测试函数）
+  2. 移除或减少测试内复制实现，避免测试与生产逻辑漂移
+  3. 增加一条连接键格式断言，确保与生产输出严格一致
+- **发现来源**: 2026-04-20 前5次提交复审（Agent15）
+
 ---
 
 ## High Severity
