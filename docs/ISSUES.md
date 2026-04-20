@@ -952,19 +952,6 @@
 - **风险**: Low。维护困难，标签不一致风险
 - **建议修复**: 提取为常量 `private const val AUDIT_TAG_MQTT = "MQTT"`
 
-### N31: MainScreen可访问性问题
-- **状态**: 待修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt`
-- **问题**: 
-  - Switch组件周围的Row缺少 `toggleable` 修饰符（L244-263, L451-460）
-  - RadioButton点击区域过小，仅点击radio本身可选中（L558-569）
-  - 缺少内容描述和语义标签
-- **风险**: Medium。屏幕阅读器用户难以使用，点击区域过小影响用户体验
-- **建议修复**: 
-  - 为Switch添加 `Modifier.toggleable(role = Role.Switch)`
-  - 为RadioButton添加 `Modifier.selectable(role = Role.RadioButton)`
-  - 添加语义标签
-
 ### N33: MainScreen状态管理问题
 - **状态**: 待修复
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt` L154-158
