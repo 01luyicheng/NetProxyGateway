@@ -1504,9 +1504,9 @@ class VpnServiceTest {
 
     @Test
     fun ipRedaction_redactIp_validIpv4() {
-        assertEquals("192.168.*.*", redactIp("192.168.1.1"))
-        assertEquals("10.0.*.*", redactIp("10.0.0.1"))
-        assertEquals("172.16.*.*", redactIp("172.16.0.1"))
+        assertEquals("*.*.*.*", redactIp("192.168.1.1"))
+        assertEquals("*.*.*.*", redactIp("10.0.0.1"))
+        assertEquals("*.*.*.*", redactIp("172.16.0.1"))
     }
 
     @Test
@@ -1523,7 +1523,7 @@ class VpnServiceTest {
 
     @Test
     fun ipRedaction_redactConnectionKey() {
-        assertEquals("10.0.*.*-192.168.*.*", redactConnectionKey("10.0.0.2:12345-192.168.1.1:443"))
+        assertEquals("*.*.*.*-*.*.*.*", redactConnectionKey("10.0.0.2:12345-192.168.1.1:443"))
     }
 
     @Test
@@ -1821,7 +1821,7 @@ class VpnServiceTest {
     private fun redactIp(ip: String): String {
         val parts = ip.split(".")
         if (parts.size == 4) {
-            return "${parts[0]}.${parts[1]}.*.*"
+            return "*.*.*.*"
         }
         return if (ip.length > 6) "${ip.take(6)}***" else "***"
     }

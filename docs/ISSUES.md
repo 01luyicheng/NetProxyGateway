@@ -803,23 +803,6 @@
   ```
 - **建议修复**: 统一使用SLF4J日志框架，移除所有Android原生Log的使用
 
-### L12: IP地址脱敏不充分可能泄露网络拓扑 [待修复]
-- **状态**: 待修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L793-807)
-- **问题描述**: `redactIp()`方法对内网IP(192.168.x.x)只脱敏后两段，仍可能暴露网络拓扑信息
-- **风险**: 低。日志中可能泄露内网网络结构
-- **代码**:
-  ```kotlin
-  private fun redactIp(ip: String): String {
-      val parts = ip.split(".")
-      if (parts.size == 4) {
-          return "${parts[0]}.${parts[1]}.*.*"  // 192.168.x.x 仍暴露前两段
-      }
-      return if (ip.length > 6) "${ip.take(6)}***" else "***"
-  }
-  ```
-- **建议修复**: 对内网IP进一步脱敏，只保留第一段或使用统一掩码
-
 ---
 
 ## 新增问题（待分类）

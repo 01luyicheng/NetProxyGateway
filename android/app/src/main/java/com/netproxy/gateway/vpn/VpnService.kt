@@ -521,7 +521,7 @@ class GatewayVpnService : AndroidVpnService() {
                 try {
                     // 归还连接到连接池，而不是直接关闭
                     session.pooledConnection?.let { pool?.returnConnection(it) }
-                    logger.debug("Returned stale connection to pool: ${entry.key}")
+                    logger.debug("Returned stale connection to pool: ${redactConnectionKey(entry.key)}")
                 } catch (e: Exception) {
                     logger.warn("Failed to return stale connection to pool", e)
                 }
@@ -836,7 +836,7 @@ class GatewayVpnService : AndroidVpnService() {
     private fun redactIp(ip: String): String {
         val parts = ip.split(".")
         if (parts.size == 4) {
-            return "${parts[0]}.${parts[1]}.*.*"
+            return "*.*.*.*"
         }
         return if (ip.length > 6) "${ip.take(6)}***" else "***"
     }
@@ -1094,7 +1094,7 @@ class GatewayVpnService : AndroidVpnService() {
                         pool.returnConnection(connection)
                     }
                 } catch (e: Exception) {
-                    logger.warn("Failed to return connection for session ${session.srcIp}:${session.srcPort}", e)
+                    logger.warn("Failed to return connection for session ${redactIp(session.srcIp)}:${session.srcPort}", e)
                 }
             }
         } else {
@@ -1103,7 +1103,7 @@ class GatewayVpnService : AndroidVpnService() {
                 try {
                     session.pooledConnection?.close()
                 } catch (e: Exception) {
-                    logger.warn("Failed to close connection for session ${session.srcIp}:${session.srcPort}", e)
+                    logger.warn("Failed to close connection for session ${redactIp(session.srcIp)}:${session.srcPort}", e)
                 }
             }
         }
