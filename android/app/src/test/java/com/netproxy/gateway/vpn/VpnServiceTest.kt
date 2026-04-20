@@ -1533,7 +1533,7 @@ class VpnServiceTest {
         val originalKey = "10.0.0.2:12345-192.168.1.1:443"
         val redacted = redactConnectionKey(originalKey)
 
-        assertEquals("*.*.*.*-*.*.*.*", redacted)
+        assertEquals("*.*.*.*- *.*.*.*", redacted)
         assertFalse(redacted.contains(originalKey))
         assertFalse(redacted.contains("10.0.0.2"))
         assertFalse(redacted.contains("192.168.1.1"))
@@ -1546,7 +1546,7 @@ class VpnServiceTest {
         val originalKey = "2001:db8::1:12345-2404:6800::1:443"
         val redacted = redactConnectionKey(originalKey)
 
-        assertEquals("***-***", redacted)
+        assertEquals("***- ***", redacted)
         assertFalse(redacted.contains("2001:db8::1"))
         assertFalse(redacted.contains("2404:6800::1"))
         assertFalse(redacted.contains("12345"))
@@ -1558,7 +1558,7 @@ class VpnServiceTest {
         val originalKey = "10.0.0.2-192.168.1.1"
         val redacted = redactConnectionKey(originalKey)
 
-        assertEquals("*.*.*.*-*.*.*.*", redacted)
+        assertEquals("*.*.*.*- *.*.*.*", redacted)
         assertFalse(redacted.contains(originalKey))
         assertFalse(redacted.contains("10.0.0.2"))
         assertFalse(redacted.contains("192.168.1.1"))
@@ -1567,7 +1567,7 @@ class VpnServiceTest {
     @Test
     fun ipRedaction_redactConnectionKey_emptyOrSeparatorOnly() {
         assertEquals("***", redactConnectionKey(""))
-        assertEquals("***-***", redactConnectionKey("-"))
+        assertEquals("***- ***", redactConnectionKey("-"))
         assertEquals("***", redactConnectionKey(":"))
     }
 

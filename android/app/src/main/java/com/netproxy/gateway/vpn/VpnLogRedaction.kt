@@ -59,6 +59,6 @@ internal fun redactConnectionKey(key: String): String {
     if (segments.size != 2) return "***"
     val left = segments[0].substringBefore(":")
     val right = segments[1].substringBefore(":")
-    // 保持现有日志格式，避免影响既有日志解析与对比。
-    return "${redactIp(left)}-${redactIp(right)}"
+    // 保持历史日志模板分隔格式（"- "），避免影响既有日志解析与对比。
+    return "${redactIp(left)}- ${redactIp(right)}"
 }

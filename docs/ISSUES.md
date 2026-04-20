@@ -695,14 +695,6 @@
   }
   ```
 
-    ### M21: VpnLogRedaction连接键输出格式兼容性回归 [新发现-待修复]
-    - **状态**: 待修复
-    - **提交哈希**: aa75a4a
-    - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnLogRedaction.kt` (L62-L63), `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt` (L1536)
-    - **问题描述**: `redactConnectionKey`输出从`"- "`变更为`"-"`，而注释仍声明保持现有日志格式；测试也已同步到新格式，无法识别该兼容性回归
-    - **风险**: 中。可能影响依赖旧日志模板的解析和对比脚本
-    - **修复难度**: 低
-
 ### M19: Tunnel服务消息处理无速率限制 [待修复]
 - **状态**: 待修复
 - **位置**: `server/tunnel/main.go` (L390-413)
