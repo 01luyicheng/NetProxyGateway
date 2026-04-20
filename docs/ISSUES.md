@@ -945,13 +945,6 @@
 
 > 以下问题由提交 `6f3ccb5` 引入，详见该提交信息。
 
-### N29: safeCloseMqttClient参数空安全问题
-- **状态**: 无实际风险（设计可接受）
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` L278
-- **问题**: 类型不匹配：`oldClient` 为 `MqttClient?`，方法参数为 `MqttClient`
-- **风险**: Low。当前代码安全，调用前有空检查，但设计依赖调用前的空检查
-- **建议**: 可接受当前实现
-
 ### N30: MQTT日志标签硬编码
 - **状态**: 待修复
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` 多处
@@ -971,18 +964,6 @@
   - 为Switch添加 `Modifier.toggleable(role = Role.Switch)`
   - 为RadioButton添加 `Modifier.selectable(role = Role.RadioButton)`
   - 添加语义标签
-
-### N32: MainScreen性能优化问题
-- **状态**: 待修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt` 多处
-- **问题**: 
-  - `SettingsScreen`中状态初始化每次重组都调用（L189-191）
-  - `LanguageSettingsCard`中每次重组都执行 `findActivity()`（L537-538）
-  - `AuditLogsScreen`列表反转创建新列表（L282）
-- **风险**: Low-Medium。可能导致不必要的重组和性能下降
-- **建议修复**: 
-  - 使用 `remember` 缓存Activity查找结果
-  - 考虑使用 `LazyListState` 控制滚动位置
 
 ### N33: MainScreen状态管理问题
 - **状态**: 待修复
