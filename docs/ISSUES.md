@@ -77,22 +77,6 @@
   2. 空配置时抛出异常而非仅警告
   3. 添加构建时检查确保配置正确
 
-### H25: Tunnel服务心跳检测竞态条件 [待修复]
-- **状态**: 待修复
-- **位置**: `server/tunnel/main.go` (L336-359)
-- **问题描述**: `tunnel.Conn` 可能在 `WriteControl` 调用期间被其他goroutine设置为 `nil` 或关闭，导致panic
-- **风险**: 中-高。可能导致服务panic崩溃
-- **代码**:
-  ```go
-  // L336-359
-  if err := tunnel.Conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(10*time.Second)); err != nil {
-      log.Printf("Failed to send ping: %v", err)
-      tunnel.Close()
-      return
-  }
-  ```
-- **建议修复**: 在调用前检查并加锁保护
-
 ---
 
 ## Medium
