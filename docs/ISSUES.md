@@ -932,14 +932,6 @@
 - **修复**: 统一使用`update{}`原子操作
 - **发现日期**: 2026-04-19（代码审查中发现）
 
-### N28: MainViewModel.pairWithCode多次读取StateFlow
-- **状态**: 待修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` L113,117
-- **问题**: `pairWithCode`方法中两次独立读取`_uiState.value.deviceId`，两次读取之间状态可能变化导致不一致
-- **风险**: Medium。虽然当前代码无挂起点，但违背StateFlow最佳实践，后续维护可能引入竞态
-- **修复**: 使用单次快照模式：`val snapshot = _uiState.value`，然后使用`snapshot.deviceId`
-- **发现日期**: 2026-04-19（代码审查验证确认）
-
 ---
 
 ## High Severity

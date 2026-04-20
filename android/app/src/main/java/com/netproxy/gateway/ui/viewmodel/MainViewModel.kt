@@ -109,12 +109,13 @@ class MainViewModel @Inject constructor(
             _uiState.update { it.copy(peerId = code) }
             
             if (networkStateManager.isCellularConnected()) {
+                val deviceIdSnapshot = _uiState.value.deviceId
                 authSessionStore.update(
-                    deviceId = _uiState.value.deviceId,
+                    deviceId = deviceIdSnapshot,
                     authToken = code
                 )
                 mqttConnectionManager.connect(
-                    deviceId = _uiState.value.deviceId,
+                    deviceId = deviceIdSnapshot,
                     authToken = code
                 )
             } else {
