@@ -10,6 +10,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -17,6 +18,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken
 import org.eclipse.paho.client.mqttv3.MqttCallback
 import org.eclipse.paho.client.mqttv3.MqttClient
@@ -125,6 +127,9 @@ class MqttConnectionManager @Inject constructor(
 
     /**
      * 安全关闭 MQTT 客户端
+     * M21修复：使用 withContext(Dispatchers.IO) 包装阻塞IO操作，
+     * 防止 disconnect() (默认30秒超时) 和 close() 阻塞 Default 调度器
+     *
      * @param client 要关闭的 MQTT 客户端
      * @param logContext 日志上下文标识
      * @param checkConnected 是否先检查 isConnected
@@ -136,19 +141,22 @@ class MqttConnectionManager @Inject constructor(
         checkConnected: Boolean = false,
         rethrowCancellation: Boolean = false
     ) {
-        try {
-            if (!checkConnected || client.isConnected) {
-                client.disconnect()
-            }
-        } catch (e: CancellationException) {
-            if (rethrowCancellation) throw e
-        } catch (e: MqttException) {
-            logger.error("Disconnect error ($logContext)", e)
-        } finally {
+        // M21: 在 IO 调度器上执行阻塞操作，避免阻塞 Default 调度器
+        withContext(Dispatchers.IO) {
             try {
-                client.close()
-            } catch (e: Exception) {
-                logger.error("Close error ($logContext)", e)
+                if (!checkConnected || client.isConnected) {
+                    client.disconnect()
+                }
+            } catch (e: CancellationException) {
+                if (rethrowCancellation) throw e
+            } catch (e: MqttException) {
+                logger.error("Disconnect error ($logContext)", e)
+            } finally {
+                try {
+                    client.close()
+                } catch (e: Exception) {
+                    logger.error("Close error ($logContext)", e)
+                }
             }
         }
     }
