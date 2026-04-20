@@ -159,6 +159,14 @@ class MqttConnectionManager @Inject constructor(
      * - debug 构建：可通过高级开关临时跳过证书校验。
      */
     private fun createSecureSocketFactory(): SSLSocketFactory {
+        // 防御性检查：生产环境绝对不能允许信任所有证书
+        if (!BuildConfig.DEBUG && BuildConfig.MQTT_TRUST_ALL_CERTS) {
+            throw IllegalStateException(
+                "SECURITY VIOLATION: MQTT_TRUST_ALL_CERTS is enabled in non-debug build. " +
+                "This would bypass all TLS certificate validation and is insecure."
+            )
+        }
+
         val trustAllCertificates = shouldTrustAllCertificatesForCurrentBuild()
 
         return if (trustAllCertificates) {
