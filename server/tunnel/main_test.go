@@ -314,3 +314,47 @@ func TestHandleStats(t *testing.T) {
 		})
 	}
 }
+
+func TestTokenBucketLimiterRejectsBurstOverLimit(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	limiter := newTokenBucketLimiterWithClock(1, 2, func() time.Time {
+		return now
+	})
+
+	if !limiter.Allow() {
+		t.Fatal("expected first message to pass")
+	}
+
+	if !limiter.Allow() {
+		t.Fatal("expected second message to pass within burst")
+	}
+
+	if limiter.Allow() {
+		t.Fatal("expected burst over limit to be rejected")
+	}
+}
+
+func TestTokenBucketLimiterAllowsAgainAfterRefill(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	limiter := newTokenBucketLimiterWithClock(2, 2, func() time.Time {
+		return now
+	})
+
+	if !limiter.Allow() {
+		t.Fatal("expected first message to pass")
+	}
+
+	if !limiter.Allow() {
+		t.Fatal("expected second message to pass within burst")
+	}
+
+	if limiter.Allow() {
+		t.Fatal("expected immediate third message to be rejected")
+	}
+
+	now = now.Add(600 * time.Millisecond)
+
+	if !limiter.Allow() {
+		t.Fatal("expected message to pass after token refill")
+	}
+}

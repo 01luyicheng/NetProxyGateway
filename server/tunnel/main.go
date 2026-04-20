@@ -32,26 +32,108 @@ type Config struct {
 	HeartbeatTimeout  time.Duration
 }
 
+const (
+	defaultIncomingMessageRatePerSecond = 200.0
+	defaultIncomingMessageBurst         = 400
+)
+
+type tokenBucketLimiter struct {
+	mu            sync.Mutex
+	ratePerSecond float64
+	capacity      float64
+	tokens        float64
+	lastRefill    time.Time
+	now           func() time.Time
+}
+
+func newTokenBucketLimiter(ratePerSecond float64, burst int) *tokenBucketLimiter {
+	return newTokenBucketLimiterWithClock(ratePerSecond, burst, time.Now)
+}
+
+func newTokenBucketLimiterWithClock(ratePerSecond float64, burst int, nowFn func() time.Time) *tokenBucketLimiter {
+	if ratePerSecond < 0 {
+		ratePerSecond = 0
+	}
+	if burst <= 0 {
+		burst = 1
+	}
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+
+	now := nowFn()
+	capacity := float64(burst)
+
+	return &tokenBucketLimiter{
+		ratePerSecond: ratePerSecond,
+		capacity:      capacity,
+		tokens:        capacity,
+		lastRefill:    now,
+		now:           nowFn,
+	}
+}
+
+func (l *tokenBucketLimiter) Allow() bool {
+	if l == nil {
+		return true
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	now := l.now()
+	if now.Before(l.lastRefill) {
+		now = l.lastRefill
+	}
+
+	if elapsed := now.Sub(l.lastRefill).Seconds(); elapsed > 0 && l.ratePerSecond > 0 {
+		l.tokens += elapsed * l.ratePerSecond
+		if l.tokens > l.capacity {
+			l.tokens = l.capacity
+		}
+	}
+	l.lastRefill = now
+
+	if l.tokens < 1 {
+		return false
+	}
+
+	l.tokens--
+	return true
+}
+
 // TunnelConn 隧道连接
 type TunnelConn struct {
-	DeviceID  string
-	Conn      *websocket.Conn
-	LastPing  time.Time
-	mu        sync.RWMutex
-	sendChan  chan []byte
-	closeChan chan struct{}
-	closeOnce sync.Once
+	DeviceID       string
+	Conn           *websocket.Conn
+	LastPing       time.Time
+	mu             sync.RWMutex
+	sendChan       chan []byte
+	messageLimiter *tokenBucketLimiter
+	closeChan      chan struct{}
+	closeOnce      sync.Once
 }
 
 // NewTunnelConn 创建新的隧道连接
 func NewTunnelConn(deviceID string, conn *websocket.Conn) *TunnelConn {
 	return &TunnelConn{
-		DeviceID:  deviceID,
-		Conn:      conn,
-		LastPing:  time.Now(),
-		sendChan:  make(chan []byte, 100),
+		DeviceID: deviceID,
+		Conn:     conn,
+		LastPing: time.Now(),
+		sendChan: make(chan []byte, 100),
+		messageLimiter: newTokenBucketLimiter(
+			defaultIncomingMessageRatePerSecond,
+			defaultIncomingMessageBurst,
+		),
 		closeChan: make(chan struct{}),
 	}
+}
+
+func (t *TunnelConn) allowIncomingMessage() bool {
+	if t == nil || t.messageLimiter == nil {
+		return true
+	}
+	return t.messageLimiter.Allow()
 }
 
 // UpdatePing 更新最后ping时间
@@ -496,6 +578,12 @@ func (s *Server) readLoop(tunnel *TunnelConn) {
 		tunnel.UpdatePing()
 
 		if messageType == websocket.BinaryMessage || messageType == websocket.TextMessage {
+			if !tunnel.allowIncomingMessage() {
+				log.Printf("Incoming message rate limit exceeded for device: %s", tunnel.DeviceID)
+				tunnel.Close()
+				return
+			}
+
 			// 处理消息
 			s.handleMessage(tunnel, data)
 		}
