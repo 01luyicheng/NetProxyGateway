@@ -185,7 +185,7 @@
   ```
 
 ### C19: 开发模式安全检查可进一步增强 [待修复]
-- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
+- **状态**: 待修复
 - **位置**: `server/api/main.go` (L108-137)
 - **问题描述**: 当前只检查了`ENABLE_TLS`，但还有其他生产环境指标应该检查，如端口号、域名/IP限制、日志级别等
 - **风险**: 低。当前检查已足够，但可进一步增强
@@ -193,6 +193,105 @@
   - 检查端口号：生产环境通常使用443端口，开发环境使用8080
   - 检查域名/IP限制：生产环境可能有特定的域名配置
   - 检查日志级别：生产环境通常使用结构化日志
+
+### C20: VpnService日志模板格式不一致 [新发现-待修复]
+- **状态**: 待修复
+- **提交哈希**: fc9552b53dde93aea4ddb7afda4a4240e906a6ee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L438, L468, L524, L617)
+- **问题描述**: 日志消息模板中分隔符`-`的使用格式不一致，有的带前后空格（如`"... -> virtualIP: ..."`），有的不带空格（如`"...-$destinationIp:..."`）。不影响功能但降低日志可读性和一致性
+- **风险**: 低。日志格式不统一，但不影响功能
+- **建议**: 统一日志模板格式，建议采用`"key: value"`风格，分隔符前后保持一致的空格策略
+- **代码示例**:
+  ```kotlin
+  // L438: 无空格格式
+  "$srcIp:$srcPort-$destinationIp:$destinationPort"
+  // L468: 有前后空格
+  "${redactConnectionKey(connectionKey)} -> virtualIP: ${redactIp(virtualSrcIp)}"
+  ```
+
+### C21: VpnLogRedaction缺少KDoc文档 [新发现-待修复]
+- **状态**: 待修复
+- **提交哈希**: fc9552b53dde93aea4ddb7afda4a4240e906a6ee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnLogRedaction.kt`
+- **问题描述**: 公共函数`redactIp()`和`redactConnectionKey()`缺少KDoc文档注释，未说明函数用途、参数格式和返回值格式
+- **风险**: 低。代码意图不明确，增加维护成本
+- **建议**: 添加KDoc文档：
+  ```kotlin
+  /**
+   * 对IP地址进行脱敏处理。
+   * IPv4地址返回"*.*.*.*"，其他格式返回部分隐藏形式。
+   * @param ip 原始IP地址字符串
+   * @return 脱敏后的IP地址字符串
+   */
+  internal fun redactIp(ip: String): String
+  ```
+
+### C22: VpnLogRedaction魔法值未命名 [新发现-待修复]
+- **状态**: 待修复
+- **提交哈希**: fc9552b53dde93aea4ddb7afda4a4240e906a6ee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnLogRedaction.kt` (L4, L5, L8, L12, L13)
+- **问题描述**: 代码中使用字面量`4`（IPv4段数）、`6`（最小脱敏长度）、`2`（连接键分段数）等魔法值，未提取为命名常量，降低可读性
+- **风险**: 低。代码可读性差，维护困难
+- **建议**: 提取为命名常量：
+  ```kotlin
+  private const val IPV4_PART_COUNT = 4
+  private const val MIN_REDACT_LENGTH = 6
+  private const val CONNECTION_KEY_SEGMENTS = 2
+  private const val REDACT_MASK = "***"
+  ```
+
+### C23: notifyStatusBackoff位移溢出风险 [代码审查发现-待修复]
+- **状态**: 待修复
+- **提交哈希**: 当前工作区未提交变更
+- **位置**: `server/tunnel/main.go` (L299-305)
+- **问题描述**: `notifyStatusBackoff`函数使用`1<<(attempt-1)`计算退避乘数，`1`是无类型整数常量。当前`maxAttempts=3`是安全的，但如果未来调大最大尝试次数，在32位系统上`attempt>=63`时会发生位移溢出。函数缺乏上限保护
+- **风险**: 中。当前安全，但对常量变更不敏感，存在未来溢出风险
+- **建议**: 添加上限保护或使用显式`int64`位移：
+  ```go
+  func notifyStatusBackoff(attempt int) time.Duration {
+      if attempt <= 0 {
+          attempt = 1
+      }
+      const maxAttempt = 30
+      if attempt > maxAttempt {
+          attempt = maxAttempt
+      }
+      multiplier := int64(1) << (attempt - 1)
+      return defaultNotifyStatusBaseBackoff * time.Duration(multiplier)
+  }
+  ```
+
+### C24: http.Client未复用连接池 [代码审查发现-待修复]
+- **状态**: 待修复
+- **提交哈希**: 当前工作区未提交变更
+- **位置**: `server/tunnel/main.go` (L238)
+- **问题描述**: `notifyDeviceStatus`每次调用都创建新的`http.Client`，无法复用TCP连接池。在高频设备上下线场景（如网络抖动导致频繁重连），会造成大量短连接，增加延迟和系统负载
+- **风险**: 中。高频通知场景下性能受影响
+- **建议**: 将`http.Client`作为`TunnelManager`的字段，在构造时初始化，或使用全局带连接池的client
+
+### C25: notifyDeviceStatus goroutine泄漏风险 [代码审查发现-待修复]
+- **状态**: 待修复
+- **提交哈希**: 当前工作区未提交变更
+- **位置**: `server/tunnel/main.go` (L237)
+- **问题描述**: `notifyDeviceStatus`立即启动goroutine执行HTTP请求，重试过程中使用`time.Sleep`阻塞。如果`TunnelManager`被销毁或服务器关闭，这些goroutine会持续阻塞在sleep中直到重试完成，无法被提前取消
+- **风险**: 中。服务关闭时goroutine无法优雅退出
+- **建议**: 为`TunnelManager`添加`context.Context`支持，允许取消进行中的通知；或将`notifyDeviceStatus`改为同步调用，由调用方决定是否启动goroutine
+
+### C26: notifyDeviceStatus测试存在flaky风险 [代码审查发现-待修复]
+- **状态**: 待修复
+- **提交哈希**: 当前工作区未提交变更
+- **位置**: `server/tunnel/main_test.go` (L85, L122)
+- **问题描述**: `TestNotifyDeviceStatusRetriesAndEventuallySucceeds`和`TestNotifyDeviceStatusDoesNotRetryOnBadRequest`使用固定`time.Sleep(300ms)`验证无额外请求。在慢速CI环境或高负载下可能失败，是flaky test的典型来源
+- **风险**: 中。测试不稳定，可能导致CI随机失败
+- **建议**: 移除`time.Sleep`，改用channel同步或`sync.WaitGroup`精确等待。例如，在收到预期请求后，使用`select`+`time.After`验证没有额外请求到达
+
+### C27: notifyDeviceStatus测试覆盖不足 [代码审查发现-待修复]
+- **状态**: 待修复
+- **提交哈希**: 当前工作区未提交变更
+- **位置**: `server/tunnel/main_test.go`
+- **问题描述**: 新增测试缺少以下关键场景：1) 3次重试全部失败的边界；2) 429(TooManyRequests)触发重试；3) `notifyStatusBackoff`退避时间计算的正确性；4) 网络错误（非HTTP错误）触发重试；5) 2xx/3xx直接成功不重试
+- **风险**: 低。核心重试逻辑的关键边界未验证
+- **建议**: 补充上述缺失测试，确保重试逻辑的所有分支都被覆盖
 
 ---
 

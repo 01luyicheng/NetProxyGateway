@@ -35,6 +35,8 @@ type Config struct {
 const (
 	defaultIncomingMessageRatePerSecond = 200.0
 	defaultIncomingMessageBurst         = 400
+	defaultNotifyStatusMaxAttempts      = 3
+	defaultNotifyStatusBaseBackoff      = 100 * time.Millisecond
 )
 
 type tokenBucketLimiter struct {
@@ -246,26 +248,64 @@ func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string) 
 			log.Printf("Failed to marshal device status payload: %v", err)
 			return
 		}
-		req, err := http.NewRequest(
-			http.MethodPost,
-			m.config.APIEndpoint+"/api/device/status",
-			bytes.NewReader(data),
-		)
-		if err != nil {
-			log.Printf("Failed to build device status request: %v", err)
+
+		for attempt := 1; attempt <= defaultNotifyStatusMaxAttempts; attempt++ {
+			req, err := http.NewRequest(
+				http.MethodPost,
+				m.config.APIEndpoint+"/api/device/status",
+				bytes.NewReader(data),
+			)
+			if err != nil {
+				log.Printf("Failed to build device status request: %v", err)
+				return
+			}
+			req.Header.Set("Content-Type", "application/json")
+			if m.config.InternalAPIKey != "" {
+				req.Header.Set("X-Internal-API-Key", m.config.InternalAPIKey)
+			}
+
+			resp, err := client.Do(req)
+			if err != nil {
+				if attempt < defaultNotifyStatusMaxAttempts {
+					time.Sleep(notifyStatusBackoff(attempt))
+					continue
+				}
+				log.Printf("Failed to notify device status after %d attempts: %v", attempt, err)
+				return
+			}
+
+			statusCode := resp.StatusCode
+			_ = resp.Body.Close()
+
+			if statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices {
+				return
+			}
+
+			if shouldRetryNotifyStatusCode(statusCode) && attempt < defaultNotifyStatusMaxAttempts {
+				time.Sleep(notifyStatusBackoff(attempt))
+				continue
+			}
+
+			if shouldRetryNotifyStatusCode(statusCode) {
+				log.Printf("Failed to notify device status after %d attempts: status code %d", attempt, statusCode)
+			} else {
+				log.Printf("Failed to notify device status: status code %d", statusCode)
+			}
 			return
 		}
-		req.Header.Set("Content-Type", "application/json")
-		if m.config.InternalAPIKey != "" {
-			req.Header.Set("X-Internal-API-Key", m.config.InternalAPIKey)
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			log.Printf("Failed to notify device status: %v", err)
-			return
-		}
-		defer resp.Body.Close()
 	}()
+}
+
+func notifyStatusBackoff(attempt int) time.Duration {
+	if attempt <= 0 {
+		attempt = 1
+	}
+
+	return defaultNotifyStatusBaseBackoff * time.Duration(1<<(attempt-1))
+}
+
+func shouldRetryNotifyStatusCode(statusCode int) bool {
+	return statusCode == http.StatusTooManyRequests || statusCode >= http.StatusInternalServerError
 }
 
 // cleanupDeadTunnels 清理死连接

@@ -47,6 +47,89 @@ func TestNotifyDeviceStatusAddsInternalAPIKeyHeader(t *testing.T) {
 	}
 }
 
+func TestNotifyDeviceStatusRetriesAndEventuallySucceeds(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		requests int
+	)
+	requestSignal := make(chan struct{}, 4)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		attempt := requests
+		mu.Unlock()
+
+		requestSignal <- struct{}{}
+
+		if attempt == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	manager := NewTunnelManager(&Config{APIEndpoint: server.URL})
+	manager.notifyDeviceStatus("device-123", "online", "")
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-requestSignal:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for notifyDeviceStatus attempt %d", i+1)
+		}
+	}
+
+	time.Sleep(300 * time.Millisecond)
+
+	mu.Lock()
+	got := requests
+	mu.Unlock()
+
+	if got != 2 {
+		t.Fatalf("expected 2 notify attempts (retry then success), got %d", got)
+	}
+}
+
+func TestNotifyDeviceStatusDoesNotRetryOnBadRequest(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		requests int
+	)
+	requestSignal := make(chan struct{}, 2)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+
+		requestSignal <- struct{}{}
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	manager := NewTunnelManager(&Config{APIEndpoint: server.URL})
+	manager.notifyDeviceStatus("device-123", "online", "")
+
+	select {
+	case <-requestSignal:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for notifyDeviceStatus first attempt")
+	}
+
+	time.Sleep(300 * time.Millisecond)
+
+	mu.Lock()
+	got := requests
+	mu.Unlock()
+
+	if got != 1 {
+		t.Fatalf("expected no retry for 4xx response, got %d attempts", got)
+	}
+}
+
 func TestValidateDeviceTokenAddsInternalAPIKeyHeader(t *testing.T) {
 	var headerValue string
 
