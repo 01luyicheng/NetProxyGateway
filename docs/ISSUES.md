@@ -1018,13 +1018,6 @@
 
 ## Medium Severity
 
-### M20: TLS证书固定非强制性
-- **状态**: 待修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` L191-198, `MqttTlsPinning.kt` L44-47
-- **问题**: 当 `MQTT_TLS_PUBLIC_KEY_PINS` 为空时，仅记录警告，仍使用默认CA验证
-- **风险**: Medium。Release构建可能意外使用不安全的证书验证方式
-- **建议修复**: Release构建强制要求配置证书固定，空配置时抛出异常
-
 ### M21: safeCloseMqttClient IO调度问题
 - **状态**: 待修复
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` L136-158
