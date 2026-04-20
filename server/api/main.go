@@ -16,50 +16,49 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
-	_ "github.com/mattn/go-sqlite3"
+	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
 // 常量定义
 const (
-	PairingCodeTTL    = 15 * time.Minute
-	SessionTokenTTL   = 15 * time.Minute
-	MaxFailedAttempts = 5
+	PairingCodeTTL                = 15 * time.Minute
+	SessionTokenTTL               = 15 * time.Minute
+	MaxFailedAttempts             = 5
 	MaxPairingCodeConflictRetries = 10
-	BlockDuration     = 15 * time.Minute
-	DefaultDBPath     = "./api.db"
+	BlockDuration                 = 15 * time.Minute
+	DefaultDBPath                 = "./api.db"
 )
 
 // 错误消息常量 - 统一使用 ErrFailedToXxx 命名风格
 const (
-	ErrFailedToParseRequest        = "invalid request format"
-	ErrFailedToQueryDatabase       = "database error"
-	ErrFailedToFindSession         = "session not found"
-	ErrFailedToFindPairingSession  = "pairing session not found"
-	ErrFailedToGenerateCode        = "failed to generate pairing code"
+	ErrFailedToParseRequest               = "invalid request format"
+	ErrFailedToQueryDatabase              = "database error"
+	ErrFailedToFindSession                = "session not found"
+	ErrFailedToFindPairingSession         = "pairing session not found"
+	ErrFailedToGenerateCode               = "failed to generate pairing code"
 	ErrFailedToResolvePairingCodeConflict = "pairing code temporarily unavailable"
-	ErrFailedToCreateSession       = "failed to create pairing session"
-	ErrFailedToUpdateSession       = "failed to update session"
-	ErrFailedToUpdateStatus        = "failed to update device status"
-	ErrFailedToGenerateToken       = "failed to generate session token"
-	ErrFailedToCreateToken         = "failed to create session token"
-	ErrFailedToValidateToken       = "missing or invalid bearer token"
-	ErrFailedToAuthenticate        = "invalid credentials"
-	ErrUnauthorized                = "unauthorized"
-	ErrForbidden                   = "forbidden"
-	ErrSessionExpired              = "session expired"
-	ErrPairingNotCompleted         = "pairing not completed"
-	ErrInvalidStatusTransition     = "invalid status transition"
-	ErrRateLimitExceeded           = "rate limit exceeded, please try again later"
-	ErrRateLimit                   = "rate limit exceeded"
-	ErrMissingEngineer             = "missing authenticated engineer"
-	ErrInternalAPIKeyNotConfigured = "internal api key not configured"
-	ErrMissingInternalAPIKey       = "missing internal api key"
-	ErrInvalidInternalAPIKey       = "invalid internal api key"
+	ErrFailedToCreateSession              = "failed to create pairing session"
+	ErrFailedToUpdateSession              = "failed to update session"
+	ErrFailedToUpdateStatus               = "failed to update device status"
+	ErrFailedToGenerateToken              = "failed to generate session token"
+	ErrFailedToCreateToken                = "failed to create session token"
+	ErrFailedToValidateToken              = "missing or invalid bearer token"
+	ErrFailedToAuthenticate               = "invalid credentials"
+	ErrUnauthorized                       = "unauthorized"
+	ErrForbidden                          = "forbidden"
+	ErrSessionExpired                     = "session expired"
+	ErrPairingNotCompleted                = "pairing not completed"
+	ErrInvalidStatusTransition            = "invalid status transition"
+	ErrRateLimitExceeded                  = "rate limit exceeded, please try again later"
+	ErrRateLimit                          = "rate limit exceeded"
+	ErrMissingEngineer                    = "missing authenticated engineer"
+	ErrInternalAPIKeyNotConfigured        = "internal api key not configured"
+	ErrMissingInternalAPIKey              = "missing internal api key"
+	ErrInvalidInternalAPIKey              = "invalid internal api key"
 )
 
 var (
 	errPairingCodeConflictRetryLimitReached = errors.New("pairing code conflict retry limit reached")
-	errPairingCodeLookupFailed              = errors.New("pairing code lookup failed")
 )
 
 // PairingSession 配对会话
@@ -100,7 +99,8 @@ type LoginAttempt struct {
 
 // Server 服务器结构
 type Server struct {
-	db *sql.DB
+	db                   *sql.DB
+	pairingCodeGenerator func() (string, error)
 
 	// 内存缓存（用于登录限流，不持久化）
 	loginAttempts   map[string]*LoginAttempt // ip -> attempts
@@ -184,11 +184,25 @@ func NewServer() (*Server, error) {
 	}
 
 	return &Server{
-		db:             db,
-		loginAttempts:  make(map[string]*LoginAttempt),
-		jwtSecret:      []byte(jwtSecret),
-		internalAPIKey: []byte(internalAPIKey),
+		db:                   db,
+		pairingCodeGenerator: generateCode,
+		loginAttempts:        make(map[string]*LoginAttempt),
+		jwtSecret:            []byte(jwtSecret),
+		internalAPIKey:       []byte(internalAPIKey),
 	}, nil
+}
+
+func isPairingCodeUniqueConstraintError(err error) bool {
+	var sqliteErr sqlite3.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+
+	if sqliteErr.Code != sqlite3.ErrConstraint {
+		return false
+	}
+
+	return sqliteErr.ExtendedCode == sqlite3.ErrConstraintPrimaryKey || sqliteErr.ExtendedCode == sqlite3.ErrConstraintUnique
 }
 
 // initSchema 初始化数据库表结构
@@ -770,47 +784,45 @@ func (s *Server) createPairingSession(c *gin.Context) {
 		return
 	}
 
-	code, err := generateUniquePairingCode(
-		MaxPairingCodeConflictRetries,
-		generateCode,
-		func(code string) (bool, error) {
-			existing, err := s.getPairingSessionDB(code)
-			if err != nil {
-				return false, fmt.Errorf("%w: %v", errPairingCodeLookupFailed, err)
-			}
-			return existing != nil, nil
-		},
-	)
-	if err != nil {
-		switch {
-		case errors.Is(err, errPairingCodeConflictRetryLimitReached):
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": ErrFailedToResolvePairingCodeConflict})
-		case errors.Is(err, errPairingCodeLookupFailed):
-			c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToQueryDatabase})
-		default:
+	codeGenerator := s.pairingCodeGenerator
+	if codeGenerator == nil {
+		codeGenerator = generateCode
+	}
+
+	for attempt := 0; attempt < MaxPairingCodeConflictRetries; attempt++ {
+		code, err := codeGenerator()
+		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToGenerateCode})
+			return
 		}
+
+		now := time.Now()
+		session := &PairingSession{
+			Code:      code,
+			DeviceID:  req.DeviceID,
+			Status:    "pending",
+			CreatedAt: now,
+			ExpiresAt: now.Add(PairingCodeTTL),
+			Used:      false,
+		}
+
+		if err := s.createPairingSessionDB(session); err != nil {
+			if isPairingCodeUniqueConstraintError(err) {
+				continue
+			}
+
+			c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToCreateSession})
+			return
+		}
+
+		// 记录成功
+		s.recordSuccess(clientIP)
+
+		c.JSON(http.StatusCreated, session)
 		return
 	}
 
-	session := &PairingSession{
-		Code:      code,
-		DeviceID:  req.DeviceID,
-		Status:    "pending",
-		CreatedAt: time.Now(),
-		ExpiresAt: time.Now().Add(PairingCodeTTL),
-		Used:      false,
-	}
-
-	if err := s.createPairingSessionDB(session); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToCreateSession})
-		return
-	}
-
-	// 记录成功
-	s.recordSuccess(clientIP)
-
-	c.JSON(http.StatusCreated, session)
+	c.JSON(http.StatusServiceUnavailable, gin.H{"error": ErrFailedToResolvePairingCodeConflict})
 }
 
 // getPairingSession 获取配对会话

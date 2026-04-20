@@ -1,6 +1,8 @@
 package main
 
 import (
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -49,6 +51,58 @@ func assertAuthValidationFailedResponse(t *testing.T, recorder *httptest.Respons
 	if !strings.Contains(recorder.Body.String(), ErrFailedToValidateToken) {
 		t.Fatalf("expected error response to contain %q, got %s", ErrFailedToValidateToken, recorder.Body.String())
 	}
+}
+
+func newPairingTestServer(t *testing.T) *Server {
+	t.Helper()
+
+	db, err := sql.Open("sqlite3", "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("failed to open in-memory db: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+
+	if err := initSchema(db); err != nil {
+		db.Close()
+		t.Fatalf("failed to init schema: %v", err)
+	}
+
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	return &Server{
+		db:            db,
+		loginAttempts: make(map[string]*LoginAttempt),
+	}
+}
+
+func insertPendingPairingSession(t *testing.T, server *Server, code string, deviceID string) {
+	t.Helper()
+
+	err := server.createPairingSessionDB(&PairingSession{
+		Code:      code,
+		DeviceID:  deviceID,
+		Status:    "pending",
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(PairingCodeTTL),
+		Used:      false,
+	})
+	if err != nil {
+		t.Fatalf("failed to insert pairing session %s: %v", code, err)
+	}
+}
+
+func runCreatePairingSessionRequest(server *Server, body string) *httptest.ResponseRecorder {
+	router := gin.New()
+	router.POST("/pairing", server.createPairingSession)
+
+	req := httptest.NewRequest(http.MethodPost, "/pairing", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	return recorder
 }
 
 func TestInternalOrUserAuthMiddlewareAcceptsInternalKey(t *testing.T) {
@@ -625,5 +679,103 @@ func TestGenerateUniquePairingCodeReturnsLookupErrorImmediately(t *testing.T) {
 	}
 	if lookupCount != 1 {
 		t.Fatalf("expected lookup to stop after first error, got %d attempts", lookupCount)
+	}
+}
+
+func TestCreatePairingSessionConflictThenSuccess(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	insertPendingPairingSession(t, server, "111111", "existing-device")
+
+	codes := []string{"111111", "222222"}
+	codeIndex := 0
+	server.pairingCodeGenerator = func() (string, error) {
+		if codeIndex >= len(codes) {
+			return "", errors.New("unexpected extra generation")
+		}
+		code := codes[codeIndex]
+		codeIndex++
+		return code, nil
+	}
+
+	recorder := runCreatePairingSessionRequest(server, `{"device_id":"new-device"}`)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("expected 201 when second generated code succeeds, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), `"code":"222222"`) {
+		t.Fatalf("expected response to contain second generated code, got %s", recorder.Body.String())
+	}
+	if codeIndex != 2 {
+		t.Fatalf("expected 2 code generation attempts, got %d", codeIndex)
+	}
+
+	stored, err := server.getPairingSessionDB("222222")
+	if err != nil {
+		t.Fatalf("failed to verify inserted session: %v", err)
+	}
+	if stored == nil {
+		t.Fatalf("expected session with code 222222 to be inserted")
+	}
+	if stored.DeviceID != "new-device" {
+		t.Fatalf("expected inserted device_id=new-device, got %s", stored.DeviceID)
+	}
+}
+
+func TestCreatePairingSessionConflictRetryLimitReturns503(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	insertPendingPairingSession(t, server, "111111", "existing-device")
+
+	attempts := 0
+	server.pairingCodeGenerator = func() (string, error) {
+		attempts++
+		return "111111", nil
+	}
+
+	recorder := runCreatePairingSessionRequest(server, `{"device_id":"new-device"}`)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when code conflicts exhaust retries, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), ErrFailedToResolvePairingCodeConflict) {
+		t.Fatalf("expected response to contain %q, got %s", ErrFailedToResolvePairingCodeConflict, recorder.Body.String())
+	}
+	if attempts != MaxPairingCodeConflictRetries {
+		t.Fatalf("expected %d generation attempts, got %d", MaxPairingCodeConflictRetries, attempts)
+	}
+}
+
+func TestCreatePairingSessionDatabaseErrorReturns500(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	attempts := 0
+	server.pairingCodeGenerator = func() (string, error) {
+		attempts++
+		return "333333", nil
+	}
+
+	if err := server.db.Close(); err != nil {
+		t.Fatalf("failed to close db before request: %v", err)
+	}
+
+	recorder := runCreatePairingSessionRequest(server, `{"device_id":"new-device"}`)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 when database insert fails with non-unique error, got %d", recorder.Code)
+	}
+
+	var response map[string]string
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("failed to decode response body: %v; body=%s", err, recorder.Body.String())
+	}
+	if response["error"] != ErrFailedToCreateSession {
+		t.Fatalf("expected error %q, got %q", ErrFailedToCreateSession, response["error"])
+	}
+	if attempts != 1 {
+		t.Fatalf("expected 1 generation attempt before database error, got %d", attempts)
 	}
 }
