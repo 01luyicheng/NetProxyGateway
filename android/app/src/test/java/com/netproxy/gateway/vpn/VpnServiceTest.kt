@@ -1523,7 +1523,13 @@ class VpnServiceTest {
 
     @Test
     fun ipRedaction_redactConnectionKey() {
-        assertEquals("*.*.*.*-*.*.*.*", redactConnectionKey("10.0.0.2:12345-192.168.1.1:443"))
+        val originalKey = "10.0.0.2:12345-192.168.1.1:443"
+        val redacted = redactConnectionKey(originalKey)
+
+        assertEquals("*.*.*.*- *.*.*.*", redacted)
+        assertFalse(redacted.contains(originalKey))
+        assertFalse(redacted.contains("10.0.0.2"))
+        assertFalse(redacted.contains("192.168.1.1"))
     }
 
     @Test
@@ -1813,28 +1819,6 @@ class VpnServiceTest {
 
     private fun getSessionClass(service: GatewayVpnService): Class<*> {
         return service.javaClass.declaredClasses.first { it.simpleName == "ConnectionSession" }
-    }
-
-    /**
-     * IP 脱敏（从 VpnService 复制用于测试）
-     */
-    private fun redactIp(ip: String): String {
-        val parts = ip.split(".")
-        if (parts.size == 4) {
-            return "*.*.*.*"
-        }
-        return if (ip.length > 6) "${ip.take(6)}***" else "***"
-    }
-
-    /**
-     * 连接 key 脱敏（从 VpnService 复制用于测试）
-     */
-    private fun redactConnectionKey(key: String): String {
-        val segments = key.split("-")
-        if (segments.size != 2) return "***"
-        val left = segments[0].substringBefore(":")
-        val right = segments[1].substringBefore(":")
-        return "${redactIp(left)}-${redactIp(right)}"
     }
 
     /**

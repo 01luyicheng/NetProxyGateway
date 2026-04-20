@@ -833,22 +833,6 @@ class GatewayVpnService : AndroidVpnService() {
         }
     }
 
-    private fun redactIp(ip: String): String {
-        val parts = ip.split(".")
-        if (parts.size == 4) {
-            return "*.*.*.*"
-        }
-        return if (ip.length > 6) "${ip.take(6)}***" else "***"
-    }
-
-    private fun redactConnectionKey(key: String): String {
-        val segments = key.split("-")
-        if (segments.size != 2) return "***"
-        val left = segments[0].substringBefore(":")
-        val right = segments[1].substringBefore(":")
-        return "${redactIp(left)}- ${redactIp(right)}"
-    }
-
     private fun parseProtocol(packet: ByteArray): Int {
         return packet[9].toInt() and 0xFF
     }
