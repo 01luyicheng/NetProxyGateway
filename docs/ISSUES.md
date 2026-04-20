@@ -1018,16 +1018,4 @@
 
 ## Medium Severity
 
-### M21: safeCloseMqttClient IO调度问题
-- **状态**: 待修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` L136-158
-- **问题**: `client.disconnect()` 是同步阻塞调用（Paho MQTT默认30秒超时），在协程中执行可能阻塞Default调度器线程
-- **风险**: Medium。网络延迟高或服务器无响应时，可能阻塞调度器长达30秒，影响其他协程执行
-- **建议修复**: 使用 `withContext(Dispatchers.IO)` 包装阻塞IO操作
-  ```kotlin
-  private suspend fun safeCloseMqttClient(...) {
-      withContext(Dispatchers.IO) {
-          // ... disconnect() 和 close()
-      }
-  }
-  ```
+> 当前无 Medium Severity 问题
