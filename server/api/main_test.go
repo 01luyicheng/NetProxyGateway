@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -600,6 +602,69 @@ func TestCleanupLoginAttemptsRemovesExpiredBlockedEntry(t *testing.T) {
 
 	if _, exists := server.loginAttempts[clientIP]; exists {
 		t.Fatalf("expected expired blocked entry to be removed")
+	}
+}
+
+func TestValidateSessionExpiredTokenDeleteFailureDoesNotLogRawToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	rawToken := "plain-sensitive-token"
+	now := time.Now()
+
+	err := server.createSessionTokenDB(&SessionToken{
+		Token:      rawToken,
+		DeviceID:   "device-1",
+		EngineerID: "engineer-1",
+		CreatedAt:  now.Add(-10 * time.Minute),
+		ExpiresAt:  now.Add(-1 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("failed to create expired session token: %v", err)
+	}
+
+	_, err = server.db.Exec(`
+		CREATE TRIGGER prevent_session_token_delete
+		BEFORE DELETE ON session_tokens
+		BEGIN
+			SELECT RAISE(FAIL, 'delete blocked in test');
+		END;
+	`)
+	if err != nil {
+		t.Fatalf("failed to create delete-block trigger: %v", err)
+	}
+
+	var logBuf bytes.Buffer
+	originalWriter := log.Writer()
+	originalFlags := log.Flags()
+	log.SetOutput(&logBuf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(originalWriter)
+		log.SetFlags(originalFlags)
+	})
+
+	router := gin.New()
+	router.POST("/validate", server.validateSession)
+
+	req := httptest.NewRequest(http.MethodPost, "/validate", strings.NewReader(`{"device_id":"device-1","token":"plain-sensitive-token"}`))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200 for expired session token validation, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), `"valid":false`) {
+		t.Fatalf("expected response to mark token invalid, got %s", recorder.Body.String())
+	}
+
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "Failed to delete expired session token") {
+		t.Fatalf("expected delete failure log, got %q", logOutput)
+	}
+	if strings.Contains(logOutput, rawToken) {
+		t.Fatalf("expected logs to redact raw token, got %q", logOutput)
 	}
 }
 

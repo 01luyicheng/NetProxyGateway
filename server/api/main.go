@@ -966,7 +966,7 @@ func (s *Server) validateSession(c *gin.Context) {
 	// 检查是否过期
 	if time.Now().After(sessionToken.ExpiresAt) {
 		if err := s.deleteSessionTokenDB(req.Token); err != nil {
-			log.Printf("Failed to delete expired session token %s: %v", req.Token, err)
+			log.Printf("Failed to delete expired session token: %v", err)
 		}
 		c.JSON(http.StatusOK, gin.H{"valid": false})
 		return
