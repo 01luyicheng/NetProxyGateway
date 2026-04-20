@@ -1510,15 +1510,22 @@ class VpnServiceTest {
     }
 
     @Test
+    fun ipRedaction_redactIp_validIpv6() {
+        val expectedMask = "****:****:****:****:****:****:****:****"
+
+        assertEquals(expectedMask, redactIp("2001:0db8:85a3:0000:0000:8a2e:0370:7334"))
+        assertEquals(expectedMask, redactIp("2001:db8::1"))
+        assertEquals(expectedMask, redactIp("::1"))
+    }
+
+    @Test
     fun ipRedaction_redactIp_invalidIp() {
-        val result = redactIp("invalid-ip-address")
-        assertTrue(result.contains("***"))
+        assertEquals("***", redactIp("invalid-ip-address"))
     }
 
     @Test
     fun ipRedaction_redactIp_shortIp() {
-        val result = redactIp("1.2")
-        assertTrue(result.contains("***"))
+        assertEquals("***", redactIp("1.2"))
     }
 
     @Test
@@ -1526,10 +1533,42 @@ class VpnServiceTest {
         val originalKey = "10.0.0.2:12345-192.168.1.1:443"
         val redacted = redactConnectionKey(originalKey)
 
-        assertEquals("*.*.*.*- *.*.*.*", redacted)
+        assertEquals("*.*.*.*-*.*.*.*", redacted)
         assertFalse(redacted.contains(originalKey))
         assertFalse(redacted.contains("10.0.0.2"))
         assertFalse(redacted.contains("192.168.1.1"))
+        assertFalse(redacted.contains("12345"))
+        assertFalse(redacted.contains("443"))
+    }
+
+    @Test
+    fun ipRedaction_redactConnectionKey_ipv6WithPorts() {
+        val originalKey = "2001:db8::1:12345-2404:6800::1:443"
+        val redacted = redactConnectionKey(originalKey)
+
+        assertEquals("***-***", redacted)
+        assertFalse(redacted.contains("2001:db8::1"))
+        assertFalse(redacted.contains("2404:6800::1"))
+        assertFalse(redacted.contains("12345"))
+        assertFalse(redacted.contains("443"))
+    }
+
+    @Test
+    fun ipRedaction_redactConnectionKey_withoutPorts() {
+        val originalKey = "10.0.0.2-192.168.1.1"
+        val redacted = redactConnectionKey(originalKey)
+
+        assertEquals("*.*.*.*-*.*.*.*", redacted)
+        assertFalse(redacted.contains(originalKey))
+        assertFalse(redacted.contains("10.0.0.2"))
+        assertFalse(redacted.contains("192.168.1.1"))
+    }
+
+    @Test
+    fun ipRedaction_redactConnectionKey_emptyOrSeparatorOnly() {
+        assertEquals("***", redactConnectionKey(""))
+        assertEquals("***-***", redactConnectionKey("-"))
+        assertEquals("***", redactConnectionKey(":"))
     }
 
     @Test

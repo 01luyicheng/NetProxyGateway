@@ -106,25 +106,6 @@
   c.Set("role", role)
   ```
 
-### H26: VpnLogRedaction IPv6地址脱敏错误 [新发现-待修复]
-- **状态**: 待修复
-- **提交哈希**: fc9552b53dde93aea4ddb7afda4a4240e906a6ee
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnLogRedaction.kt` (L3-L9)
-- **问题描述**: `redactIp()`函数仅检测IPv4地址格式（分割后4段），IPv6地址会被错误处理为部分脱敏（如`"2001:0db8::1"`变为`"2001:0***"`），而非完整脱敏格式`"****:****:****:****:****:****:****:****"`
-- **风险**: 高。在现代网络环境中IPv6地址越来越普遍，错误的脱敏格式可能导致日志解析失败或泄露部分IP信息
-- **修复难度**: 低
-- **代码**:
-  ```kotlin
-  // L3-L9: 问题代码
-  internal fun redactIp(ip: String): String {
-      val parts = ip.split(".")
-      if (parts.size == 4) {  // 仅支持IPv4
-          return "*.*.*.*"
-      }
-      return if (ip.length > 6) "${ip.take(6)}***" else "***"
-  }
-  ```
-
 ### H25: Tunnel服务心跳检测竞态条件 [待修复]
 - **状态**: 待修复
 - **位置**: `server/tunnel/main.go` (L336-359)
