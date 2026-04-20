@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -63,26 +64,28 @@ class ModuleCoordinator @Inject constructor(
     
     // ==================== State Update Methods ====================
     fun updateConnectionState(state: MqttConnectionState) {
-        _connectionState.value = state
+        _connectionState.update { state }
         publishEvent(AppEvent.ConnectionStateChange(state))
     }
     
     fun updateVpnState(state: VpnStatus) {
-        _vpnState.value = state
+        _vpnState.update { state }
         publishEvent(AppEvent.VpnStateChange(state))
     }
     
     fun updateWifiState(connected: Boolean, ssid: String?) {
-        _wifiState.value = if (connected) {
-            WiFiState.Connected(ssid ?: "")
-        } else {
-            WiFiState.Disconnected
+        _wifiState.update {
+            if (connected) {
+                WiFiState.Connected(ssid ?: "")
+            } else {
+                WiFiState.Disconnected
+            }
         }
         publishEvent(AppEvent.WiFiStateChange(connected, ssid))
     }
     
     fun updateUiState(state: UiState) {
-        _uiState.value = state
+        _uiState.update { state }
     }
     
     // ==================== WiFi State ====================

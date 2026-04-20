@@ -924,14 +924,6 @@
 - **风险**: Low。影响小，最多2个监听器残留
 - **修复**: 在`onCreate()`中先执行防御性`unregister`再`register`
 
-### N27: ModuleCoordinator状态更新使用直接赋值
-- **状态**: 待修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/di/ModuleCoordinator.kt` L66,71,76,85
-- **问题**: 使用`_connectionState.value = `、`_vpnState.value = `、`_wifiState.value = `、`_uiState.value = `直接赋值
-- **风险**: Low。当前为完整对象替换而非copy操作，功能正确但风格不一致；未来若改为基于当前状态更新则存在竞争风险
-- **修复**: 统一使用`update{}`原子操作
-- **发现日期**: 2026-04-19（代码审查中发现）
-
 ---
 
 ## High Severity
