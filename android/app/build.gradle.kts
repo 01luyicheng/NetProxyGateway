@@ -41,7 +41,7 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField("Boolean", "MQTT_USE_TLS", "true")
-        buildConfigField("Boolean", "MQTT_TRUST_ALL_CERTS", "true")
+        buildConfigField("Boolean", "MQTT_TRUST_ALL_CERTS", "false")
         buildConfigField("String", "MQTT_BROKER_URL_TLS", "\"${mqttBrokerUrlTlsDebug}\"")
         buildConfigField("String", "MQTT_BROKER_URL_PLAIN", "\"${mqttBrokerUrlPlainDebug}\"")
         buildConfigField("String", "MQTT_TLS_PUBLIC_KEY_PINS", "\"${mqttTlsPublicKeyPinsDebug}\"")
@@ -127,6 +127,7 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.material3:material3")
 
     implementation("com.google.dagger:hilt-android:2.58")

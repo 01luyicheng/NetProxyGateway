@@ -51,4 +51,16 @@
     <string name="language_follow_system">跟随系统</string>
     <string name="language_english">英语 (English)</string>
     <string name="language_simplified_chinese">简体中文</string>
+
+    <string name="settings_title">设置</string>
+    <string name="open_settings">打开设置</string>
+    <string name="navigate_back">返回</string>
+    <string name="settings_dev_debug_audit">开发调试与审计</string>
+    <string name="settings_view_logs">查看近期日志</string>
+    <string name="settings_skip_mqtt_cert_validation">跳过 MQTT 证书校验</string>
+    <string name="settings_skip_mqtt_cert_validation_desc">仅 Debug 可用，用于自签名证书排障。</string>
+    <string name="settings_debug_only">该分组仅在 Debug 构建中可用。</string>
+    <string name="audit_logs_title">审计日志</string>
+    <string name="audit_logs_empty">暂无近期日志。</string>
+    <string name="clear_logs">清空日志</string>
 </resources>

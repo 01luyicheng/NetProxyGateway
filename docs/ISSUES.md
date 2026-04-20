@@ -25,85 +25,6 @@
   ```
 - **建议修复**: 添加构建时Lint静态检查或Gradle插件验证，确保release构建配置中`MQTT_TRUST_ALL_CERTS=false`
 
-### C4: SOCKS5代理JSON注入风险 [已修复]
-- **状态**: 已修复
-- **位置**: `server/socks5-proxy/main.go` (L85-L127), `server/socks5-proxy/main_test.go` (L118-L217)
-- **问题描述**: 原实现使用 `fmt.Sprintf` 拼接JSON，请求体在特殊字符场景下可能格式破坏。
-- **修复内容**:
-  1. `validateWithAPI` 改为结构化请求体 + `json.Marshal` 编码。
-  2. 使用 `bytes.NewReader` 构建请求，避免手工字符串拼接。
-  3. 为 URL 解析、请求体编码、请求发送、响应解码增加上下文化错误包装。
-  4. 新增特殊字符与长字符串透传回归测试，覆盖 `"`、`\\`、换行和长字段场景。
-- **验证结果**:
-  - `cd server/socks5-proxy && go test -count=1 ./...` 通过
-  - `cd server/api && go test -count=1 ./...` 通过
-  - `cd server/tunnel && go test -count=1 ./...` 通过
-
-### C5: API服务updatePairingSessionDB错误被忽略 [已修复]
-- **状态**: 已修复
-- **位置**: `server/api/main.go` (L688, L735)
-- **问题描述**: 在`getPairingSession`和`updatePairingSession`函数中，更新session状态为"expired"时，`s.updatePairingSessionDB(session)`的错误被忽略。如果数据库写入失败，session状态可能不一致
-- **风险**: Medium。数据库写入失败时状态不一致，可能导致过期session仍被视为有效
-- **代码**:
-  ```go
-  // L688-690: 问题代码（getPairingSession）
-  if time.Now().After(session.ExpiresAt) {
-      session.Status = "expired"
-      s.updatePairingSessionDB(session)  // 错误被忽略！
-      c.JSON(http.StatusGone, gin.H{"error": ErrSessionExpired})
-      return
-  }
-  
-  // L735-737: 问题代码（updatePairingSession）
-  if time.Now().After(session.ExpiresAt) {
-      session.Status = "expired"
-      s.updatePairingSessionDB(session)  // 错误被忽略！
-      c.JSON(http.StatusGone, gin.H{"error": ErrSessionExpired})
-      return
-  }
-  ```
-- **修复方案**:
-  1. 新增 `markSessionExpired` 方法提取重复逻辑
-  2. 统一错误处理：数据库更新失败时返回 500 错误
-  3. 两处过期检查现在都使用新方法
-  
-  ```go
-  // 新增方法
-  func (s *Server) markSessionExpired(session *PairingSession) error {
-      session.Status = "expired"
-      return s.updatePairingSessionDB(session)
-  }
-  
-  // 统一错误处理
-  if time.Now().After(session.ExpiresAt) {
-      if err := s.markSessionExpired(session); err != nil {
-          log.Printf("Failed to mark session %s as expired: %v", session.Code, err)
-          c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateSession})
-          return
-      }
-      c.JSON(http.StatusGone, gin.H{"error": ErrSessionExpired})
-      return
-  }
-  ```
-- **验证结果**:
-  - `go build` 构建成功
-  - `go vet` 静态检查通过
-  - Subagents交叉审查通过
-- **相关提交**: 修复API服务updatePairingSessionDB错误处理不一致问题
-
-### C6: API服务generateRandomString错误处理缺失 [已修复]
-- **状态**: 已修复
-- **位置**: `server/api/main.go` (L265)
-- **问题描述**: `generateRandomString`函数中`rand.Read(b)`的错误被忽略。虽然该函数已被标记为Deprecated，但在极端情况下（如系统熵池耗尽），可能产生不安全的随机数。
-- **修复方案**: 采用方案2 - 删除废弃函数
-  - 全局搜索确认`generateRandomString`无任何调用方
-  - 删除整个函数（约17行代码）
-  - 保留`generateSecureRandomString`作为唯一安全的随机字符串生成函数
-- **验证结果**: 
-  - `go build` 构建成功
-  - `go test -v ./...` 所有测试通过
-- **相关提交**: 删除未使用的generateRandomString函数
-
 ---
 
 ## High
@@ -154,19 +75,6 @@
   1. 生产环境强制要求配置证书固定
   2. 空配置时抛出异常而非仅警告
   3. 添加构建时检查确保配置正确
-
-### S1: SOCKS5代理relay函数goroutine泄漏 [已修复]
-- **状态**: 已修复
-- **位置**: `server/socks5-proxy/main.go` (`relay`)
-- **修复内容**:
-  1. `relay` 改为等待两个方向的转发 goroutine 都退出后再返回
-  2. 使用 `sync.Once` 在首个方向结束时统一关闭两端连接，确保另一个方向可退出
-  3. 增加 `isExpectedRelayError`，过滤连接主动关闭场景下的预期错误
-- **验证结果**:
-  - 在 `server/socks5-proxy` 目录执行：`go test -run TestRelay_ClosesPeerConnectionOnHalfClose -count=1 ./...` 通过
-  - 在 `server/socks5-proxy` 目录执行：`go test -race ./...` 通过（前置：Windows 下已安装并配置 gcc）
-  - 在 `server/socks5-proxy` 目录执行：`staticcheck ./...` 通过
-- **相关测试**: `server/socks5-proxy/main_test.go` 新增 `TestRelay_ClosesPeerConnectionOnHalfClose`
 
 ### H20: API服务JWT令牌验证不完善 [待修复]
 - **状态**: 待修复
@@ -234,47 +142,6 @@
   }
   ```
 
-### H22: SOCKS5代理WebSocket读取无超时 [已修复]
-- **状态**: 已修复
-- **位置**: `server/socks5-proxy/main.go` (`readLoop`)
-- **修复内容**:
-  1. 在 `readLoop` 中增加 `SetReadDeadline`（初始与每次循环刷新）
-  2. 增加 `SetPongHandler` 续期读超时
-  3. 对读超时错误进行显式分支处理并退出连接循环，避免无限挂起
-- **验证结果**:
-  - 在 `server/socks5-proxy` 目录执行：`go test ./...` 通过
-  - 在 `server/socks5-proxy` 目录执行：`go test -race ./...` 通过（前置：Windows 下已安装并配置 gcc）
-  - 在 `server/socks5-proxy` 目录执行：`staticcheck ./...` 通过
-  - 注：`readLoop` 超时分支专项回归测试待补充
-
-### H23: SOCKS5代理StreamConn双重锁嵌套 [已修复]
-- **状态**: 已修复
-- **位置**: `server/socks5-proxy/main.go` (`StreamConn.Write`, `StreamConn.Close`, `ConnectThroughTunnel`)
-- **修复内容**:
-  1. `StreamConn.Write` 不再在持有 `s.mu` 时执行网络写操作
-  2. 先在 `s.mu` 内复制连接/锁引用后释放，再进入写锁与 IO，降低锁嵌套风险
-  3. 为 `Write` 与 `Close` 的 websocket 写入增加 `SetWriteDeadline`，避免锁持有期间无限阻塞
-  4. **修复锁释放问题**: 使用 `defer` 确保 `writeMu` 在 panic 时也能释放，避免死锁
-- **验证结果**:
-  - 在 `server/socks5-proxy` 目录执行：`go test ./...` 通过
-  - 在 `server/socks5-proxy` 目录执行：`go test -race ./...` 通过（前置：Windows 下已安装并配置 gcc）
-  - 在 `server/socks5-proxy` 目录执行：`staticcheck ./...` 通过
-  - 注：`StreamConn.Write/Close` 并发竞争专项回归测试待补充
-
-### H24: Tunnel服务CheckOrigin允许所有来源 [已修复]
-- **状态**: 已修复
-- **位置**: `server/tunnel/main.go` (`NewServer`, `checkOrigin`, `parseAllowedOrigins`), `server/tunnel/main_test.go` (`TestCheckOrigin*`)
-- **问题描述**: 旧实现对所有 Origin 放行，存在来源滥用风险。
-- **修复内容**:
-  1. 将 `CheckOrigin` 从固定放行改为 `server.checkOrigin`。
-  2. 默认仅允许空 Origin（非浏览器客户端）与本地来源（localhost/127.0.0.1/::1）。
-  3. 新增白名单配置：`TUNNEL_ALLOWED_ORIGINS`（环境变量）与 `-allowed-origins`（命令行），环境变量优先。
-  4. 未配置白名单时，非本地 Origin 默认拒绝。
-  5. 新增回归测试覆盖未授权拒绝、空 Origin 允许、本地 Origin 允许、白名单允许。
-- **验证结果**:
-  - 在 `server/tunnel` 目录执行：`go test -run "TestCheckOrigin" -count=1 ./...` 通过
-  - 在 `server/tunnel` 目录执行：`go test -count=1 ./...` 通过
-
 ### H25: Tunnel服务心跳检测竞态条件 [待修复]
 - **状态**: 待修复
 - **位置**: `server/tunnel/main.go` (L336-359)
@@ -291,77 +158,9 @@
   ```
 - **建议修复**: 在调用前检查并加锁保护
 
-### H26: Android 13+ 语言状态双数据源导致回显不一致 [已修复]
-- **状态**: 已修复
-- **位置**:
-  - `android/app/src/main/java/com/netproxy/gateway/i18n/AppLocale.kt` (`applyLanguage`, `getSelectedLanguageTag`, `wrap`)
-  - `android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt` (`LanguageSettingsCard`)
-- **问题描述**: Android 13+ 分支使用 `AppCompatDelegate.setApplicationLocales()` 切换语言，但最初未同步写入 SharedPreferences，导致设置页回显与实际语言可能不一致。
-- **修复方案**:
-  1. `AppLocale.applyLanguage()` 中统一先归一化并持久化 language tag，再执行平台分支逻辑
-  2. Android 13+ 与低版本统一通过 `getSelectedLanguageTag()` 回读同一状态源
-  3. 新增 `AppLocaleTest` 验证 Android 13+/低版本下持久化与回读一致
-- **验证结果**:
-  - `:app:testDebugUnitTest --tests com.netproxy.gateway.i18n.AppLocaleTest` 通过
-  - `:app:testDebugUnitTest` 全量通过
-  - `assembleDebug` 通过
-
-### H27: 运行中前台服务通知不随语言切换即时刷新 [已修复]
-- **状态**: 已修复
-- **位置**:
-  - `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt`
-  - `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyService.kt`
-  - `android/app/src/main/java/com/netproxy/gateway/i18n/AppLocale.kt`
-- **问题描述**: 当前语言切换主要触发 Activity 层更新；运行中的前台服务通知文案在服务启动时创建后未主动刷新，导致 UI 语言切换后通知仍显示旧语言。
-- **修复方案**:
-  1. 在 `AppLocale` 中添加语言变更回调机制：`registerLanguageChangeListener(listenerId, ...)` 和 `unregisterLanguageChangeListener(listenerId)`
-  2. 在 `applyLanguage()` 执行后触发回调，通知所有监听者语言已变更
-  3. `VpnService.onCreate()` 中注册监听，收到回调时调用 `updateNotification()` 刷新前台通知
-  4. `Socks5ProxyService.onCreate()` 中注册监听，收到回调时刷新前台通知
-  5. 两个服务的 `onDestroy()` 中按 listenerId 注销监听，确保资源正确释放
-  6. 仅在服务 RUNNING 状态时刷新通知，避免启动/停止过程中的不必要操作
-  7. 通知文案改为 `AppLocale.getString(...)` 动态读取，避免依赖旧 Service Context locale
-  8. 回调派发增加异常隔离，单个监听器异常不会中断其他监听器与主流程
-- **代码改动**:
-  - `AppLocale.kt`: 添加多监听器管理与异常隔离；`applyLanguage()` 末尾触发回调
-  - `VpnService.kt`: `onCreate()` 注册监听、添加 `registerLanguageChangeListener()`、`unregisterLanguageChangeListener()`、`updateNotification()` 方法、`onDestroy()` 注销监听
-  - `Socks5ProxyService.kt`: `onCreate()` 注册监听、添加 `registerLanguageChangeListener()`、`updateNotification()` 方法、`onDestroy()` 注销监听
-- **验证结果**:
-  - 单元测试：329/329 通过（新增 2 个回调测试）
-  - APK 构建：BUILD SUCCESSFUL
-  - 修复风险：低。使用简单回调机制，最小改动，避免复杂的事件总线或观察者模式
-
 ---
 
 ## Medium
-
-### M21: i18n关键路径测试覆盖不足 [已修复]
-- **状态**: 已修复
-- **位置**:
-  - `android/app/src/main/java/com/netproxy/gateway/i18n/AppLocale.kt`
-  - `android/app/src/test/java/com/netproxy/gateway/i18n/AppLocaleTest.kt`
-- **问题描述**: 新增测试主要覆盖 ViewModel 的文案读取，缺少语言切换关键路径测试（tag 正规化、多次切换、服务通知刷新链路）。
-- **修复方案**:
-  1. 增加 `AppLocale` 单元测试覆盖关键路径：
-     - `normalizeLanguageTag_rejectedUnsupportedTag()`: 验证非支持语言被正规化为 null
-     - `normalizeLanguageTag_trimsWhitespaceAndNormalizes()`: 验证空格清理和正规化
-     - `normalizeLanguageTag_emptyStringBecomesNull()`: 验证空字符串处理
-     - `multipleSwitches_sequentialCalls_persists()`: 验证多次切换持久化（关键路径）
-     - `setSelectedLanguageTag_directCall_persists()`: 验证直接调用持久化
-     - `wrap_withoutLanguageTag_returnsOriginalContext()`: 验证无设置时返回原始 context
-     - `wrap_withValidLanguageTag_wrapsContext()`: 验证有效语言标签时包装 context
-     - `languageChangeCallback_triggersOnApplyLanguage()`: 验证语言变更触发回调（H27 关键链路）
-    - `languageChangeCallback_multipleCallbacks()`: 验证多次切换多次触发回调
-    - `languageChangeCallback_multipleListeners_allReceiveEvents()`: 验证多监听器并存时都能收到事件
-    - `languageChangeCallback_oneListenerThrows_othersStillRun()`: 验证单监听器异常不影响其他监听器
-    - `wrap_usesLatestPreferenceWithoutContextRecreation()`: 验证语言偏好更新后 wrap 可读取最新 locale（不依赖 Context 重建）
-  2. 覆盖 normalization、persistence、wrap 和回调机制的所有关键分支
-- **代码改动**:
-  - `AppLocaleTest.kt`: 扩展关键路径测试到 15 个测试方法，覆盖回调、多监听器、异常隔离与 locale wrap 场景
-- **验证结果**:
-  - 单元测试：329/329 通过（新增 8 个测试）
-  - 覆盖率：所有关键路径都有对应测试，包括 Android 13+ 和低版本分支
-  - 测试质量：使用 TDD 方式编写，先失败后通过，确保测试有效性
 
 ### M1: 边界条件：IP地址解析验证
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/utils/IpAddressUtils.kt` (L6-L18)
@@ -783,20 +582,6 @@
   }
   ```
 
-### H13: constructReturnPacket 潜在数组越界 [已修复]
-- **状态**: 已修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L600-L746), `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt` (L1648-L1825)
-- **问题描述**: 原实现缺少 `payloadLen/totalLen` 上界检查和 IPv4 格式防御性校验，可能触发回包构造崩溃。
-- **修复内容**:
-  1. `constructReturnPacket` 新增 `payloadLen`、`maxPayloadLen`、`totalLen` 边界检查；无效时返回 `0`。
-  2. 新增 `parseIpv4Parts`，使用 `toIntOrNull + 4段 + 0..255` 校验，IP 非法时返回 `0`。
-  3. `processTcpReturn` 在 `packetLen <= 0` 时丢弃该回包，并执行连接归还 + 会话移除，避免异常会话滞留。
-  4. 新增 H13 回归测试，覆盖超大 payload、非法 IP、失败分支不注入与资源回收行为。
-- **验证结果**:
-  - `android/gradlew.bat -p android :app:testDebugUnitTest --tests com.netproxy.gateway.vpn.VpnServiceTest --stacktrace --no-daemon` 通过
-  - `android/gradlew.bat -p android :app:testDebugUnitTest --stacktrace --no-daemon` 通过
-  - `android/gradlew.bat -p android assembleDebug --stacktrace --no-daemon` 通过
-
 ### H14: constructReturnPacket 拒绝0长度payload过于严格 [新发现-已验证]
 - **状态**: 待修复
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L650)
@@ -968,21 +753,6 @@
 - **问题描述**: 没有限制单个连接的消息速率，恶意客户端可能发送大量消息导致DoS
 - **风险**: 中。可能导致服务资源耗尽
 - **建议修复**: 添加基于令牌桶或滑动窗口的速率限制
-
-### M20: Tunnel服务统计信息端点无认证 [已修复]
-- **状态**: 已修复
-- **位置**: `server/tunnel/main.go` (`authorizeStats`, `handleStats`, `main`), `server/tunnel/main_test.go` (`TestAuthorizeStats`, `TestHandleStats`)
-- **问题描述**: `/stats` 原先无访问控制，可能泄露在线设备数量等运行信息。
-- **修复内容**:
-  1. 新增 `authorizeStats` 访问控制函数。
-  2. `/stats` 默认拒绝访问，只有在配置了 `TUNNEL_STATS_TOKEN` 后，携带正确 `X-Stats-Token` 的请求才允许访问。
-  3. 移除“本地回环免鉴权”路径，避免反向代理回源造成的认证旁路风险。
-  4. token 比较使用 `subtle.ConstantTimeCompare`，降低时序泄露风险。
-  5. 新增配置：`TUNNEL_STATS_TOKEN`（环境变量）与 `-stats-token`（命令行），环境变量优先。
-  6. 新增回归测试覆盖无 token 拒绝、错误 token 拒绝、正确 token 允许，以及回环/转发头场景在无 token 下拒绝。
-- **验证结果**:
-  - 在 `server/tunnel` 目录执行：`go test -run "TestHandleStats|TestAuthorizeStats" -count=1 ./...` 通过
-  - 在 `server/tunnel` 目录执行：`go test -count=1 ./...` 通过
 
 ---
 
@@ -1168,3 +938,111 @@
 - **风险**: Medium。虽然当前代码无挂起点，但违背StateFlow最佳实践，后续维护可能引入竞态
 - **修复**: 使用单次快照模式：`val snapshot = _uiState.value`，然后使用`snapshot.deviceId`
 - **发现日期**: 2026-04-19（代码审查验证确认）
+
+---
+
+## 2026-04-20
+
+### N29: safeCloseMqttClient参数空安全问题
+- **状态**: 无实际风险（设计可接受）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` L278
+- **问题**: 类型不匹配：`oldClient` 为 `MqttClient?`，方法参数为 `MqttClient`
+- **风险**: Low。当前代码安全，调用前有空检查，但设计依赖调用前的空检查
+- **建议**: 可接受当前实现
+
+### N30: MQTT日志标签硬编码
+- **状态**: 待修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` 多处
+- **问题**: 代码中多次硬编码 `"MQTT"` 字符串作为日志标签（出现7次以上）
+- **风险**: Low。维护困难，标签不一致风险
+- **建议修复**: 提取为常量 `private const val AUDIT_TAG_MQTT = "MQTT"`
+
+### N31: MainScreen可访问性问题
+- **状态**: 待修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt`
+- **问题**: 
+  - Switch组件周围的Row缺少 `toggleable` 修饰符（L244-263, L451-460）
+  - RadioButton点击区域过小，仅点击radio本身可选中（L558-569）
+  - 缺少内容描述和语义标签
+- **风险**: Medium。屏幕阅读器用户难以使用，点击区域过小影响用户体验
+- **建议修复**: 
+  - 为Switch添加 `Modifier.toggleable(role = Role.Switch)`
+  - 为RadioButton添加 `Modifier.selectable(role = Role.RadioButton)`
+  - 添加语义标签
+
+### N32: MainScreen性能优化问题
+- **状态**: 待修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt` 多处
+- **问题**: 
+  - `SettingsScreen`中状态初始化每次重组都调用（L189-191）
+  - `LanguageSettingsCard`中每次重组都执行 `findActivity()`（L537-538）
+  - `AuditLogsScreen`列表反转创建新列表（L282）
+- **风险**: Low-Medium。可能导致不必要的重组和性能下降
+- **建议修复**: 
+  - 使用 `remember` 缓存Activity查找结果
+  - 考虑使用 `LazyListState` 控制滚动位置
+
+### N33: MainScreen状态管理问题
+- **状态**: 待修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt` L154-158
+- **问题**: `MainDashboard`直接传递 `MainViewModel` 而非回调函数
+- **风险**: Medium。降低了组件可测试性和可复用性
+- **建议修复**: 使用"状态向下传递，事件向上传递"模式，传递回调函数而非ViewModel
+
+### N34: MainScreen缺少预览函数
+- **状态**: 待修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt`
+- **问题**: 整个文件缺少 `@Preview` 函数，无法在设计时查看UI效果
+- **风险**: Low。开发效率影响
+- **建议修复**: 添加 `@Preview` 函数
+
+### N35: MqttConnectionManagerTLS测试边界覆盖不足
+- **状态**: 待修复
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/connection/MqttConnectionManagerTlsPolicyTest.kt`
+- **问题**: 
+  - 缺少 `cause = null` 边界测试
+  - 缺少 `error.message = null` 边界测试
+  - 缺少特殊字符和空字符串测试
+- **风险**: Low。测试覆盖不完整
+- **建议修复**: 添加缺失的边界测试用例
+
+---
+
+## High Severity
+
+### H26: 生产环境证书绕过缺少显式安全检查
+- **状态**: 待修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt`
+- **问题**: 当前仅依赖 `shouldTrustAllCertificatesForCurrentBuild()` 的BuildConfig.DEBUG检查，缺少显式防御性校验
+- **风险**: Medium。防御纵深不足，如果BuildConfig.DEBUG检测失效可能导致安全问题
+- **建议修复**: 在 `createSecureSocketFactory()` 开头添加显式运行时检查
+  ```kotlin
+  if (!BuildConfig.DEBUG && BuildConfig.MQTT_TRUST_ALL_CERTS) {
+      throw IllegalStateException("MQTT_TRUST_ALL_CERTS=true is not allowed in production builds")
+  }
+  ```
+
+---
+
+## Medium Severity
+
+### M20: TLS证书固定非强制性
+- **状态**: 待修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` L191-198, `MqttTlsPinning.kt` L44-47
+- **问题**: 当 `MQTT_TLS_PUBLIC_KEY_PINS` 为空时，仅记录警告，仍使用默认CA验证
+- **风险**: Medium。Release构建可能意外使用不安全的证书验证方式
+- **建议修复**: Release构建强制要求配置证书固定，空配置时抛出异常
+
+### M21: safeCloseMqttClient IO调度问题
+- **状态**: 待修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` L136-158
+- **问题**: `client.disconnect()` 是同步阻塞调用（Paho MQTT默认30秒超时），在协程中执行可能阻塞Default调度器线程
+- **风险**: Medium。网络延迟高或服务器无响应时，可能阻塞调度器长达30秒，影响其他协程执行
+- **建议修复**: 使用 `withContext(Dispatchers.IO)` 包装阻塞IO操作
+  ```kotlin
+  private suspend fun safeCloseMqttClient(...) {
+      withContext(Dispatchers.IO) {
+          // ... disconnect() 和 close()
+      }
+  }
+  ```

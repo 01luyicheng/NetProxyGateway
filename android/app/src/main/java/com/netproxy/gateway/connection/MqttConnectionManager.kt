@@ -2,6 +2,8 @@ package com.netproxy.gateway.connection
 
 import android.content.Context
 import com.netproxy.gateway.BuildConfig
+import com.netproxy.gateway.debug.AppAuditLogStore
+import com.netproxy.gateway.debug.DebugSettingsStore
 import com.netproxy.gateway.di.ApplicationScope
 import com.netproxy.gateway.result.AppResult
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -92,27 +94,81 @@ class MqttConnectionManager @Inject constructor(
         }
     }
 
+    internal fun buildConnectionLostAuditMessage(
+        cause: Throwable?,
+        isDebugBuild: Boolean = BuildConfig.DEBUG
+    ): String {
+        return if (isDebugBuild) {
+            "Connection lost: ${cause?.message ?: "unknown reason"}"
+        } else {
+            "Connection lost"
+        }
+    }
+
+    internal fun buildConnectionErrorAuditMessage(
+        error: Throwable,
+        isDebugBuild: Boolean = BuildConfig.DEBUG
+    ): String {
+        return if (isDebugBuild) {
+            "Connection error: ${error.message ?: "unknown"}"
+        } else {
+            "Connection error"
+        }
+    }
+
+    internal fun shouldTrustAllCertificatesForCurrentBuild(isDebugBuild: Boolean = BuildConfig.DEBUG): Boolean {
+        if (!isDebugBuild) {
+            return false
+        }
+        return DebugSettingsStore.isSkipMqttCertValidationEnabled(context)
+    }
+
     /**
-     * 根据 BuildConfig 配置决定使用哪种证书验证方式：
-     * - release 构建：使用系统默认 CA 证书（验证服务器证书，release 构建安全）
-     * - debug 构建：信任所有证书（仅用于开发测试自签名证书，禁止用于生产）
-     * 
-     * 安全限制：MQTT_TRUST_ALL_CERTS 在 release 构建中必须为 false
+     * 安全关闭 MQTT 客户端
+     * @param client 要关闭的 MQTT 客户端
+     * @param logContext 日志上下文标识
+     * @param checkConnected 是否先检查 isConnected
+     * @param rethrowCancellation 是否重新抛出 CancellationException
+     */
+    private suspend fun safeCloseMqttClient(
+        client: MqttClient,
+        logContext: String,
+        checkConnected: Boolean = false,
+        rethrowCancellation: Boolean = false
+    ) {
+        try {
+            if (!checkConnected || client.isConnected) {
+                client.disconnect()
+            }
+        } catch (e: CancellationException) {
+            if (rethrowCancellation) throw e
+        } catch (e: MqttException) {
+            logger.error("Disconnect error ($logContext)", e)
+        } finally {
+            try {
+                client.close()
+            } catch (e: Exception) {
+                logger.error("Close error ($logContext)", e)
+            }
+        }
+    }
+
+    /**
+     * 证书策略：
+     * - release 构建：始终使用生产证书校验。
+     * - debug 构建：可通过高级开关临时跳过证书校验。
      */
     private fun createSecureSocketFactory(): SSLSocketFactory {
-        // 安全检查：release 构建 (DEBUG=false) 不允许启用信任所有证书
-        if (!BuildConfig.DEBUG && BuildConfig.MQTT_TRUST_ALL_CERTS) {
-            throw IllegalStateException(
-                "TRUST_ALL_CERTS is not allowed in release builds. " +
-                "Please set MQTT_TRUST_ALL_CERTS to false in build configuration."
-            )
-        }
+        val trustAllCertificates = shouldTrustAllCertificatesForCurrentBuild()
 
-        return if (BuildConfig.MQTT_TRUST_ALL_CERTS) {
-            // debug 构建：信任所有证书（支持自签名证书）
+        return if (trustAllCertificates) {
+            AppAuditLogStore.warn(
+                "MQTT",
+                "TLS certificate validation disabled (debug override)"
+            )
             createDevSocketFactory()
         } else {
-            // release 构建：使用系统默认 CA 证书
+            AppAuditLogStore.info("MQTT", "TLS certificate validation enabled")
             createProductionSocketFactory()
         }
     }
@@ -135,6 +191,10 @@ class MqttConnectionManager @Inject constructor(
         val configuredPins = MqttTlsPinning.parseConfiguredPins(BuildConfig.MQTT_TLS_PUBLIC_KEY_PINS)
         if (configuredPins.isEmpty()) {
             logger.warn("MQTT TLS pinning is disabled: MQTT_TLS_PUBLIC_KEY_PINS is empty. Falling back to default CA validation.")
+            AppAuditLogStore.warn(
+                "MQTT",
+                "TLS pinning not configured; fallback to system CA validation"
+            )
         }
         val pinningTrustManager = MqttTlsPinning.createPinningTrustManager(
             delegate = defaultTrustManager,
@@ -215,19 +275,7 @@ class MqttConnectionManager @Inject constructor(
 
                 // 在同步块外执行 close() IO 操作（避免阻塞其他线程调用 disconnect()）
                 if (oldClient != null) {
-                    try {
-                        if (oldClient.isConnected) {
-                            oldClient.disconnect()
-                        }
-                    } catch (disconnectError: MqttException) {
-                        logger.error("Disconnect old MQTT client error", disconnectError)
-                    } finally {
-                        try {
-                            oldClient.close()
-                        } catch (closeError: Exception) {
-                            logger.error("Close old MQTT client error", closeError)
-                        }
-                    }
+                    safeCloseMqttClient(oldClient, "old client cleanup", checkConnected = true)
                 }
 
                 val options = MqttConnectOptions().apply {
@@ -252,6 +300,10 @@ class MqttConnectionManager @Inject constructor(
                             return
                         }
                         logger.warn("Connection lost: ${cause?.message}")
+                        AppAuditLogStore.warn(
+                            "MQTT",
+                            buildConnectionLostAuditMessage(cause)
+                        )
                         _connectionState.value = MqttConnectionState.Error(cause?.message ?: "Connection lost")
                         if (shouldStayConnected) {
                             scheduleReconnect(deviceId, authToken, generation)
@@ -314,17 +366,7 @@ class MqttConnectionManager @Inject constructor(
 
                 if (!shouldProceed) {
                     // 在同步块外执行关闭操作
-                    try {
-                        createdClient.disconnect()
-                    } catch (e: MqttException) {
-                        logger.error("Disconnect error", e)
-                    } finally {
-                        try {
-                            createdClient.close()
-                        } catch (e: Exception) {
-                            logger.error("Close error", e)
-                        }
-                    }
+                    safeCloseMqttClient(createdClient, "connection abort")
                     // 注意：不在此处设置状态，因为：
                     // 1. 如果是 generation 过期，状态可能已被新连接设置
                     // 2. 如果是 disconnect() 被调用，状态已在 disconnect() 中设置
@@ -361,6 +403,7 @@ class MqttConnectionManager @Inject constructor(
                     return@launch
                 }
                 _connectionState.value = MqttConnectionState.Connected
+                AppAuditLogStore.info("MQTT", "Connection established")
 
                 subscribe("device/$deviceId/control")
                 startHeartbeat(deviceId, authToken, generation)
@@ -374,17 +417,7 @@ class MqttConnectionManager @Inject constructor(
                             }
                         }
 
-                        try {
-                            clientToClose.disconnect()
-                        } catch (ex: MqttException) {
-                            logger.error("Disconnect error during exception handling", ex)
-                        } finally {
-                            try {
-                                clientToClose.close()
-                            } catch (ex: Exception) {
-                                logger.error("Close error during exception handling", ex)
-                            }
-                        }
+                        safeCloseMqttClient(clientToClose, "exception handling")
                     }
 
                     if (e is CancellationException) {
@@ -395,6 +428,7 @@ class MqttConnectionManager @Inject constructor(
                         return@launch
                     }
                     logger.error("MQTT connection error", e)
+                    AppAuditLogStore.error("MQTT", buildConnectionErrorAuditMessage(e))
                     if (!shouldStayConnected || generation != connectionGeneration.get()) {
                         return@launch
                     }
@@ -471,6 +505,7 @@ class MqttConnectionManager @Inject constructor(
                 consecutiveFailures++
                 if (consecutiveFailures >= MAX_HEARTBEAT_FAILURES) {
                     logger.warn("Max heartbeat failures reached, triggering reconnect")
+                    AppAuditLogStore.warn("MQTT", "Max heartbeat failures reached; reconnecting")
                     if (shouldStayConnected && generation == connectionGeneration.get()) {
                         _connectionState.value = MqttConnectionState.Error("Max heartbeat failures reached")
                         scheduleReconnect(deviceId, authToken, generation)
@@ -528,6 +563,7 @@ class MqttConnectionManager @Inject constructor(
     }
 
     fun disconnect() {
+        AppAuditLogStore.info("MQTT", "Disconnect requested")
         val client = synchronized(this@MqttConnectionManager) {
             shouldStayConnected = false
             connectionGeneration.incrementAndGet()
@@ -551,20 +587,7 @@ class MqttConnectionManager @Inject constructor(
         }
 
         scope.launch {
-            ensureActive()
-            try {
-                client.disconnect()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: MqttException) {
-                logger.error("Disconnect error", e)
-            } finally {
-                try {
-                    client.close()
-                } catch (e: Exception) {
-                    logger.error("Close error", e)
-                }
-            }
+            safeCloseMqttClient(client, "disconnect", rethrowCancellation = true)
         }
     }
 }

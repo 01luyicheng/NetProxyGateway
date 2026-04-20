@@ -3,7 +3,16 @@ package com.netproxy.gateway.ui.screens
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import com.netproxy.gateway.BuildConfig
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -14,10 +23,43 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.netproxy.gateway.R
+import com.netproxy.gateway.debug.AppAuditLogStore
+import com.netproxy.gateway.debug.AuditLogEntry
+import com.netproxy.gateway.debug.AuditLogLevel
+import com.netproxy.gateway.debug.DebugSettingsStore
 import com.netproxy.gateway.i18n.AppLocale
 import com.netproxy.gateway.ui.viewmodel.MainViewModel
 import com.netproxy.gateway.ui.viewmodel.UiState
 import com.netproxy.gateway.wifi.WifiNetwork
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
+
+private enum class MainPage {
+    Home,
+    Settings,
+    AuditLogs
+}
+
+internal object MainScreenNavigation {
+    val homePageName: String = MainPage.Home.name
+    val settingsPageName: String = MainPage.Settings.name
+    val auditLogsPageName: String = MainPage.AuditLogs.name
+
+    fun normalizePageName(pageName: String): String = when (pageName) {
+        homePageName,
+        settingsPageName,
+        auditLogsPageName -> pageName
+        else -> homePageName
+    }
+
+    fun backTargetPageName(currentPageName: String): String = when (normalizePageName(currentPageName)) {
+        auditLogsPageName -> settingsPageName
+        settingsPageName -> homePageName
+        else -> homePageName
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -25,11 +67,59 @@ fun MainScreen(
     viewModel: MainViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    var currentPageName by rememberSaveable { mutableStateOf(MainScreenNavigation.homePageName) }
+    val currentPage = remember(currentPageName) {
+        MainPage.valueOf(MainScreenNavigation.normalizePageName(currentPageName))
+    }
+    val navigateBack: () -> Unit = {
+        currentPageName = MainScreenNavigation.backTargetPageName(currentPageName)
+    }
+
+    BackHandler(enabled = currentPage != MainPage.Home) {
+        navigateBack()
+    }
+
+    LaunchedEffect(Unit) {
+        AppAuditLogStore.info("UI", "Main screen initialized")
+    }
+
+    val titleResId = when (currentPage) {
+        MainPage.Home -> R.string.app_name
+        MainPage.Settings -> R.string.settings_title
+        MainPage.AuditLogs -> R.string.audit_logs_title
+    }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(stringResource(R.string.app_name)) },
+                title = { Text(stringResource(titleResId)) },
+                navigationIcon = {
+                    if (currentPage != MainPage.Home) {
+                        IconButton(
+                            onClick = navigateBack
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = stringResource(R.string.navigate_back)
+                            )
+                        }
+                    }
+                },
+                actions = {
+                    if (currentPage == MainPage.Home) {
+                        IconButton(
+                            onClick = {
+                                AppAuditLogStore.info("UI", "Open settings")
+                                currentPageName = MainScreenNavigation.settingsPageName
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Settings,
+                                contentDescription = stringResource(R.string.open_settings)
+                            )
+                        }
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primary,
                     titleContentColor = MaterialTheme.colorScheme.onPrimary
@@ -37,30 +127,227 @@ fun MainScreen(
             )
         }
     ) { paddingValues ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .padding(16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            ConnectionStatusCard(uiState)
-            
-            Spacer(modifier = Modifier.height(16.dp))
-            
-            if (!uiState.isPaired) {
-                PairingSection(uiState, viewModel)
-            } else {
-                ConnectedOptionsSection(uiState, viewModel)
+        when (currentPage) {
+            MainPage.Home -> {
+                MainDashboard(
+                    uiState = uiState,
+                    viewModel = viewModel,
+                    paddingValues = paddingValues
+                )
             }
-            
-            Spacer(modifier = Modifier.height(16.dp))
-            
-            NetworkInfoCard(uiState)
+            MainPage.Settings -> {
+                SettingsScreen(
+                    paddingValues = paddingValues,
+                    onOpenAuditLogs = {
+                        AppAuditLogStore.info("Settings", "Open audit logs")
+                        currentPageName = MainScreenNavigation.auditLogsPageName
+                    }
+                )
+            }
+            MainPage.AuditLogs -> {
+                AuditLogsScreen(paddingValues = paddingValues)
+            }
+        }
+    }
+}
 
-            Spacer(modifier = Modifier.height(16.dp))
+@Composable
+private fun MainDashboard(
+    uiState: UiState,
+    viewModel: MainViewModel,
+    paddingValues: PaddingValues
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(paddingValues)
+            .padding(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        ConnectionStatusCard(uiState)
 
-            LanguageSettingsCard()
+        Spacer(modifier = Modifier.height(16.dp))
+
+        if (!uiState.isPaired) {
+            PairingSection(uiState, viewModel)
+        } else {
+            ConnectedOptionsSection(uiState, viewModel)
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        NetworkInfoCard(uiState)
+    }
+}
+
+@Composable
+private fun SettingsScreen(
+    paddingValues: PaddingValues,
+    onOpenAuditLogs: () -> Unit
+) {
+    val context = LocalContext.current
+    var skipMqttCertValidation by rememberSaveable {
+        mutableStateOf(DebugSettingsStore.isSkipMqttCertValidationEnabled(context))
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(paddingValues)
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState()),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        LanguageSettingsCard()
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = stringResource(R.string.settings_dev_debug_audit),
+                    style = MaterialTheme.typography.titleMedium
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                OutlinedButton(
+                    onClick = onOpenAuditLogs,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(stringResource(R.string.settings_view_logs))
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                if (DebugSettingsStore.isSkipMqttCertValidationSupported) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = stringResource(R.string.settings_skip_mqtt_cert_validation),
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = stringResource(R.string.settings_skip_mqtt_cert_validation_desc),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(12.dp))
+
+                        Switch(
+                            checked = skipMqttCertValidation,
+                            onCheckedChange = { enabled ->
+                                val success = DebugSettingsStore.setSkipMqttCertValidationEnabled(context, enabled)
+                                if (success) {
+                                    skipMqttCertValidation = enabled
+                                    if (enabled) {
+                                        AppAuditLogStore.warn(
+                                            "Settings",
+                                            "MQTT certificate validation disabled (debug only)"
+                                        )
+                                    } else {
+                                        AppAuditLogStore.info(
+                                            "Settings",
+                                            "MQTT certificate validation enabled"
+                                        )
+                                    }
+                                }
+                            }
+                        )
+                    }
+                } else {
+                    Text(
+                        text = stringResource(R.string.settings_debug_only),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AuditLogsScreen(
+    paddingValues: PaddingValues
+) {
+    val entries by AppAuditLogStore.entries.collectAsState()
+    val visibleEntries = remember(entries) { entries.asReversed() }
+    val formatter = remember {
+        DateTimeFormatter.ofPattern("HH:mm:ss", Locale.getDefault())
+            .withZone(ZoneId.systemDefault())
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(paddingValues)
+            .padding(16.dp)
+    ) {
+        OutlinedButton(
+            onClick = {
+                AppAuditLogStore.clear()
+            }
+        ) {
+            Text(stringResource(R.string.clear_logs))
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        if (visibleEntries.isEmpty()) {
+            Text(
+                text = stringResource(R.string.audit_logs_empty),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(
+                    items = visibleEntries,
+                    key = { entry -> entry.id }
+                ) { entry ->
+                    AuditLogEntryCard(entry = entry, formatter = formatter)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AuditLogEntryCard(
+    entry: AuditLogEntry,
+    formatter: DateTimeFormatter
+) {
+    val containerColor = when (entry.level) {
+        AuditLogLevel.INFO -> MaterialTheme.colorScheme.surfaceVariant
+        AuditLogLevel.WARN -> MaterialTheme.colorScheme.tertiaryContainer
+        AuditLogLevel.ERROR -> MaterialTheme.colorScheme.errorContainer
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = containerColor)
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(
+                text = "${formatter.format(Instant.ofEpochMilli(entry.timestampMs))} [${entry.level}] ${entry.tag}",
+                style = MaterialTheme.typography.labelMedium
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = entry.message,
+                style = MaterialTheme.typography.bodySmall
+            )
         }
     }
 }
