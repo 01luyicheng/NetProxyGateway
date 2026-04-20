@@ -648,13 +648,6 @@
 
 ## Low Severity
 
-### L9: SOCKS5代理StreamConn DataChan可能阻塞 [待修复]
-- **状态**: 待修复
-- **位置**: `server/socks5-proxy/main.go` (L320, L654-657)
-- **问题描述**: 如果 `DataChan` 已满且 `CloseChan` 未关闭，数据发送会阻塞或丢弃
-- **风险**: 低。可能导致数据丢失或延迟
-- **建议修复**: 添加默认分支处理丢弃情况，或增加缓冲区大小并监控
-
 ### L10: Tunnel服务设备状态通知无重试 [待修复]
 - **状态**: 待修复
 - **位置**: `server/tunnel/main.go` (L146-181)

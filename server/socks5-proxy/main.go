@@ -1,8 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
@@ -710,6 +710,10 @@ func (tc *TunnelClient) handleData(data json.RawMessage) {
 	select {
 	case stream.DataChan <- resp.Data:
 	case <-stream.CloseChan:
+	default:
+		log.Printf("DataChan full for stream %s, closing stream", resp.StreamID)
+		stream.Close()
+		tc.RemoveStream(resp.StreamID)
 	}
 }
 

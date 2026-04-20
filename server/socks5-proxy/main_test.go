@@ -459,6 +459,112 @@ func TestHandleConnectResponse_SuccessfulConnection_KeepsStream(t *testing.T) {
 	}
 }
 
+func TestHandleData_FullDataChan_DoesNotBlock(t *testing.T) {
+	tc := &TunnelClient{
+		streams: make(map[string]*StreamConn),
+	}
+
+	streamID := "test-stream-data-full-non-blocking"
+	stream := &StreamConn{
+		StreamID:      streamID,
+		DataChan:      make(chan []byte, 1),
+		CloseChan:     make(chan struct{}),
+		Connected:     make(chan bool, 1),
+		tunnelWriteMu: &tc.writeMu,
+	}
+
+	stream.DataChan <- []byte("already-buffered")
+
+	tc.mu.Lock()
+	tc.streams[streamID] = stream
+	tc.mu.Unlock()
+
+	payload, err := json.Marshal(struct {
+		StreamID string `json:"stream_id"`
+		Data     []byte `json:"data"`
+	}{
+		StreamID: streamID,
+		Data:     []byte("new-data"),
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal data payload: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		tc.handleData(payload)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("handleData should return quickly when DataChan is full")
+	}
+}
+
+func TestHandleData_FullDataChan_ClosesAndRemovesStream(t *testing.T) {
+	tc := &TunnelClient{
+		streams: make(map[string]*StreamConn),
+	}
+
+	streamID := "test-stream-data-full-cleanup"
+	stream := &StreamConn{
+		StreamID:      streamID,
+		DataChan:      make(chan []byte, 1),
+		CloseChan:     make(chan struct{}),
+		Connected:     make(chan bool, 1),
+		tunnelWriteMu: &tc.writeMu,
+	}
+
+	stream.DataChan <- []byte("already-buffered")
+
+	tc.mu.Lock()
+	tc.streams[streamID] = stream
+	tc.mu.Unlock()
+
+	payload, err := json.Marshal(struct {
+		StreamID string `json:"stream_id"`
+		Data     []byte `json:"data"`
+	}{
+		StreamID: streamID,
+		Data:     []byte("new-data"),
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal data payload: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		tc.handleData(payload)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("handleData should not block when DataChan is full")
+	}
+
+	if atomic.LoadInt32(&stream.Closed) != 1 {
+		t.Fatal("stream should be closed when DataChan is full")
+	}
+
+	select {
+	case <-stream.CloseChan:
+	default:
+		t.Fatal("stream CloseChan should be closed when DataChan is full")
+	}
+
+	tc.mu.RLock()
+	_, exists := tc.streams[streamID]
+	tc.mu.RUnlock()
+
+	if exists {
+		t.Fatal("stream should be removed from tc.streams when DataChan is full")
+	}
+}
+
 // TestConnectThroughTunnel_CleanupOnMarshalError 验证JSON序列化失败时的资源清理
 func TestConnectThroughTunnel_CleanupOnMarshalError(t *testing.T) {
 	// 创建一个包含无法序列化数据的请求
