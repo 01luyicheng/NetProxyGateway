@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -29,29 +30,29 @@ const (
 
 // 错误消息常量 - 统一使用 ErrFailedToXxx 命名风格
 const (
-	ErrFailedToParseRequest       = "invalid request format"
-	ErrFailedToQueryDatabase      = "database error"
-	ErrFailedToFindSession        = "session not found"
-	ErrFailedToFindPairingSession = "pairing session not found"
-	ErrFailedToGenerateCode       = "failed to generate pairing code"
-	ErrFailedToCreateSession      = "failed to create pairing session"
-	ErrFailedToUpdateSession      = "failed to update session"
-	ErrFailedToUpdateStatus       = "failed to update device status"
-	ErrFailedToGenerateToken      = "failed to generate session token"
-	ErrFailedToCreateToken        = "failed to create session token"
-	ErrFailedToValidateToken      = "missing or invalid bearer token"
-	ErrFailedToAuthenticate       = "invalid credentials"
-	ErrUnauthorized               = "unauthorized"
-	ErrForbidden                  = "forbidden"
-	ErrSessionExpired             = "session expired"
-	ErrPairingNotCompleted        = "pairing not completed"
-	ErrInvalidStatusTransition    = "invalid status transition"
-	ErrRateLimitExceeded          = "rate limit exceeded, please try again later"
-	ErrRateLimit                  = "rate limit exceeded"
-	ErrMissingEngineer            = "missing authenticated engineer"
+	ErrFailedToParseRequest        = "invalid request format"
+	ErrFailedToQueryDatabase       = "database error"
+	ErrFailedToFindSession         = "session not found"
+	ErrFailedToFindPairingSession  = "pairing session not found"
+	ErrFailedToGenerateCode        = "failed to generate pairing code"
+	ErrFailedToCreateSession       = "failed to create pairing session"
+	ErrFailedToUpdateSession       = "failed to update session"
+	ErrFailedToUpdateStatus        = "failed to update device status"
+	ErrFailedToGenerateToken       = "failed to generate session token"
+	ErrFailedToCreateToken         = "failed to create session token"
+	ErrFailedToValidateToken       = "missing or invalid bearer token"
+	ErrFailedToAuthenticate        = "invalid credentials"
+	ErrUnauthorized                = "unauthorized"
+	ErrForbidden                   = "forbidden"
+	ErrSessionExpired              = "session expired"
+	ErrPairingNotCompleted         = "pairing not completed"
+	ErrInvalidStatusTransition     = "invalid status transition"
+	ErrRateLimitExceeded           = "rate limit exceeded, please try again later"
+	ErrRateLimit                   = "rate limit exceeded"
+	ErrMissingEngineer             = "missing authenticated engineer"
 	ErrInternalAPIKeyNotConfigured = "internal api key not configured"
-	ErrMissingInternalAPIKey      = "missing internal api key"
-	ErrInvalidInternalAPIKey      = "invalid internal api key"
+	ErrMissingInternalAPIKey       = "missing internal api key"
+	ErrInvalidInternalAPIKey       = "invalid internal api key"
 )
 
 // PairingSession 配对会话
@@ -532,32 +533,65 @@ func boolToInt(b bool) int {
 	return 0
 }
 
+func classifyJWTValidationError(err error) string {
+	switch {
+	case errors.Is(err, jwt.ErrTokenExpired):
+		return "token_expired"
+	case errors.Is(err, jwt.ErrTokenNotValidYet):
+		return "token_not_valid_yet"
+	case errors.Is(err, jwt.ErrTokenUsedBeforeIssued):
+		return "token_used_before_issued"
+	case errors.Is(err, jwt.ErrTokenSignatureInvalid):
+		return "token_signature_invalid"
+	case errors.Is(err, jwt.ErrTokenMalformed):
+		return "token_malformed"
+	case errors.Is(err, jwt.ErrTokenUnverifiable):
+		return "token_unverifiable"
+	case errors.Is(err, jwt.ErrTokenInvalidClaims):
+		return "token_invalid_claims"
+	case strings.Contains(err.Error(), "signing method"):
+		return "token_invalid_algorithm"
+	default:
+		return "token_invalid"
+	}
+}
+
 // authMiddleware JWT认证中间件
 func (s *Server) authMiddleware() gin.HandlerFunc {
+	parser := jwt.NewParser(
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+		jwt.WithIssuedAt(),
+		jwt.WithLeeway(30*time.Second),
+	)
+
 	return func(c *gin.Context) {
 		auth := c.GetHeader("Authorization")
 		if len(auth) < 8 || !strings.HasPrefix(auth, "Bearer ") {
+			log.Printf("[Auth] JWT validation failed: token_missing_or_invalid_bearer")
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToValidateToken})
 			return
 		}
 
 		tokenString := auth[7:]
-		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-			}
+		claims := jwt.MapClaims{}
+		token, err := parser.ParseWithClaims(tokenString, claims, func(_ *jwt.Token) (interface{}, error) {
 			return s.jwtSecret, nil
 		})
 
-		if err != nil || !token.Valid {
+		if err != nil {
+			log.Printf("[Auth] JWT validation failed: %s: %v", classifyJWTValidationError(err), err)
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToValidateToken})
 			return
 		}
 
-		if claims, ok := token.Claims.(jwt.MapClaims); ok {
-			c.Set("engineer_id", claims["sub"])
-			c.Set("role", claims["role"])
+		if !token.Valid {
+			log.Printf("[Auth] JWT validation failed: token_invalid")
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToValidateToken})
+			return
 		}
+
+		c.Set("engineer_id", claims["sub"])
+		c.Set("role", claims["role"])
 
 		c.Next()
 	}

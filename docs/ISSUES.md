@@ -1,5 +1,5 @@
 # NetProxyGateway 缺陷清单（待修复）
-不要在此文档记录问题的验证状态、建议修复方式
+不要在此文档记录问题的验证状态（如“已验证真实存在”）、建议修复方式，不要记录日期，使用提交哈希识别问题存在的版本。需要记录问题存在的提交哈希、问题文件路径、问题行号、问题描述、风险、修复难度、修复状态。
 ## Critical
 
 ### C1: SSL信任所有证书配置风险 [已降级为Medium]
@@ -77,43 +77,22 @@
   2. 空配置时抛出异常而非仅警告
   3. 添加构建时检查确保配置正确
 
-### H20: API服务JWT令牌验证不完善 [待修复]
+### H26: VpnLogRedaction IPv6地址脱敏错误 [新发现-待修复]
 - **状态**: 待修复
-- **位置**: `server/api/main.go` (L528-537)
-- **问题描述**: JWT解析后未明确验证 `exp`（过期时间）、`iat`（签发时间）、`nbf`（生效时间）等声明。虽然 `jwt.Parse` 默认会验证 `exp`，但代码没有明确检查验证失败的具体原因，可能混淆不同类型的认证错误
-- **风险**: 高。无法区分令牌过期、无效签名、格式错误等不同错误类型，不利于调试和安全审计
+- **提交哈希**: fc9552b53dde93aea4ddb7afda4a4240e906a6ee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnLogRedaction.kt` (L3-L9)
+- **问题描述**: `redactIp()`函数仅检测IPv4地址格式（分割后4段），IPv6地址会被错误处理为部分脱敏（如`"2001:0db8::1"`变为`"2001:0***"`），而非完整脱敏格式`"****:****:****:****:****:****:****:****"`
+- **风险**: 高。在现代网络环境中IPv6地址越来越普遍，错误的脱敏格式可能导致日志解析失败或泄露部分IP信息
+- **修复难度**: 低
 - **代码**:
-  ```go
-  // L469-484: 问题代码
-  token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-      if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-          return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+  ```kotlin
+  // L3-L9: 问题代码
+  internal fun redactIp(ip: String): String {
+      val parts = ip.split(".")
+      if (parts.size == 4) {  // 仅支持IPv4
+          return "*.*.*.*"
       }
-      return s.jwtSecret, nil
-  })
-
-  if err != nil || !token.Valid {
-      c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
-      return
-  }
-  ```
-- **建议修复**:
-  ```go
-  if claims, ok := token.Claims.(jwt.MapClaims); ok {
-      // 验证过期时间
-      if exp, ok := claims["exp"].(float64); ok {
-          if time.Now().Unix() > int64(exp) {
-              c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token expired"})
-              return
-          }
-      }
-      // 验证生效时间
-      if nbf, ok := claims["nbf"].(float64); ok {
-          if time.Now().Unix() < int64(nbf) {
-              c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token not yet valid"})
-              return
-          }
-      }
+      return if (ip.length > 6) "${ip.take(6)}***" else "***"
   }
   ```
 
@@ -747,6 +726,26 @@
 - **问题描述**: IPv6映射的IPv4地址（如 `::ffff:192.168.1.1`）可能无法正确匹配CIDR规则
 - **风险**: 中。可能绕过IP访问控制
 - **建议修复**: 统一将IPv6映射地址转换为IPv4后再匹配
+
+### M20: redactConnectionKey测试覆盖不足 [新发现-待修复]
+- **状态**: 待修复
+- **提交哈希**: fc9552b53dde93aea4ddb7afda4a4240e906a6ee
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt` (L1524-L1539)
+- **问题描述**: `ipRedaction_redactConnectionKey`测试未验证端口信息是否被正确排除，缺少以下场景覆盖：无端口格式（`"10.0.0.2-192.168.1.1"`）、空字符串边界、IPv6地址
+- **风险**: 中。测试无法捕获端口信息泄漏问题，也无法验证边界情况处理
+- **修复难度**: 低
+- **代码**:
+  ```kotlin
+  // L1524-1533: 当前测试，缺少端口验证
+  @Test
+  fun ipRedaction_redactConnectionKey() {
+      val originalKey = "10.0.0.2:12345-192.168.1.1:443"
+      val redacted = redactConnectionKey(originalKey)
+      assertEquals("*.*.*.*-*.*.*.*", redacted)
+      // 缺少: assertFalse(redacted.contains("12345"))
+      // 缺少: assertFalse(redacted.contains("443"))
+  }
+  ```
 
 ### M19: Tunnel服务消息处理无速率限制 [待修复]
 - **状态**: 待修复
