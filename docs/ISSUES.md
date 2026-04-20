@@ -966,16 +966,6 @@
 - **风险**: Low。开发效率影响
 - **建议修复**: 添加 `@Preview` 函数
 
-### N35: MqttConnectionManagerTLS测试边界覆盖不足
-- **状态**: 待修复
-- **位置**: `android/app/src/test/java/com/netproxy/gateway/connection/MqttConnectionManagerTlsPolicyTest.kt`
-- **问题**: 
-  - 缺少 `cause = null` 边界测试
-  - 缺少 `error.message = null` 边界测试
-  - 缺少特殊字符和空字符串测试
-- **风险**: Low。测试覆盖不完整
-- **建议修复**: 添加缺失的边界测试用例
-
 ---
 
 ## High Severity
