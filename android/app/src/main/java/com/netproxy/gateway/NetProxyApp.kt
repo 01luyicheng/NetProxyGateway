@@ -1,18 +1,18 @@
 package com.netproxy.gateway
 
 import android.app.Application
-import android.util.Log
 import com.netproxy.gateway.security.RootDetector
 import com.netproxy.gateway.security.DebugDetector
 import com.netproxy.gateway.security.EmulatorDetector
 import com.netproxy.gateway.security.SecurityManager
 import dagger.hilt.android.HiltAndroidApp
+import org.slf4j.LoggerFactory
 
 @HiltAndroidApp
 class NetProxyApp : Application() {
 
     companion object {
-        private const val TAG = "NetProxyApp"
+        private val logger = LoggerFactory.getLogger(NetProxyApp::class.java)
     }
 
     override fun onCreate() {
@@ -30,25 +30,25 @@ class NetProxyApp : Application() {
         // 设置安全检测回调
         securityManager.setCallback(object : SecurityManager.SecurityCheckCallback {
             override fun onRootDetected(result: RootDetector.RootCheckResult) {
-                Log.w(TAG, "Root detected by: ${result.detectedBy}")
+                logger.warn("Root detected by: ${result.detectedBy}")
                 handleSecurityRisk("Root", result.detectedBy)
             }
 
             override fun onDebugDetected(result: DebugDetector.DebugCheckResult) {
-                Log.w(TAG, "Debugger detected by: ${result.detectedBy}")
+                logger.warn("Debugger detected by: ${result.detectedBy}")
                 handleSecurityRisk("Debug", result.detectedBy)
             }
 
             override fun onEmulatorDetected(result: EmulatorDetector.EmulatorCheckResult) {
-                Log.w(TAG, "Emulator detected by: ${result.detectedBy}")
+                logger.warn("Emulator detected by: ${result.detectedBy}")
                 handleSecurityRisk("Emulator", result.detectedBy)
             }
 
             override fun onSecurityCheckComplete(result: SecurityManager.SecurityCheckResult) {
                 if (result.isSecure) {
-                    Log.i(TAG, "Security check passed - device is secure")
+                    logger.info("Security check passed - device is secure")
                 } else {
-                    Log.w(TAG, "Security risks detected: ${result.getAllRisks()}")
+                    logger.warn("Security risks detected: ${result.getAllRisks()}")
                 }
             }
         })
@@ -63,7 +63,7 @@ class NetProxyApp : Application() {
      */
     private fun handleSecurityRisk(riskType: String, details: List<String>) {
         // 记录安全风险日志
-        Log.w(TAG, "[$riskType] Security risk detected: ${details.joinToString(", ")}")
+        logger.warn("[$riskType] Security risk detected: ${details.joinToString(", ")}")
 
         // TODO: 根据安全策略采取进一步措施，例如：
         // 1. 显示安全警告对话框

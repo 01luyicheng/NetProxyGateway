@@ -655,24 +655,6 @@
 - **风险**: 低。状态不一致，但可接受
 - **建议修复**: 添加指数退避重试机制
 
-### L11: 日志框架混用导致输出不一致 [待修复]
-- **状态**: 待修复
-- **位置**: 
-  - `android/app/src/main/java/com/netproxy/gateway/security/SecurityManager.kt` (L88, L93, L100, L107, L118)
-  - `android/app/src/main/java/com/netproxy/gateway/NetProxyApp.kt` (L33, L38, L43, L49, L51, L66)
-- **问题描述**: SecurityManager和NetProxyApp使用Android原生`Log`类，而项目其他部分使用SLF4J。导致日志格式、输出目标和级别控制不一致
-- **风险**: 低。日志管理混乱，不利于统一监控和排查问题
-- **代码**:
-  ```kotlin
-  // SecurityManager.kt - 使用Android Log
-  Log.d(TAG, "Starting security check...")
-  Log.w(TAG, "Root detected: ${rootResult.detectedBy}")
-  
-  // MqttConnectionManager.kt - 使用SLF4J
-  logger.error("Heartbeat publish error")
-  ```
-- **建议修复**: 统一使用SLF4J日志框架，移除所有Android原生Log的使用
-
 ---
 
 ## 新增问题（待分类）

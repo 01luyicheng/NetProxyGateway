@@ -1,7 +1,7 @@
 package com.netproxy.gateway.security
 
 import android.content.Context
-import android.util.Log
+import org.slf4j.LoggerFactory
 
 /**
  * 安全管理器
@@ -10,7 +10,7 @@ import android.util.Log
 class SecurityManager(private val context: Context) {
 
     companion object {
-        private const val TAG = "SecurityManager"
+        private val logger = LoggerFactory.getLogger(SecurityManager::class.java)
 
         @Volatile private var instance: SecurityManager? = null
 
@@ -85,26 +85,26 @@ class SecurityManager(private val context: Context) {
      * 执行完整的安全检测
      */
     fun performSecurityCheck(): SecurityCheckResult {
-        Log.d(TAG, "Starting security check...")
+        logger.debug("Starting security check...")
 
         // Root 检测
         val rootResult = RootDetector.check(context)
         if (rootResult.isRooted) {
-            Log.w(TAG, "Root detected: ${rootResult.detectedBy}")
+            logger.warn("Root detected: ${rootResult.detectedBy}")
             callback?.onRootDetected(rootResult)
         }
 
         // 调试检测
         val debugResult = DebugDetector.check()
         if (debugResult.isDebugged) {
-            Log.w(TAG, "Debugger detected: ${debugResult.detectedBy}")
+            logger.warn("Debugger detected: ${debugResult.detectedBy}")
             callback?.onDebugDetected(debugResult)
         }
 
         // 模拟器检测
         val emulatorResult = EmulatorDetector.check(context)
         if (emulatorResult.isEmulator) {
-            Log.w(TAG, "Emulator detected: ${emulatorResult.detectedBy}")
+            logger.warn("Emulator detected: ${emulatorResult.detectedBy}")
             callback?.onEmulatorDetected(emulatorResult)
         }
 
@@ -115,7 +115,7 @@ class SecurityManager(private val context: Context) {
             emulatorResult = emulatorResult
         )
 
-        Log.d(TAG, "Security check complete: ${result.getRiskSummary()}")
+        logger.debug("Security check complete: ${result.getRiskSummary()}")
         callback?.onSecurityCheckComplete(result)
 
         return result
