@@ -628,6 +628,39 @@ func classifyJWTValidationError(err error) string {
 	}
 }
 
+var allowedJWTClaimRoles = map[string]struct{}{
+	"engineer": {},
+	"admin":    {},
+}
+
+func validateAuthClaims(claims jwt.MapClaims) (string, string, bool) {
+	subValue, ok := claims["sub"]
+	if !ok {
+		return "", "", false
+	}
+
+	sub, ok := subValue.(string)
+	if !ok || sub == "" {
+		return "", "", false
+	}
+
+	roleValue, ok := claims["role"]
+	if !ok {
+		return "", "", false
+	}
+
+	role, ok := roleValue.(string)
+	if !ok {
+		return "", "", false
+	}
+
+	if _, ok := allowedJWTClaimRoles[role]; !ok {
+		return "", "", false
+	}
+
+	return sub, role, true
+}
+
 // authMiddleware JWT认证中间件
 func (s *Server) authMiddleware() gin.HandlerFunc {
 	parser := jwt.NewParser(
@@ -663,8 +696,15 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		c.Set("engineer_id", claims["sub"])
-		c.Set("role", claims["role"])
+		engineerID, role, valid := validateAuthClaims(claims)
+		if !valid {
+			log.Printf("[Auth] JWT validation failed: token_invalid_claims")
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToValidateToken})
+			return
+		}
+
+		c.Set("engineer_id", engineerID)
+		c.Set("role", role)
 
 		c.Next()
 	}

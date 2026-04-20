@@ -77,35 +77,6 @@
   2. 空配置时抛出异常而非仅警告
   3. 添加构建时检查确保配置正确
 
-### H27: API服务JWT Claims验证缺失 [新发现-待修复]
-- **状态**: 待修复
-- **提交哈希**: fc9552b53dde93aea4ddb7afda4a4240e906a6ee
-- **位置**: `server/api/main.go` (L592-L593)
-- **问题描述**: JWT解析后设置claims到context时，`claims["sub"]`和`claims["role"]`缺少类型断言检查和空值验证。如果token中缺少这些字段或类型不匹配，可能导致panic或设置空值到context，造成未授权访问或后续处理异常
-- **风险**: 高。可能导致服务panic或安全验证绕过
-- **修复难度**: 低
-- **代码**:
-  ```go
-  // L592-593: 问题代码
-  c.Set("engineer_id", claims["sub"])
-  c.Set("role", claims["role"])
-  ```
-- **建议修复**:
-  ```go
-  sub, ok := claims["sub"].(string)
-  if !ok || sub == "" {
-      c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToValidateToken})
-      return
-  }
-  role, ok := claims["role"].(string)
-  if !ok || (role != "engineer" && role != "admin") {
-      c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToValidateToken})
-      return
-  }
-  c.Set("engineer_id", sub)
-  c.Set("role", role)
-  ```
-
 ### H29: 配对码创建存在TOCTOU竞态 [新发现-待修复]
 - **状态**: 待修复
 - **提交哈希**: ecdf316

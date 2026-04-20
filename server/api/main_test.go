@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,6 +37,18 @@ func runAuthRequest(server *Server, token string) *httptest.ResponseRecorder {
 	router.ServeHTTP(recorder, req)
 
 	return recorder
+}
+
+func assertAuthValidationFailedResponse(t *testing.T, recorder *httptest.ResponseRecorder) {
+	t.Helper()
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for invalid auth token, got %d", recorder.Code)
+	}
+
+	if !strings.Contains(recorder.Body.String(), ErrFailedToValidateToken) {
+		t.Fatalf("expected error response to contain %q, got %s", ErrFailedToValidateToken, recorder.Body.String())
+	}
 }
 
 func TestInternalOrUserAuthMiddlewareAcceptsInternalKey(t *testing.T) {
@@ -141,9 +154,35 @@ func TestInternalOrUserAuthMiddlewareFallbackRejectsBearerTokenWithoutExp(t *tes
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, req)
 
-	if recorder.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401 for bearer token without exp, got %d", recorder.Code)
+	assertAuthValidationFailedResponse(t, recorder)
+}
+
+func TestInternalOrUserAuthMiddlewareFallbackRejectsBearerTokenWithInvalidRole(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := &Server{
+		jwtSecret:      []byte("jwt-secret"),
+		internalAPIKey: []byte("internal-secret"),
 	}
+
+	tokenString := issueAuthToken(t, server.jwtSecret, jwt.MapClaims{
+		"sub":  "engineer-1",
+		"role": "viewer",
+		"iat":  time.Now().Unix(),
+		"exp":  time.Now().Add(10 * time.Minute).Unix(),
+	})
+
+	router := gin.New()
+	router.POST("/internal", server.internalOrUserAuthMiddleware(), func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/internal", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenString)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	assertAuthValidationFailedResponse(t, recorder)
 }
 
 func TestInternalAuthMiddlewareAcceptsValidInternalKey(t *testing.T) {
@@ -287,8 +326,141 @@ func TestAuthMiddlewareRejectsTokenWithoutExp(t *testing.T) {
 	})
 
 	recorder := runAuthRequest(server, tokenString)
-	if recorder.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401 for token without exp, got %d", recorder.Code)
+	assertAuthValidationFailedResponse(t, recorder)
+}
+
+func TestAuthMiddlewareRejectsTokenWithoutSubClaim(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := &Server{
+		jwtSecret: []byte("jwt-secret"),
+	}
+
+	now := time.Now()
+	tokenString := issueAuthToken(t, server.jwtSecret, jwt.MapClaims{
+		"role": "engineer",
+		"iat":  now.Unix(),
+		"exp":  now.Add(10 * time.Minute).Unix(),
+	})
+
+	recorder := runAuthRequest(server, tokenString)
+	assertAuthValidationFailedResponse(t, recorder)
+}
+
+func TestAuthMiddlewareRejectsTokenWithNonStringSubClaim(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := &Server{
+		jwtSecret: []byte("jwt-secret"),
+	}
+
+	now := time.Now()
+	tokenString := issueAuthToken(t, server.jwtSecret, jwt.MapClaims{
+		"sub":  12345,
+		"role": "engineer",
+		"iat":  now.Unix(),
+		"exp":  now.Add(10 * time.Minute).Unix(),
+	})
+
+	recorder := runAuthRequest(server, tokenString)
+	assertAuthValidationFailedResponse(t, recorder)
+}
+
+func TestAuthMiddlewareRejectsTokenWithoutRoleClaim(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := &Server{
+		jwtSecret: []byte("jwt-secret"),
+	}
+
+	now := time.Now()
+	tokenString := issueAuthToken(t, server.jwtSecret, jwt.MapClaims{
+		"sub": "engineer-1",
+		"iat": now.Unix(),
+		"exp": now.Add(10 * time.Minute).Unix(),
+	})
+
+	recorder := runAuthRequest(server, tokenString)
+	assertAuthValidationFailedResponse(t, recorder)
+}
+
+func TestAuthMiddlewareRejectsTokenWithNonStringRoleClaim(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := &Server{
+		jwtSecret: []byte("jwt-secret"),
+	}
+
+	now := time.Now()
+	tokenString := issueAuthToken(t, server.jwtSecret, jwt.MapClaims{
+		"sub":  "engineer-1",
+		"role": 123,
+		"iat":  now.Unix(),
+		"exp":  now.Add(10 * time.Minute).Unix(),
+	})
+
+	recorder := runAuthRequest(server, tokenString)
+	assertAuthValidationFailedResponse(t, recorder)
+}
+
+func TestAuthMiddlewareRejectsTokenWithUnsupportedRoleClaim(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := &Server{
+		jwtSecret: []byte("jwt-secret"),
+	}
+
+	now := time.Now()
+	tokenString := issueAuthToken(t, server.jwtSecret, jwt.MapClaims{
+		"sub":  "engineer-1",
+		"role": "viewer",
+		"iat":  now.Unix(),
+		"exp":  now.Add(10 * time.Minute).Unix(),
+	})
+
+	recorder := runAuthRequest(server, tokenString)
+	assertAuthValidationFailedResponse(t, recorder)
+}
+
+func TestAuthMiddlewareAcceptsValidEngineerClaims(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := &Server{
+		jwtSecret: []byte("jwt-secret"),
+	}
+
+	now := time.Now()
+	tokenString := issueAuthToken(t, server.jwtSecret, jwt.MapClaims{
+		"sub":  "engineer-1",
+		"role": "engineer",
+		"iat":  now.Unix(),
+		"exp":  now.Add(10 * time.Minute).Unix(),
+	})
+
+	router := gin.New()
+	router.GET("/protected", server.authMiddleware(), func(c *gin.Context) {
+		engineerIDValue, exists := c.Get("engineer_id")
+		if !exists || engineerIDValue != "engineer-1" {
+			c.AbortWithStatus(http.StatusInternalServerError)
+			return
+		}
+
+		roleValue, exists := c.Get("role")
+		if !exists || roleValue != "engineer" {
+			c.AbortWithStatus(http.StatusInternalServerError)
+			return
+		}
+
+		c.Status(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenString)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200 for valid claims, got %d", recorder.Code)
 	}
 }
 
