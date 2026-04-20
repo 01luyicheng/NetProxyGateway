@@ -333,6 +333,43 @@ func (s *Server) recordSuccess(clientIP string) {
 	s.loginAttemptsMu.Unlock()
 }
 
+// cleanupLoginAttempts 清理过期登录限流记录
+func (s *Server) cleanupLoginAttempts(now time.Time) {
+	const staleLoginAttemptTTL = 5 * time.Minute
+
+	s.loginAttemptsMu.Lock()
+	defer s.loginAttemptsMu.Unlock()
+
+	for clientIP, attempt := range s.loginAttempts {
+		if attempt == nil {
+			delete(s.loginAttempts, clientIP)
+			continue
+		}
+
+		// 在封禁窗口内的记录保留，封禁结束后删除。
+		if attempt.Blocked {
+			if !now.Before(attempt.BlockUntil) {
+				delete(s.loginAttempts, clientIP)
+			}
+			continue
+		}
+
+		if now.Sub(attempt.LastTry) > staleLoginAttemptTTL {
+			delete(s.loginAttempts, clientIP)
+		}
+	}
+}
+
+// cleanupExpiredLoginAttempts 定时清理过期登录限流记录
+func (s *Server) cleanupExpiredLoginAttempts() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		s.cleanupLoginAttempts(time.Now())
+	}
+}
+
 // cleanupExpiredSessions 清理过期会话
 func (s *Server) cleanupExpiredSessions() {
 	ticker := time.NewTicker(5 * time.Minute)
@@ -1042,6 +1079,7 @@ func main() {
 
 	// 启动清理协程
 	go server.cleanupExpiredSessions()
+	go server.cleanupExpiredLoginAttempts()
 
 	r := gin.New()
 	r.Use(gin.Recovery())

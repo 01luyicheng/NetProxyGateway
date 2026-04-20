@@ -77,6 +77,35 @@
   2. 空配置时抛出异常而非仅警告
   3. 添加构建时检查确保配置正确
 
+### H27: API服务JWT Claims验证缺失 [新发现-待修复]
+- **状态**: 待修复
+- **提交哈希**: fc9552b53dde93aea4ddb7afda4a4240e906a6ee
+- **位置**: `server/api/main.go` (L592-L593)
+- **问题描述**: JWT解析后设置claims到context时，`claims["sub"]`和`claims["role"]`缺少类型断言检查和空值验证。如果token中缺少这些字段或类型不匹配，可能导致panic或设置空值到context，造成未授权访问或后续处理异常
+- **风险**: 高。可能导致服务panic或安全验证绕过
+- **修复难度**: 低
+- **代码**:
+  ```go
+  // L592-593: 问题代码
+  c.Set("engineer_id", claims["sub"])
+  c.Set("role", claims["role"])
+  ```
+- **建议修复**:
+  ```go
+  sub, ok := claims["sub"].(string)
+  if !ok || sub == "" {
+      c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToValidateToken})
+      return
+  }
+  role, ok := claims["role"].(string)
+  if !ok || (role != "engineer" && role != "admin") {
+      c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToValidateToken})
+      return
+  }
+  c.Set("engineer_id", sub)
+  c.Set("role", role)
+  ```
+
 ### H26: VpnLogRedaction IPv6地址脱敏错误 [新发现-待修复]
 - **状态**: 待修复
 - **提交哈希**: fc9552b53dde93aea4ddb7afda4a4240e906a6ee
@@ -93,32 +122,6 @@
           return "*.*.*.*"
       }
       return if (ip.length > 6) "${ip.take(6)}***" else "***"
-  }
-  ```
-
-### H21: API服务登录限流器内存泄漏 [待修复]
-- **状态**: 待修复
-- **位置**: `server/api/main.go` (L71-72)
-- **问题描述**: `loginAttempts` 映射表没有定期清理机制。如果攻击者使用大量不同IP进行尝试，可能导致内存无限增长
-- **风险**: 高。潜在的DoS攻击向量，可能导致服务OOM
-- **代码**:
-  ```go
-  // L71-72
-  loginAttempts   map[string]*LoginAttempt // ip -> attempts
-  loginAttemptsMu sync.RWMutex
-  ```
-- **建议修复**: 添加定期清理协程，类似于 `cleanupExpiredSessions()`:
-  ```go
-  func (s *Server) cleanupExpiredLoginAttempts() {
-      s.loginAttemptsMu.Lock()
-      defer s.loginAttemptsMu.Unlock()
-      
-      now := time.Now()
-      for ip, attempt := range s.loginAttempts {
-          if now.Sub(attempt.LastAttempt) > 24*time.Hour {
-              delete(s.loginAttempts, ip)
-          }
-      }
   }
   ```
 
