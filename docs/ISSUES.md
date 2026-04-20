@@ -106,6 +106,22 @@
   c.Set("role", role)
   ```
 
+### H28: API服务JWT未强制要求exp声明 [新发现-待修复]
+- **状态**: 待修复
+- **提交哈希**: a3aefc9
+- **位置**: `server/api/main.go` (L634-L636)
+- **问题描述**: JWT解析器启用了`WithIssuedAt`和`WithLeeway`，但未启用`WithExpirationRequired`，导致缺少`exp`声明的token在签名正确时仍可能通过认证
+- **风险**: 高。认证边界对令牌过期约束不严格，可能接受无过期时间的长期有效令牌
+- **修复难度**: 低
+
+### H29: 配对码创建存在TOCTOU竞态 [新发现-待修复]
+- **状态**: 待修复
+- **提交哈希**: ecdf316
+- **位置**: `server/api/main.go` (L732-L764), `server/api/main.go` (L197-L204)
+- **问题描述**: createPairingSession先查询code是否存在再执行插入，查询与写入非原子；并发请求下可能同时通过查重，随后在插入阶段发生主键冲突并返回失败，造成可避免的创建失败
+- **风险**: 高。高并发下配对创建成功率下降，边界情况下可能形成局部DoS放大
+- **修复难度**: 中
+
 ### H25: Tunnel服务心跳检测竞态条件 [待修复]
 - **状态**: 待修复
 - **位置**: `server/tunnel/main.go` (L336-359)
@@ -723,6 +739,14 @@
       // 缺少: assertFalse(redacted.contains("443"))
   }
   ```
+
+    ### M21: VpnLogRedaction连接键输出格式兼容性回归 [新发现-待修复]
+    - **状态**: 待修复
+    - **提交哈希**: aa75a4a
+    - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnLogRedaction.kt` (L62-L63), `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt` (L1536)
+    - **问题描述**: `redactConnectionKey`输出从`"- "`变更为`"-"`，而注释仍声明保持现有日志格式；测试也已同步到新格式，无法识别该兼容性回归
+    - **风险**: 中。可能影响依赖旧日志模板的解析和对比脚本
+    - **修复难度**: 低
 
 ### M19: Tunnel服务消息处理无速率限制 [待修复]
 - **状态**: 待修复
