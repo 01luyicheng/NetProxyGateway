@@ -675,26 +675,6 @@
 - **风险**: 中。可能绕过IP访问控制
 - **建议修复**: 统一将IPv6映射地址转换为IPv4后再匹配
 
-### M20: redactConnectionKey测试覆盖不足 [新发现-待修复]
-- **状态**: 待修复
-- **提交哈希**: fc9552b53dde93aea4ddb7afda4a4240e906a6ee
-- **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt` (L1524-L1539)
-- **问题描述**: `ipRedaction_redactConnectionKey`测试未验证端口信息是否被正确排除，缺少以下场景覆盖：无端口格式（`"10.0.0.2-192.168.1.1"`）、空字符串边界、IPv6地址
-- **风险**: 中。测试无法捕获端口信息泄漏问题，也无法验证边界情况处理
-- **修复难度**: 低
-- **代码**:
-  ```kotlin
-  // L1524-1533: 当前测试，缺少端口验证
-  @Test
-  fun ipRedaction_redactConnectionKey() {
-      val originalKey = "10.0.0.2:12345-192.168.1.1:443"
-      val redacted = redactConnectionKey(originalKey)
-      assertEquals("*.*.*.*-*.*.*.*", redacted)
-      // 缺少: assertFalse(redacted.contains("12345"))
-      // 缺少: assertFalse(redacted.contains("443"))
-  }
-  ```
-
 ### M19: Tunnel服务消息处理无速率限制 [待修复]
 - **状态**: 待修复
 - **位置**: `server/tunnel/main.go` (L390-413)
