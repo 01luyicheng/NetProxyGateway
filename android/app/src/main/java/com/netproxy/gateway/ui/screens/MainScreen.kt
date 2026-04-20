@@ -7,9 +7,12 @@ import com.netproxy.gateway.BuildConfig
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.ui.semantics.Role
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Settings
@@ -222,7 +225,29 @@ private fun SettingsScreen(
 
                 if (DebugSettingsStore.isSkipMqttCertValidationSupported) {
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .toggleable(
+                                value = skipMqttCertValidation,
+                                role = Role.Switch,
+                                onValueChange = { enabled ->
+                                    val success = DebugSettingsStore.setSkipMqttCertValidationEnabled(context, enabled)
+                                    if (success) {
+                                        skipMqttCertValidation = enabled
+                                        if (enabled) {
+                                            AppAuditLogStore.warn(
+                                                "Settings",
+                                                "MQTT certificate validation disabled (debug only)"
+                                            )
+                                        } else {
+                                            AppAuditLogStore.info(
+                                                "Settings",
+                                                "MQTT certificate validation enabled"
+                                            )
+                                        }
+                                    }
+                                }
+                            ),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
@@ -243,23 +268,7 @@ private fun SettingsScreen(
 
                         Switch(
                             checked = skipMqttCertValidation,
-                            onCheckedChange = { enabled ->
-                                val success = DebugSettingsStore.setSkipMqttCertValidationEnabled(context, enabled)
-                                if (success) {
-                                    skipMqttCertValidation = enabled
-                                    if (enabled) {
-                                        AppAuditLogStore.warn(
-                                            "Settings",
-                                            "MQTT certificate validation disabled (debug only)"
-                                        )
-                                    } else {
-                                        AppAuditLogStore.info(
-                                            "Settings",
-                                            "MQTT certificate validation enabled"
-                                        )
-                                    }
-                                }
-                            }
+                            onCheckedChange = null
                         )
                     }
                 } else {
@@ -449,14 +458,20 @@ fun ConnectedOptionsSection(
             Spacer(modifier = Modifier.height(16.dp))
             
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .toggleable(
+                        value = uiState.isVpnEnabled,
+                        role = Role.Switch,
+                        onValueChange = { viewModel.toggleVpn(it) }
+                    ),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(stringResource(R.string.vpn_tunnel))
                 Switch(
                     checked = uiState.isVpnEnabled,
-                    onCheckedChange = { viewModel.toggleVpn(it) }
+                    onCheckedChange = null
                 )
             }
             
@@ -549,24 +564,30 @@ fun LanguageSettingsCard() {
             Spacer(modifier = Modifier.height(8.dp))
 
             AppLocale.supportedLanguages.forEach { option ->
+                val isSelected = selectedLanguageTag == option.languageTag
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 4.dp),
+                        .padding(vertical = 4.dp)
+                        .selectable(
+                            selected = isSelected,
+                            role = Role.RadioButton,
+                            onClick = {
+                                val newLanguageTag = option.languageTag
+                                if (newLanguageTag == selectedLanguageTag) {
+                                    return@selectable
+                                }
+                                selectedLanguageTag = newLanguageTag
+                                activity?.let {
+                                    AppLocale.applyLanguage(it, newLanguageTag)
+                                }
+                            }
+                        ),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     RadioButton(
-                        selected = selectedLanguageTag == option.languageTag,
-                        onClick = {
-                            val newLanguageTag = option.languageTag
-                            if (newLanguageTag == selectedLanguageTag) {
-                                return@RadioButton
-                            }
-                            selectedLanguageTag = newLanguageTag
-                            activity?.let {
-                                AppLocale.applyLanguage(it, newLanguageTag)
-                            }
-                        }
+                        selected = isSelected,
+                        onClick = null
                     )
 
                     Spacer(modifier = Modifier.width(8.dp))
