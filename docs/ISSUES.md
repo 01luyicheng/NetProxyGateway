@@ -1012,17 +1012,7 @@
 
 ## High Severity
 
-### H26: 生产环境证书绕过缺少显式安全检查
-- **状态**: 待修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt`
-- **问题**: 当前仅依赖 `shouldTrustAllCertificatesForCurrentBuild()` 的BuildConfig.DEBUG检查，缺少显式防御性校验
-- **风险**: Medium。防御纵深不足，如果BuildConfig.DEBUG检测失效可能导致安全问题
-- **建议修复**: 在 `createSecureSocketFactory()` 开头添加显式运行时检查
-  ```kotlin
-  if (!BuildConfig.DEBUG && BuildConfig.MQTT_TRUST_ALL_CERTS) {
-      throw IllegalStateException("MQTT_TRUST_ALL_CERTS=true is not allowed in production builds")
-  }
-  ```
+> 当前无 High Severity 问题
 
 ---
 
