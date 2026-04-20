@@ -839,25 +839,6 @@
   ```
 - **建议修复**: 至少记录异常信息，区分可忽略和不可忽略的错误类型
 
-### N19: 注释与代码实现不符 [待修复]
-- **状态**: 待修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L371-375)
-- **问题描述**: `forwardViaWifi()`方法注释说明使用`Network.bindSocket()`，但实际代码使用`protect()`方法
-- **风险**: 低。误导开发者，造成理解困难
-- **代码**:
-  ```kotlin
-  /**
-   * 通过 WiFi 网卡直连（内网流量）
-   * 注意：Android VPN 模式下需要使用 Network.bindSocket()  // 注释说用bindSocket
-   */
-  private fun forwardViaWifi(...) {
-      DatagramSocket().use { socket ->
-          protect(socket)  // 实际使用的是protect
-      }
-  }
-  ```
-- **建议修复**: 更新注释，说明实际使用的是`protect()`方法及其局限性
-
 ---
 
 ## 新增问题

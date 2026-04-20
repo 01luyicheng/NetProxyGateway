@@ -276,11 +276,11 @@ class GatewayVpnService : AndroidVpnService() {
         
         when (routeType) {
             RouteType.LOCAL_NETWORK -> {
-                // 内网流量：通过 WiFi 网卡直连
+                // 内网流量：绕过 VPN，最终出口由系统路由决定
                 forwardViaWifi(packet, length, destinationIp)
             }
             RouteType.DNS -> {
-                // DNS 查询：走 WiFi（使用内网 DNS）
+                // DNS 查询：绕过 VPN，最终出口由系统路由决定（使用内网 DNS）
                 forwardViaWifi(packet, length, destinationIp)
             }
             RouteType.CLOUD_SERVER -> {
@@ -381,9 +381,9 @@ class GatewayVpnService : AndroidVpnService() {
     }
     
     /**
-     * 通过 WiFi 网卡直连（内网流量）
-     * 注意：Android VPN 模式下需要使用 Network.bindSocket() 
-     * 或者配置 excludeRoute 来绕过 VPN
+     * 直连内网流量（当前实现通过 protect() 让 socket 绕过 VPN 隧道）
+     * 注意：protect() 只保证不走 VPN，不保证一定走 WiFi。
+     * 在多网络并存或厂商网络加速场景下，系统可能将流量路由到其他网卡。
      */
     private fun forwardViaWifi(packet: ByteArray, length: Int, destinationIp: String) {
         try {
