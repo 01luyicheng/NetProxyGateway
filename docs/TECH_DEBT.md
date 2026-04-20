@@ -240,58 +240,40 @@
   private const val REDACT_MASK = "***"
   ```
 
-### C23: notifyStatusBackoff位移溢出风险 [代码审查发现-待修复]
-- **状态**: 待修复
-- **提交哈希**: 当前工作区未提交变更
-- **位置**: `server/tunnel/main.go` (L299-305)
+### C23: notifyStatusBackoff位移溢出风险 [已修复]
+- **状态**: 已修复
+- **提交哈希**: d06f584（修复提交）
+- **位置**: `server/tunnel/main.go` (L327-337)
 - **问题描述**: `notifyStatusBackoff`函数使用`1<<(attempt-1)`计算退避乘数，`1`是无类型整数常量。当前`maxAttempts=3`是安全的，但如果未来调大最大尝试次数，在32位系统上`attempt>=63`时会发生位移溢出。函数缺乏上限保护
-- **风险**: 中。当前安全，但对常量变更不敏感，存在未来溢出风险
-- **建议**: 添加上限保护或使用显式`int64`位移：
-  ```go
-  func notifyStatusBackoff(attempt int) time.Duration {
-      if attempt <= 0 {
-          attempt = 1
-      }
-      const maxAttempt = 30
-      if attempt > maxAttempt {
-          attempt = maxAttempt
-      }
-      multiplier := int64(1) << (attempt - 1)
-      return defaultNotifyStatusBaseBackoff * time.Duration(multiplier)
-  }
-  ```
+- **修复方式**: 添加上限保护`maxAttempt=30`，使用显式`int64(1)`进行位移
 
-### C24: http.Client未复用连接池 [代码审查发现-待修复]
-- **状态**: 待修复
-- **提交哈希**: 当前工作区未提交变更
-- **位置**: `server/tunnel/main.go` (L238)
+### C24: http.Client未复用连接池 [已修复]
+- **状态**: 已修复
+- **提交哈希**: d06f584（修复提交）
+- **位置**: `server/tunnel/main.go` (L179-194)
 - **问题描述**: `notifyDeviceStatus`每次调用都创建新的`http.Client`，无法复用TCP连接池。在高频设备上下线场景（如网络抖动导致频繁重连），会造成大量短连接，增加延迟和系统负载
-- **风险**: 中。高频通知场景下性能受影响
-- **建议**: 将`http.Client`作为`TunnelManager`的字段，在构造时初始化，或使用全局带连接池的client
+- **修复方式**: 将`httpClient`作为`TunnelManager`字段，在`NewTunnelManager`中初始化
 
-### C25: notifyDeviceStatus goroutine泄漏风险 [代码审查发现-待修复]
-- **状态**: 待修复
-- **提交哈希**: 当前工作区未提交变更
-- **位置**: `server/tunnel/main.go` (L237)
+### C25: notifyDeviceStatus goroutine泄漏风险 [已修复]
+- **状态**: 已修复
+- **提交哈希**: d06f584（修复提交）
+- **位置**: `server/tunnel/main.go` (L179-194, L250-325)
 - **问题描述**: `notifyDeviceStatus`立即启动goroutine执行HTTP请求，重试过程中使用`time.Sleep`阻塞。如果`TunnelManager`被销毁或服务器关闭，这些goroutine会持续阻塞在sleep中直到重试完成，无法被提前取消
-- **风险**: 中。服务关闭时goroutine无法优雅退出
-- **建议**: 为`TunnelManager`添加`context.Context`支持，允许取消进行中的通知；或将`notifyDeviceStatus`改为同步调用，由调用方决定是否启动goroutine
+- **修复方式**: 为`TunnelManager`添加`ctx context.Context`和`cancel context.CancelFunc`字段，重试循环中使用`select`监听`ctx.Done()`，添加`Stop()`方法用于取消
 
-### C26: notifyDeviceStatus测试存在flaky风险 [代码审查发现-待修复]
-- **状态**: 待修复
-- **提交哈希**: 当前工作区未提交变更
-- **位置**: `server/tunnel/main_test.go` (L85, L122)
-- **问题描述**: `TestNotifyDeviceStatusRetriesAndEventuallySucceeds`和`TestNotifyDeviceStatusDoesNotRetryOnBadRequest`使用固定`time.Sleep(300ms)`验证无额外请求。在慢速CI环境或高负载下可能失败，是flaky test的典型来源
-- **风险**: 中。测试不稳定，可能导致CI随机失败
-- **建议**: 移除`time.Sleep`，改用channel同步或`sync.WaitGroup`精确等待。例如，在收到预期请求后，使用`select`+`time.After`验证没有额外请求到达
-
-### C27: notifyDeviceStatus测试覆盖不足 [代码审查发现-待修复]
-- **状态**: 待修复
-- **提交哈希**: 当前工作区未提交变更
+### C26: notifyDeviceStatus测试存在flaky风险 [已修复]
+- **状态**: 已修复
+- **提交哈希**: d06f584（修复提交）
 - **位置**: `server/tunnel/main_test.go`
-- **问题描述**: 新增测试缺少以下关键场景：1) 3次重试全部失败的边界；2) 429(TooManyRequests)触发重试；3) `notifyStatusBackoff`退避时间计算的正确性；4) 网络错误（非HTTP错误）触发重试；5) 2xx/3xx直接成功不重试
-- **风险**: 低。核心重试逻辑的关键边界未验证
-- **建议**: 补充上述缺失测试，确保重试逻辑的所有分支都被覆盖
+- **问题描述**: `TestNotifyDeviceStatusRetriesAndEventuallySucceeds`和`TestNotifyDeviceStatusDoesNotRetryOnBadRequest`使用固定`time.Sleep(300ms)`验证无额外请求。在慢速CI环境或高负载下可能失败，是flaky test的典型来源
+- **修复方式**: 移除`time.Sleep`，改用`select`+`time.After`验证没有额外请求到达
+
+### C27: notifyDeviceStatus测试覆盖不足 [已修复]
+- **状态**: 已修复
+- **提交哈希**: d06f584（修复提交）
+- **位置**: `server/tunnel/main_test.go`
+- **问题描述**: 新增测试缺少以下关键场景：1) 3次重试全部失败的边界；2) 429(TooManyRequests)触发重试；3) `notifyStatusBackoff`退避时间计算的正确性
+- **修复方式**: 补充`TestNotifyStatusBackoff`、`TestNotifyDeviceStatusExhaustsRetries`、`TestNotifyDeviceStatusRetriesOnTooManyRequests`三个测试
 
 ---
 

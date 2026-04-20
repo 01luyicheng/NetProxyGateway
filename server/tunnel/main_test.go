@@ -82,7 +82,11 @@ func TestNotifyDeviceStatusRetriesAndEventuallySucceeds(t *testing.T) {
 		}
 	}
 
-	time.Sleep(300 * time.Millisecond)
+	select {
+	case <-requestSignal:
+		t.Fatal("expected no extra request after success")
+	case <-time.After(300 * time.Millisecond):
+	}
 
 	mu.Lock()
 	got := requests
@@ -119,7 +123,11 @@ func TestNotifyDeviceStatusDoesNotRetryOnBadRequest(t *testing.T) {
 		t.Fatal("timed out waiting for notifyDeviceStatus first attempt")
 	}
 
-	time.Sleep(300 * time.Millisecond)
+	select {
+	case <-requestSignal:
+		t.Fatal("expected no retry for 4xx response")
+	case <-time.After(300 * time.Millisecond):
+	}
 
 	mu.Lock()
 	got := requests
@@ -395,6 +403,118 @@ func TestHandleStats(t *testing.T) {
 				t.Fatalf("handleStats() status = %d, want %d", rr.Code, tt.wantStatus)
 			}
 		})
+	}
+}
+
+func TestNotifyStatusBackoff(t *testing.T) {
+	tests := []struct {
+		attempt  int
+		expected time.Duration
+	}{
+		{attempt: 0, expected: 100 * time.Millisecond},
+		{attempt: 1, expected: 100 * time.Millisecond},
+		{attempt: 2, expected: 200 * time.Millisecond},
+		{attempt: 3, expected: 400 * time.Millisecond},
+	}
+
+	for _, tt := range tests {
+		got := notifyStatusBackoff(tt.attempt)
+		if got != tt.expected {
+			t.Fatalf("notifyStatusBackoff(%d) = %v, want %v", tt.attempt, got, tt.expected)
+		}
+	}
+}
+
+func TestNotifyDeviceStatusExhaustsRetries(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		requests int
+	)
+	requestSignal := make(chan struct{}, 4)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+
+		requestSignal <- struct{}{}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	manager := NewTunnelManager(&Config{APIEndpoint: server.URL})
+	manager.notifyDeviceStatus("device-123", "online", "")
+
+	for i := 0; i < 3; i++ {
+		select {
+		case <-requestSignal:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for notifyDeviceStatus attempt %d", i+1)
+		}
+	}
+
+	select {
+	case <-requestSignal:
+		t.Fatal("expected no extra request after retries exhausted")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	mu.Lock()
+	got := requests
+	mu.Unlock()
+
+	if got != 3 {
+		t.Fatalf("expected 3 notify attempts, got %d", got)
+	}
+}
+
+func TestNotifyDeviceStatusRetriesOnTooManyRequests(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		requests int
+	)
+	requestSignal := make(chan struct{}, 4)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		attempt := requests
+		mu.Unlock()
+
+		requestSignal <- struct{}{}
+
+		if attempt == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	manager := NewTunnelManager(&Config{APIEndpoint: server.URL})
+	manager.notifyDeviceStatus("device-123", "online", "")
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-requestSignal:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for notifyDeviceStatus attempt %d", i+1)
+		}
+	}
+
+	select {
+	case <-requestSignal:
+		t.Fatal("expected no extra request after success")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	mu.Lock()
+	got := requests
+	mu.Unlock()
+
+	if got != 2 {
+		t.Fatalf("expected 2 notify attempts (retry then success), got %d", got)
 	}
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"flag"
@@ -176,16 +177,30 @@ func (t *TunnelConn) Close() {
 
 // TunnelManager 隧道管理器
 type TunnelManager struct {
-	tunnels map[string]*TunnelConn
-	mu      sync.RWMutex
-	config  *Config
+	tunnels    map[string]*TunnelConn
+	mu         sync.RWMutex
+	config     *Config
+	httpClient *http.Client
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
 // NewTunnelManager 创建隧道管理器
 func NewTunnelManager(config *Config) *TunnelManager {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &TunnelManager{
-		tunnels: make(map[string]*TunnelConn),
-		config:  config,
+		tunnels:    make(map[string]*TunnelConn),
+		config:     config,
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+		ctx:        ctx,
+		cancel:     cancel,
+	}
+}
+
+// Stop 停止隧道管理器并取消所有进行中的通知
+func (m *TunnelManager) Stop() {
+	if m.cancel != nil {
+		m.cancel()
 	}
 }
 
@@ -235,8 +250,6 @@ func (m *TunnelManager) Get(deviceID string) (*TunnelConn, bool) {
 // notifyDeviceStatus 通知API设备状态变化
 func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string) {
 	go func() {
-		client := &http.Client{Timeout: 5 * time.Second}
-
 		payload := map[string]string{
 			"device_id":   deviceID,
 			"status":      status,
@@ -250,7 +263,14 @@ func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string) 
 		}
 
 		for attempt := 1; attempt <= defaultNotifyStatusMaxAttempts; attempt++ {
-			req, err := http.NewRequest(
+			select {
+			case <-m.ctx.Done():
+				return
+			default:
+			}
+
+			req, err := http.NewRequestWithContext(
+				m.ctx,
 				http.MethodPost,
 				m.config.APIEndpoint+"/api/device/status",
 				bytes.NewReader(data),
@@ -264,11 +284,15 @@ func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string) 
 				req.Header.Set("X-Internal-API-Key", m.config.InternalAPIKey)
 			}
 
-			resp, err := client.Do(req)
+			resp, err := m.httpClient.Do(req)
 			if err != nil {
 				if attempt < defaultNotifyStatusMaxAttempts {
-					time.Sleep(notifyStatusBackoff(attempt))
-					continue
+					select {
+					case <-m.ctx.Done():
+						return
+					case <-time.After(notifyStatusBackoff(attempt)):
+						continue
+					}
 				}
 				log.Printf("Failed to notify device status after %d attempts: %v", attempt, err)
 				return
@@ -282,8 +306,12 @@ func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string) 
 			}
 
 			if shouldRetryNotifyStatusCode(statusCode) && attempt < defaultNotifyStatusMaxAttempts {
-				time.Sleep(notifyStatusBackoff(attempt))
-				continue
+				select {
+				case <-m.ctx.Done():
+					return
+				case <-time.After(notifyStatusBackoff(attempt)):
+					continue
+				}
 			}
 
 			if shouldRetryNotifyStatusCode(statusCode) {
@@ -300,8 +328,12 @@ func notifyStatusBackoff(attempt int) time.Duration {
 	if attempt <= 0 {
 		attempt = 1
 	}
-
-	return defaultNotifyStatusBaseBackoff * time.Duration(1<<(attempt-1))
+	const maxAttempt = 30
+	if attempt > maxAttempt {
+		attempt = maxAttempt
+	}
+	multiplier := int64(1) << (attempt - 1)
+	return defaultNotifyStatusBaseBackoff * time.Duration(multiplier)
 }
 
 func shouldRetryNotifyStatusCode(statusCode int) bool {
@@ -313,7 +345,13 @@ func (m *TunnelManager) cleanupDeadTunnels() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
 		var deadTunnels []*TunnelConn
 		var deadIDs []string
 
