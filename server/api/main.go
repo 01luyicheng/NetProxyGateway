@@ -24,6 +24,7 @@ const (
 	PairingCodeTTL    = 15 * time.Minute
 	SessionTokenTTL   = 15 * time.Minute
 	MaxFailedAttempts = 5
+	MaxPairingCodeConflictRetries = 10
 	BlockDuration     = 15 * time.Minute
 	DefaultDBPath     = "./api.db"
 )
@@ -35,6 +36,7 @@ const (
 	ErrFailedToFindSession         = "session not found"
 	ErrFailedToFindPairingSession  = "pairing session not found"
 	ErrFailedToGenerateCode        = "failed to generate pairing code"
+	ErrFailedToResolvePairingCodeConflict = "pairing code temporarily unavailable"
 	ErrFailedToCreateSession       = "failed to create pairing session"
 	ErrFailedToUpdateSession       = "failed to update session"
 	ErrFailedToUpdateStatus        = "failed to update device status"
@@ -53,6 +55,11 @@ const (
 	ErrInternalAPIKeyNotConfigured = "internal api key not configured"
 	ErrMissingInternalAPIKey       = "missing internal api key"
 	ErrInvalidInternalAPIKey       = "invalid internal api key"
+)
+
+var (
+	errPairingCodeConflictRetryLimitReached = errors.New("pairing code conflict retry limit reached")
+	errPairingCodeLookupFailed              = errors.New("pairing code lookup failed")
 )
 
 // PairingSession 配对会话
@@ -254,6 +261,34 @@ func generateCode() (string, error) {
 			return fmt.Sprintf("%06d", code), nil
 		}
 	}
+}
+
+func generateUniquePairingCode(
+	maxRetries int,
+	codeGenerator func() (string, error),
+	codeExists func(code string) (bool, error),
+) (string, error) {
+	if maxRetries <= 0 {
+		return "", errPairingCodeConflictRetryLimitReached
+	}
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		code, err := codeGenerator()
+		if err != nil {
+			return "", err
+		}
+
+		exists, err := codeExists(code)
+		if err != nil {
+			return "", err
+		}
+
+		if !exists {
+			return code, nil
+		}
+	}
+
+	return "", errPairingCodeConflictRetryLimitReached
 }
 
 // generateSecureRandomString 生成加密安全的随机字符串（用于API密钥等安全敏感场景）
@@ -694,25 +729,27 @@ func (s *Server) createPairingSession(c *gin.Context) {
 		return
 	}
 
-	// 生成配对码
-	code, err := generateCode()
+	code, err := generateUniquePairingCode(
+		MaxPairingCodeConflictRetries,
+		generateCode,
+		func(code string) (bool, error) {
+			existing, err := s.getPairingSessionDB(code)
+			if err != nil {
+				return false, fmt.Errorf("%w: %v", errPairingCodeLookupFailed, err)
+			}
+			return existing != nil, nil
+		},
+	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToGenerateCode})
-		return
-	}
-
-	// 检查配对码是否已存在
-	for {
-		existing, _ := s.getPairingSessionDB(code)
-		if existing == nil {
-			break
-		}
-		var err error
-		code, err = generateCode()
-		if err != nil {
+		switch {
+		case errors.Is(err, errPairingCodeConflictRetryLimitReached):
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": ErrFailedToResolvePairingCodeConflict})
+		case errors.Is(err, errPairingCodeLookupFailed):
+			c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToQueryDatabase})
+		default:
 			c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToGenerateCode})
-			return
 		}
+		return
 	}
 
 	session := &PairingSession{

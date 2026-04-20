@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -324,5 +325,84 @@ func TestCleanupLoginAttemptsRemovesExpiredBlockedEntry(t *testing.T) {
 
 	if _, exists := server.loginAttempts[clientIP]; exists {
 		t.Fatalf("expected expired blocked entry to be removed")
+	}
+}
+
+func TestGenerateUniquePairingCodeConflictThenSuccess(t *testing.T) {
+	codes := []string{"111111", "222222"}
+	codeIndex := 0
+	lookupCount := 0
+
+	code, err := generateUniquePairingCode(
+		3,
+		func() (string, error) {
+			if codeIndex >= len(codes) {
+				return "", errors.New("unexpected extra code generation")
+			}
+			generated := codes[codeIndex]
+			codeIndex++
+			return generated, nil
+		},
+		func(code string) (bool, error) {
+			lookupCount++
+			return code == "111111", nil
+		},
+	)
+
+	if err != nil {
+		t.Fatalf("expected success after resolving conflicts, got error: %v", err)
+	}
+	if code != "222222" {
+		t.Fatalf("expected code 222222 after conflict resolution, got %s", code)
+	}
+	if lookupCount != 2 {
+		t.Fatalf("expected 2 lookups, got %d", lookupCount)
+	}
+}
+
+func TestGenerateUniquePairingCodeConflictLimitReached(t *testing.T) {
+	maxRetries := 3
+	generationCount := 0
+
+	_, err := generateUniquePairingCode(
+		maxRetries,
+		func() (string, error) {
+			generationCount++
+			return "111111", nil
+		},
+		func(_ string) (bool, error) {
+			return true, nil
+		},
+	)
+
+	if !errors.Is(err, errPairingCodeConflictRetryLimitReached) {
+		t.Fatalf("expected conflict retry limit error, got %v", err)
+	}
+	if generationCount != maxRetries {
+		t.Fatalf("expected %d generation attempts, got %d", maxRetries, generationCount)
+	}
+}
+
+func TestGenerateUniquePairingCodeReturnsLookupErrorImmediately(t *testing.T) {
+	maxRetries := 5
+	lookupErr := errors.New("query failed")
+	lookupCount := 0
+
+	_, err := generateUniquePairingCode(
+		maxRetries,
+		func() (string, error) {
+			return "333333", nil
+		},
+		func(_ string) (bool, error) {
+			lookupCount++
+			return false, lookupErr
+		},
+	)
+
+	if !errors.Is(err, lookupErr) {
+		t.Fatalf("expected lookup error to be returned directly, got %v", err)
+	}
+	if lookupCount != 1 {
+		t.Fatalf("expected lookup to stop after first error, got %d attempts", lookupCount)
 	}
 }
