@@ -632,6 +632,7 @@ func classifyJWTValidationError(err error) string {
 func (s *Server) authMiddleware() gin.HandlerFunc {
 	parser := jwt.NewParser(
 		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+		jwt.WithExpirationRequired(),
 		jwt.WithIssuedAt(),
 		jwt.WithLeeway(30*time.Second),
 	)

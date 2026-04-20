@@ -95,6 +95,7 @@ func TestInternalOrUserAuthMiddlewareFallsBackToBearerToken(t *testing.T) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"sub":  "engineer-1",
 		"role": "engineer",
+		"exp":  time.Now().Add(10 * time.Minute).Unix(),
 	})
 	tokenString, err := token.SignedString(server.jwtSecret)
 	if err != nil {
@@ -113,6 +114,35 @@ func TestInternalOrUserAuthMiddlewareFallsBackToBearerToken(t *testing.T) {
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200 for bearer token auth, got %d", recorder.Code)
+	}
+}
+
+func TestInternalOrUserAuthMiddlewareFallbackRejectsBearerTokenWithoutExp(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := &Server{
+		jwtSecret:      []byte("jwt-secret"),
+		internalAPIKey: []byte("internal-secret"),
+	}
+
+	tokenString := issueAuthToken(t, server.jwtSecret, jwt.MapClaims{
+		"sub":  "engineer-1",
+		"role": "engineer",
+		"iat":  time.Now().Unix(),
+	})
+
+	router := gin.New()
+	router.POST("/internal", server.internalOrUserAuthMiddleware(), func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/internal", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenString)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for bearer token without exp, got %d", recorder.Code)
 	}
 }
 
@@ -240,6 +270,25 @@ func TestAuthMiddlewareRejectsIatInFuture(t *testing.T) {
 	recorder := runAuthRequest(server, tokenString)
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for token with future iat, got %d", recorder.Code)
+	}
+}
+
+func TestAuthMiddlewareRejectsTokenWithoutExp(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := &Server{
+		jwtSecret: []byte("jwt-secret"),
+	}
+
+	tokenString := issueAuthToken(t, server.jwtSecret, jwt.MapClaims{
+		"sub":  "engineer-1",
+		"role": "engineer",
+		"iat":  time.Now().Unix(),
+	})
+
+	recorder := runAuthRequest(server, tokenString)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for token without exp, got %d", recorder.Code)
 	}
 }
 

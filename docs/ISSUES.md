@@ -106,14 +106,6 @@
   c.Set("role", role)
   ```
 
-### H28: API服务JWT未强制要求exp声明 [新发现-待修复]
-- **状态**: 待修复
-- **提交哈希**: a3aefc9
-- **位置**: `server/api/main.go` (L634-L636)
-- **问题描述**: JWT解析器启用了`WithIssuedAt`和`WithLeeway`，但未启用`WithExpirationRequired`，导致缺少`exp`声明的token在签名正确时仍可能通过认证
-- **风险**: 高。认证边界对令牌过期约束不严格，可能接受无过期时间的长期有效令牌
-- **修复难度**: 低
-
 ### H29: 配对码创建存在TOCTOU竞态 [新发现-待修复]
 - **状态**: 待修复
 - **提交哈希**: ecdf316
