@@ -111,4 +111,66 @@ class MqttConnectionManagerTlsPolicyTest {
 
         assertEquals("Connection error: token expired", message)
     }
+
+    @Test
+    fun buildConnectionLostAuditMessage_nullCause_returnsUnknownReason() {
+        val message = manager.buildConnectionLostAuditMessage(
+            cause = null,
+            isDebugBuild = true
+        )
+
+        assertEquals("Connection lost: unknown reason", message)
+    }
+
+    @Test
+    fun buildConnectionLostAuditMessage_nullCause_releaseBuild() {
+        val message = manager.buildConnectionLostAuditMessage(
+            cause = null,
+            isDebugBuild = false
+        )
+
+        assertEquals("Connection lost", message)
+    }
+
+    @Test
+    fun buildConnectionErrorAuditMessage_nullMessage_returnsUnknown() {
+        val error = Throwable().apply { }
+        val message = manager.buildConnectionErrorAuditMessage(
+            error = error,
+            isDebugBuild = true
+        )
+
+        assertEquals("Connection error: unknown", message)
+    }
+
+    @Test
+    fun buildConnectionErrorAuditMessage_nullMessage_releaseBuild() {
+        val error = Throwable().apply { }
+        val message = manager.buildConnectionErrorAuditMessage(
+            error = error,
+            isDebugBuild = false
+        )
+
+        assertEquals("Connection error", message)
+    }
+
+    @Test
+    fun buildConnectionLostAuditMessage_emptyMessage_returnsEmpty() {
+        val message = manager.buildConnectionLostAuditMessage(
+            cause = IllegalStateException(""),
+            isDebugBuild = true
+        )
+
+        assertEquals("Connection lost: ", message)
+    }
+
+    @Test
+    fun buildConnectionErrorAuditMessage_emptyMessage_returnsEmpty() {
+        val message = manager.buildConnectionErrorAuditMessage(
+            error = IllegalArgumentException(""),
+            isDebugBuild = true
+        )
+
+        assertEquals("Connection error: ", message)
+    }
 }
