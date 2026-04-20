@@ -186,6 +186,7 @@ class MqttConnectionManager @Inject constructor(
      * 安全特性：
      * - 使用 TLS 1.2（兼容 Android 5.0+）
      * - 启用主机名验证
+     * - Release 构建强制要求配置证书固定（防止配置遗漏导致不安全连接）
      */
     private fun createProductionSocketFactory(): SSLSocketFactory {
         val trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
@@ -198,6 +199,14 @@ class MqttConnectionManager @Inject constructor(
 
         val configuredPins = MqttTlsPinning.parseConfiguredPins(BuildConfig.MQTT_TLS_PUBLIC_KEY_PINS)
         if (configuredPins.isEmpty()) {
+            // M20 修复：Release 构建强制要求证书固定，防止配置遗漏导致意外使用不安全验证
+            if (!BuildConfig.DEBUG) {
+                throw IllegalStateException(
+                    "SECURITY VIOLATION: MQTT_TLS_PUBLIC_KEY_PINS is not configured in release build. " +
+                    "Certificate pinning is mandatory for release builds to prevent MITM attacks."
+                )
+            }
+            // Debug 构建允许空配置，仅记录警告
             logger.warn("MQTT TLS pinning is disabled: MQTT_TLS_PUBLIC_KEY_PINS is empty. Falling back to default CA validation.")
             AppAuditLogStore.warn(
                 "MQTT",
