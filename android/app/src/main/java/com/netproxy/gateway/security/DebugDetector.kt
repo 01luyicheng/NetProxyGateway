@@ -1,6 +1,7 @@
 package com.netproxy.gateway.security
 
 import android.os.Debug
+import com.netproxy.gateway.BuildConfig
 import java.io.BufferedReader
 import java.io.File
 import java.io.FileReader
@@ -207,17 +208,36 @@ object DebugDetector {
      * 检查是否为 Debug 构建
      */
     fun checkDebugBuild(): Boolean {
-        return try {
-            val appInfo = Class.forName("android.app.ActivityThread")
-                .getMethod("currentApplication")
-                .invoke(null)
-                ?.javaClass
-                ?.getMethod("getApplicationInfo")
-                ?.invoke(null) as? android.content.pm.ApplicationInfo
+        return resolveDebugBuildState(
+            isBuildConfigDebug = BuildConfig.DEBUG,
+            applicationInfoFlagsProvider = { currentApplicationInfoFlags() }
+        )
+    }
 
-            appInfo?.flags?.and(android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
-        } catch (e: Exception) {
+    internal fun resolveDebugBuildState(
+        isBuildConfigDebug: Boolean,
+        applicationInfoFlagsProvider: () -> Int?
+    ): Boolean {
+        if (isBuildConfigDebug) {
+            return true
+        }
+
+        return try {
+            val flags = applicationInfoFlagsProvider()
+            (flags?.and(android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) ?: 0) != 0
+        } catch (_: Exception) {
             false
+        }
+    }
+
+    private fun currentApplicationInfoFlags(): Int? {
+        return try {
+            val application = Class.forName("android.app.ActivityThread")
+                .getMethod("currentApplication")
+                .invoke(null) as? android.app.Application
+            application?.applicationInfo?.flags
+        } catch (_: Exception) {
+            null
         }
     }
 

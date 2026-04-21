@@ -746,13 +746,6 @@
 - **风险**: 高。导致 VPN/MQTT 模块误判网络状态，触发不必要的重连或停止
 - **修复难度**: 中。需要维护多网络状态，检查 `activeNetworks` 判断是否真的无网络
 
-### N32: DebugDetector checkDebugBuild反射错误导致检测失效
-- **提交哈希**: 1f9acee
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt` (L209-L222)
-- **问题描述**: `getApplicationInfo()` 是实例方法但调用时传入 `null`，会抛出异常被 catch 后返回 `false`。debug 构建检测永远失效，无法识别调试环境
-- **风险**: 高。安全检测功能完全失效，无法识别 debug 构建环境的安全风险
-- **修复难度**: 低。使用 `ApplicationInfo.flags` 的其他获取方式，或直接使用 `BuildConfig.DEBUG`
-
 ### N33: EmulatorDetector checkPhoneNumber误判真实设备
 - **提交哈希**: 1f9acee
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/security/EmulatorDetector.kt` (L348-L377)

@@ -1,5 +1,6 @@
 package com.netproxy.gateway.security
 
+import android.content.pm.ApplicationInfo
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -93,5 +94,50 @@ class DebugDetectorTest {
         """.trimIndent()
 
         assertFalse(DebugDetector.parsePtraceStatus(status, currentPid))
+    }
+
+    @Test
+    fun checkDebugBuild_returnsTrue_inDebugUnitTestBuild() {
+        assertTrue(DebugDetector.checkDebugBuild())
+    }
+
+    @Test
+    fun resolveDebugBuildState_returnsFalse_whenReleaseSignalsAndNotDebuggable() {
+        val result = DebugDetector.resolveDebugBuildState(
+            isBuildConfigDebug = false,
+            applicationInfoFlagsProvider = { 0 }
+        )
+
+        assertFalse(result)
+    }
+
+    @Test
+    fun resolveDebugBuildState_returnsFalse_whenFlagsAreNullInNonDebugBuild() {
+        val result = DebugDetector.resolveDebugBuildState(
+            isBuildConfigDebug = false,
+            applicationInfoFlagsProvider = { null }
+        )
+
+        assertFalse(result)
+    }
+
+    @Test
+    fun resolveDebugBuildState_keepsTrue_whenBuildConfigDebugEvenIfFlagsProviderThrows() {
+        val result = DebugDetector.resolveDebugBuildState(
+            isBuildConfigDebug = true,
+            applicationInfoFlagsProvider = { throw IllegalStateException("boom") }
+        )
+
+        assertTrue(result)
+    }
+
+    @Test
+    fun resolveDebugBuildState_returnsTrue_whenApplicationInfoHasDebuggableFlag() {
+        val result = DebugDetector.resolveDebugBuildState(
+            isBuildConfigDebug = false,
+            applicationInfoFlagsProvider = { ApplicationInfo.FLAG_DEBUGGABLE }
+        )
+
+        assertTrue(result)
     }
 }
