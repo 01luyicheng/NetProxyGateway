@@ -19,6 +19,25 @@ object EmulatorDetector {
 
     private const val TAG = "EmulatorDetector"
 
+    private val EMULATOR_PHONE_NUMBERS = setOf(
+        "15555215554",
+        "15555215556",
+        "15555215558",
+        "15555215560",
+        "15555215562",
+        "15555215564",
+        "15555215566",
+        "15555215568",
+        "15555215570",
+        "15555215572",
+        "15555215574",
+        "15555215576",
+        "15555215578",
+        "15555215580",
+        "15555215582",
+        "15555215584"
+    )
+
     // 已知模拟器硬件标识
     private val EMULATOR_HARDWARE = arrayOf(
         "goldfish",          // Android SDK 模拟器
@@ -343,7 +362,7 @@ object EmulatorDetector {
     }
 
     /**
-     * 检查电话号码（模拟器通常为 null 或特定值）
+     * 检查电话号码（仅匹配已知模拟器默认号码）
      */
     fun checkPhoneNumber(context: Context): Boolean {
         // 检查 READ_PHONE_STATE 权限
@@ -354,26 +373,17 @@ object EmulatorDetector {
         return try {
             val telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
             val phoneNumber = telephonyManager?.line1Number
-            phoneNumber.isNullOrEmpty() ||
-                    phoneNumber == "15555215554" ||  // 模拟器默认号码
-                    phoneNumber == "15555215556" ||
-                    phoneNumber == "15555215558" ||
-                    phoneNumber == "15555215560" ||
-                    phoneNumber == "15555215562" ||
-                    phoneNumber == "15555215564" ||
-                    phoneNumber == "15555215566" ||
-                    phoneNumber == "15555215568" ||
-                    phoneNumber == "15555215570" ||
-                    phoneNumber == "15555215572" ||
-                    phoneNumber == "15555215574" ||
-                    phoneNumber == "15555215576" ||
-                    phoneNumber == "15555215578" ||
-                    phoneNumber == "15555215580" ||
-                    phoneNumber == "15555215582" ||
-                    phoneNumber == "15555215584"
+            isKnownEmulatorPhoneNumber(phoneNumber)
         } catch (e: Exception) {
             false
         }
+    }
+
+    internal fun isKnownEmulatorPhoneNumber(phoneNumber: String?): Boolean {
+        if (phoneNumber.isNullOrBlank()) {
+            return false
+        }
+        return EMULATOR_PHONE_NUMBERS.contains(phoneNumber)
     }
 
     /**

@@ -746,13 +746,6 @@
 - **风险**: 高。导致 VPN/MQTT 模块误判网络状态，触发不必要的重连或停止
 - **修复难度**: 中。需要维护多网络状态，检查 `activeNetworks` 判断是否真的无网络
 
-### N33: EmulatorDetector checkPhoneNumber误判真实设备
-- **提交哈希**: 1f9acee
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/EmulatorDetector.kt` (L348-L377)
-- **问题描述**: `line1Number.isNullOrEmpty()` 被判定为模拟器特征，但双卡设备未插SIM卡卡槽、VoLTE纯数据卡、企业MDM设备、Android 10+隐私限制返回空、eSIM未激活等情况都会返回空字符串
-- **风险**: 高。大量真实设备被误判为模拟器，阻止正常用户使用应用
-- **修复难度**: 低。将空号码检查改为仅拒绝明确的模拟器默认号码（15555215554等），移除 `isNullOrEmpty()` 检查
-
 ### N34: MainViewModel VPN状态与真实服务状态可能不一致
 - **提交哈希**: 1f9acee
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (L129-L161)
