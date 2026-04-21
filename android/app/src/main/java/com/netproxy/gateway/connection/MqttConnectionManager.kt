@@ -545,8 +545,27 @@ class MqttConnectionManager @Inject constructor(
         publishWithResult(topic, payload, qos)
     }
 
+    private fun formatConnectionState(state: MqttConnectionState): String {
+        return when (state) {
+            MqttConnectionState.Disconnected -> "Disconnected"
+            MqttConnectionState.Connecting -> "Connecting"
+            MqttConnectionState.Connected -> "Connected"
+            is MqttConnectionState.Error -> "Error(${state.message})"
+        }
+    }
+
+    private fun notConnectedOperationError(operation: String, state: MqttConnectionState): IllegalStateException {
+        return IllegalStateException(
+            "Cannot $operation because MQTT is not connected (currentState=${formatConnectionState(state)})"
+        )
+    }
+
     fun publishWithResult(topic: String, payload: String, qos: Int = 0, logError: Boolean = true): AppResult<Unit> {
         return try {
+            val state = _connectionState.value
+            if (state != MqttConnectionState.Connected) {
+                return AppResult.error(notConnectedOperationError("publish", state))
+            }
             val client = mqttClient ?: return AppResult.error(IllegalStateException("MQTT client is not connected"))
             val message = MqttMessage(payload.toByteArray()).apply {
                 this.qos = qos
@@ -569,6 +588,10 @@ class MqttConnectionManager @Inject constructor(
 
     fun subscribeWithResult(topic: String, qos: Int = 0, callback: ((String) -> Unit)? = null): AppResult<Unit> {
         return try {
+            val state = _connectionState.value
+            if (state != MqttConnectionState.Connected) {
+                return AppResult.error(notConnectedOperationError("subscribe", state))
+            }
             val client = mqttClient ?: return AppResult.error(IllegalStateException("MQTT client is not connected"))
             callback?.let {
                 topicCallbacks.computeIfAbsent(topic) { CopyOnWriteArrayList() }.add(it)

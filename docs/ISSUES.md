@@ -292,29 +292,6 @@
 
 ## Medium Severity
 
-### M12: MQTT 发布和订阅未检查连接状态
-- **状态**: 待修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L352-364, L370-388)
-- **问题**: `publishWithResult` 和 `subscribeWithResult` 方法只检查 `mqttClient != null`，但不检查连接状态（`_connectionState.value == MqttConnectionState.Connected`）。这可能导致在客户端正在连接或断开时尝试发布/订阅消息，操作会失败但错误信息不明确
-- **风险**: 中。在连接不稳定或重连过程中，可能导致消息发布/订阅失败，增加调试难度
-- **建议修复**:
-  1. 在 `publishWithResult` 和 `subscribeWithResult` 中添加连接状态检查
-  2. 如果未连接，返回明确的错误信息或等待连接完成
-  3. 考虑添加超时机制，避免无限等待
-- **代码示例**:
-  ```kotlin
-  fun publishWithResult(topic: String, payload: String, qos: Int = 0): AppResult<Unit> {
-      val client = mqttClient ?: return AppResult.error(IllegalStateException("MQTT client is not connected"))
-      
-      // 添加连接状态检查
-      if (_connectionState.value != MqttConnectionState.Connected) {
-          return AppResult.error(IllegalStateException("MQTT client is not connected, current state: ${_connectionState.value}"))
-      }
-      
-      // ... 其余代码
-  }
-  ```
-
 ### M13: MQTT 重连延迟递增逻辑问题
 - **状态**: 待修复
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L311-L321)
