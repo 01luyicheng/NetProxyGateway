@@ -729,3 +729,127 @@
 ## Medium Severity
 
 > 当前无 Medium Severity 问题
+
+---
+
+## 新增问题（待分类）
+
+### N27: Socks5ConnectionPool cleanupIdleConnections在write锁内执行阻塞IO
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (L435-L457)
+- **问题描述**: `removeConnection(conn)` 在 `write` 锁内被调用，内部执行 `connection.close()` 阻塞IO操作。在高并发或网络异常时，长时间持有 `write` 锁会阻塞所有 `borrowConnection` 和 `returnConnection` 操作
+- **风险**: 高。严重影响连接池并发性能，可能导致连接获取超时
+- **修复难度**: 中。需要将 `socket.close()` 移出锁范围，改为异步关闭或在锁外执行
+
+### N28: Socks5ProxyHandler RelayHandler双重释放风险
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt` (L278-L289)
+- **问题描述**: `writeAndFlush(msg)` 失败时手动调用 `ReferenceCountUtil.release(msg)`，但 Netty 在写入失败时可能已自动释放 msg，导致双重释放 `IllegalReferenceCountException`
+- **风险**: 高。写入失败时可能导致应用崩溃
+- **修复难度**: 低。使用 Netty 内置的 `ChannelFutureListener.CLOSE_ON_FAILURE` 替代手动释放
+
+### N29: Socks5ProxyService异常后EventLoopGroup泄漏
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyService.kt` (L89-L124)
+- **问题描述**: `bootstrap.bind()` 或 `sync()` 抛出异常时，`bossGroup` 和 `workerGroup` 未被关闭。`NioEventLoopGroup` 包含线程池，不调用 `shutdownGracefully()` 会导致线程和资源泄漏
+- **风险**: 高。线程泄漏、文件描述符耗尽、重复启动失败
+- **修复难度**: 低。在 catch 块或 finally 块中添加 `bossGroup?.shutdownGracefully()` 和 `workerGroup?.shutdownGracefully()`
+
+### N30: Socks5ProxyHandler DNS解析阻塞EventLoop
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt` (L111-L128)
+- **问题描述**: `InetAddress.getByName(host)` 是同步阻塞调用，在 Netty EventLoop 线程上执行。DNS 查询可能耗时数百毫秒甚至超时（数秒），期间阻塞该 EventLoop 上的所有 I/O 事件
+- **风险**: 高。单连接慢DNS查询导致整个 SOCKS5 服务所有连接停滞
+- **修复难度**: 中。需要引入异步 DNS 解析或使用线程池执行 DNS 查询
+
+### N31: NetworkStateManager onLost多网络状态误判
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/NetworkStateManager.kt` (L42-L44)
+- **问题描述**: `onLost(network)` 只接收丢失的特定网络，不判断是否还有其他可用网络。`getStateAfterNetworkLost()` 直接返回 `isConnected=false`。多网络环境（WiFi+移动数据）下断开一个网络会错误报告为完全断网
+- **风险**: 高。导致 VPN/MQTT 模块误判网络状态，触发不必要的重连或停止
+- **修复难度**: 中。需要维护多网络状态，检查 `activeNetworks` 判断是否真的无网络
+
+### N32: DebugDetector checkDebugBuild反射错误导致检测失效
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt` (L209-L222)
+- **问题描述**: `getApplicationInfo()` 是实例方法但调用时传入 `null`，会抛出异常被 catch 后返回 `false`。debug 构建检测永远失效，无法识别调试环境
+- **风险**: 高。安全检测功能完全失效，无法识别 debug 构建环境的安全风险
+- **修复难度**: 低。使用 `ApplicationInfo.flags` 的其他获取方式，或直接使用 `BuildConfig.DEBUG`
+
+### N33: EmulatorDetector checkPhoneNumber误判真实设备
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/EmulatorDetector.kt` (L348-L377)
+- **问题描述**: `line1Number.isNullOrEmpty()` 被判定为模拟器特征，但双卡设备未插SIM卡卡槽、VoLTE纯数据卡、企业MDM设备、Android 10+隐私限制返回空、eSIM未激活等情况都会返回空字符串
+- **风险**: 高。大量真实设备被误判为模拟器，阻止正常用户使用应用
+- **修复难度**: 低。将空号码检查改为仅拒绝明确的模拟器默认号码（15555215554等），移除 `isNullOrEmpty()` 检查
+
+### N34: MainViewModel VPN状态与真实服务状态可能不一致
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (L129-L161)
+- **问题描述**: `startForegroundService()` 后立即设 `isVpnEnabled=true`，但服务启动可能失败（权限被拒、系统限制、OOM）。UI 显示 VPN 已开启但实际服务未运行，缺少通过 ServiceConnection 同步真实状态的机制
+- **风险**: 高。用户看到的状态与实际不符，可能导致安全/功能问题
+- **修复难度**: 中。通过 ServiceConnection 或广播监听真实服务状态，UI 状态与真实状态解耦
+
+### N35: MqttConnectionManager connect阻塞Default调度器 [误报]
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L367)
+- **问题描述**: `createdClient.connect(options)` 是 Paho MQTT 同步阻塞调用，在 `viewModelScope.launch` 中执行（默认 Main 调度器）。连接超时可达数十秒，长时间阻塞 UI 线程
+- **风险**: 高。主线程执行网络阻塞操作可能导致 ANR
+- **修复难度**: 低。使用 `withContext(Dispatchers.IO)` 将 connect 操作移到 IO 调度器
+- **误报原因**: 实际代码使用 `@ApplicationScope` 注入的 `CoroutineScope`，配置为 `Dispatchers.IO`（见 `CoroutineScopes.kt`），并非在 Main 调度器执行。代码审查时已验证不会阻塞主线程。
+
+### N36: VpnService TCP固定标志位不符合协议状态机
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L708-L709)
+- **问题描述**: `constructReturnPacket` 固定设置 `PSH+ACK (0x18)`，从未根据 TCP 连接状态设置 `SYN`/`FIN`/`RST` 标志。连接建立应发送 `SYN+ACK`，终止应发送 `FIN+ACK`
+- **风险**: 高。与严格遵循 TCP 协议栈的应用不兼容，可能导致连接建立失败或异常断开
+- **修复难度**: 高。需要实现完整的 TCP 状态机，正确管理序列号和标志位
+
+### N37: AuthSessionStore CharArray安全设计被String抵消
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/AuthSessionStore.kt` (L183, L190)
+- **问题描述**: `loadSession()` 将 `CharArray` 转为 `String` 返回，且 `ProxyAuthSession.authToken` 类型也是 `String`。`CharArray` 可清零的安全设计被完全绕过，敏感 token 以不可变 String 形式存在于内存
+- **风险**: 高。安全设计意图失效，token 无法被主动擦除
+- **修复难度**: 中。将 `ProxyAuthSession.authToken` 类型改为 `CharArray`，在业务层传递时保持 `CharArray` 形式
+
+### N38: server/api cleanup协程泄漏
+- **提交哈希**: 1f9acee
+- **位置**: `server/api/main.go` (L1171-L1172, L413-L442)
+- **问题描述**: `cleanupExpiredSessions` 和 `cleanupExpiredLoginAttempts` 后台协程使用 `for range ticker.C` 无限循环，无退出条件。`Server.Close()` 只关闭数据库，不通知清理协程退出
+- **风险**: 高。影响优雅关闭和资源管理，热重启场景下是实质性泄漏
+- **修复难度**: 低。为 Server 添加 `context.Context` 和关闭通道，协程监听 context.Done() 或通道退出
+
+### N39: server/api JWT Secret长度未验证
+- **提交哈希**: 1f9acee
+- **位置**: `server/api/main.go` (L121-L124, L190)
+- **问题描述**: JWT Secret 仅检查非空，未验证长度。HS256 密钥应至少 256 位（32 字节），弱密钥（1-2 字符）可被暴力破解
+- **风险**: 高。使用弱 JWT 密钥可能导致令牌被伪造，造成未授权访问
+- **修复难度**: 低。添加最小长度检查（如 32 字符），不足时拒绝启动
+
+### N40: server/socks5-proxy GetOrConnectTunnel连接存活检查竞态
+- **提交哈希**: 1f9acee
+- **位置**: `server/socks5-proxy/main.go` (L479-L577)
+- **问题描述**: RLock 释放后调用 `isConnAlive`，期间其他 goroutine 可能删除连接并创建新连接。返回的连接可能已被替换或即将关闭，典型的 Check-Then-Act 竞态
+- **风险**: 高。返回失效连接导致客户端操作失败，影响连接稳定性
+- **修复难度**: 中。将 `isConnAlive` 调用放在锁保护的原子操作中，或返回连接时增加引用计数
+
+### N41: server/tunnel validateDeviceToken每次创建新HTTP客户端
+- **提交哈希**: 1f9acee
+- **位置**: `server/tunnel/main.go` (L527-L583)
+- **问题描述**: 每次 WebSocket 连接建立时调用 `validateDeviceToken`，每次都创建新的 `http.Client`。无法复用 TCP 连接池，高频场景下造成连接开销和资源浪费
+- **风险**: 中。性能问题，与已修复的 `notifyDeviceStatus` 问题（C24）相同
+- **修复难度**: 低。将 `http.Client` 作为 `Server` 字段，初始化时创建一次并复用
+
+### N42: server/tunnel heartbeat在Close后尝试发送Ping
+- **提交哈希**: 1f9acee
+- **位置**: `server/tunnel/main.go` (L586-L610)
+- **问题描述**: `IsAlive()` 返回 true 后、`WriteControl` 发送 ping 前，`Close()` 可能被其他 goroutine 调用。向已关闭连接写入产生错误日志和冗余的 `Close()` 调用
+- **风险**: 中。可观察性问题，产生不必要的错误日志，影响监控
+- **修复难度**: 低。在 `WriteControl` 前检查 `closeChan`，或使用更一致的状态管理
+
+### N43: MqttConnectionManager MQTT回调无法注销导致内存泄漏
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L81, L566-L617)
+- **问题描述**: `subscribeWithResult` 注册回调到 `topicCallbacks`，但没有提供 `unsubscribe(topic, callback)` API。MQTT 长连接期间，持有 UI 组件闭包的回调永久留存无法清理
+- **风险**: 中。MQTT 长连接场景下可能导致 Activity/ViewModel 内存泄漏
+- **修复难度**: 中。添加 `unsubscribe(topic, callback)` 方法，支持精细化回调生命周期管理

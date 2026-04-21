@@ -285,3 +285,308 @@
 - 设计或实现可以优化
 
 **软件缺陷**（功能错误、崩溃、安全漏洞等）应记录在 `ISSUES.md` 中。
+
+---
+
+## 新增问题（待分类）
+
+### C28: VpnService processVpnTraffic FileInputStream未关闭
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L243-L264)
+- **问题描述**: `FileInputStream` 在 `processVpnTraffic()` 中打开，但在 catch 块或正常退出时均未被关闭，存在资源泄漏风险
+- **风险**: 中。VPN 停止后文件描述符可能未释放
+- **修复难度**: 低。使用 `use` 块或在 finally 中关闭
+
+### C29: VpnService forwardViaWifi TCP无响应读取
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L403-L411)
+- **问题描述**: TCP `forwardViaWifi` 只发送 payload 不读取响应，`Socket().use` 块结束后立即关闭。若目标服务器需握手会丢失响应数据
+- **风险**: 中。TCP 转发不完整，可能导致协议交互失败
+- **修复难度**: 中。需要实现简单的响应读取或改为单向 UDP 转发模式
+
+### C30: VpnService cleanupStaleConnections removeIf遍历风险
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L513-L531)
+- **问题描述**: `removeIf` 遍历 `ConcurrentHashMap` 时 lambda 中调用 `pool?.returnConnection()` 是阻塞操作，可能长时间持有内部锁
+- **风险**: 中。影响 `activeConnections` 的并发访问性能
+- **修复难度**: 中。将过期连接收集到列表后移出锁范围再清理
+
+### C31: VpnService startVpn状态与资源初始化顺序不一致
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L207-L216)
+- **问题描述**: `vpnInterface` 建立成功后先设状态为 `RUNNING`，然后才创建 `vpnOutputStream`。若 `FileOutputStream` 构造失败，状态已是 RUNNING 但输出流为 null
+- **风险**: 中。状态与实际资源不一致，后续 `injectPacket` 静默失败
+- **修复难度**: 低。先初始化所有资源再更新状态
+
+### C32: VpnService injectPacket静默丢弃注入失败
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L797-L804)
+- **问题描述**: `vpnOutputStream` 为 null 时静默捕获异常，调用方无法感知注入失败。TCP 回包丢失但连接会话仍保持活跃，上层应用超时等待响应
+- **风险**: 中。TCP 连接异常但无错误反馈
+- **修复难度**: 中。返回注入结果，调用方根据结果清理无效会话
+
+### C33: VpnService processReturnTraffic遍历视图不一致
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L543)
+- **问题描述**: `activeConnections.forEach` 遍历中若 `processTcpReturn` 内部修改 map，可能看到不一致视图，某些新加入条目被跳过
+- **风险**: 中。高并发下可能遗漏新连接的返回流量处理
+- **修复难度**: 中。使用快照复制或更安全的遍历策略
+
+### C34: VirtualIpAllocator锁内require异常导致死锁
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VirtualIpAllocator.kt` (L92-L94)
+- **问题描述**: `synchronized(ipAllocationLock)` 块内 `require()` 失败抛出异常，若 `nextVirtualIp` 被恶意修改，分配器在持锁状态下崩溃，后续所有分配线程阻塞
+- **风险**: 中。极端情况下 IP 分配完全停止
+- **修复难度**: 低。将 `require` 移出锁范围或改为安全断言
+
+### C35: VirtualIpAllocator破坏外部AtomicInteger封装
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VirtualIpAllocator.kt` (L30-L37, L107-L108)
+- **问题描述**: `getOrAllocateVirtualIp` 接收外部 `AtomicInteger` 参数并直接 `nextVirtualIp.set()` 修改，破坏调用方封装
+- **风险**: 中。调用方可能持有引用并在分配器外部修改，导致不可预期行为
+- **修复难度**: 低。将 `nextVirtualIp` 作为分配器内部状态管理
+
+### C36: Socks5ConnectionPool borrowConnection连接追踪泄漏
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (L137-L148)
+- **问题描述**: `queue.poll()` 取出无效连接后，在 `write` 锁清理前若发生异常或线程中断，连接可能既不在队列也不在 `allConnections` 中，造成临时追踪泄漏
+- **风险**: 中。socket 可能未关闭且未被追踪
+- **修复难度**: 中。在 `read` 锁内立即关闭无效连接或确保清理不可中断
+
+### C37: Socks5ConnectionPool returnConnection O(n)性能瓶颈
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (L205-L210)
+- **问题描述**: `returnConnection` 在 `write` 锁内遍历 `queue` 和 `allConnections` 计算连接数，O(n) 复杂度，高并发下阻塞读写操作
+- **风险**: 中。高并发场景下连接归还性能下降
+- **修复难度**: 中。维护每个目标地址的连接计数器，避免遍历
+
+### C38: Socks5ConnectionPool readFully无限循环风险
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (L395-L420)
+- **问题描述**: `readFully` 中若 `input.read()` 持续返回 0，while 循环无限执行，CPU 空转
+- **风险**: 中。某些 InputStream 实现可能导致线程空转
+- **修复难度**: 低。添加最大重试次数或超时检查
+
+### C39: Socks5ProxyHandler NettyOutboundConnector未设置连接超时
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt` (L245-L270)
+- **问题描述**: `Bootstrap` 未设置 `ChannelOption.CONNECT_TIMEOUT_MILLIS` 或 `SO_TIMEOUT`，连接可能长时间挂起占用 event loop 线程
+- **风险**: 中。上游服务器不可达时连接挂起
+- **修复难度**: 低。添加连接超时配置
+
+### C40: Socks5ProxyService closeFuture.sync阻塞协程
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyService.kt` (L114-L115)
+- **问题描述**: `serverChannel?.closeFuture()?.sync()` 阻塞协程线程，若 `closeFuture` 永远不触发，协程永远挂起
+- **风险**: 中。异常路径下协程泄漏
+- **修复难度**: 低。使用 `await()` 替代 `sync()` 或添加超时
+
+### C41: Socks5ProxyService shutdownGracefully无超时
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyService.kt` (L206-L207)
+- **问题描述**: `shutdownGracefully()` 默认无超时，若存在挂起连接可能长时间阻塞 `onDestroy()`
+- **风险**: 低。Service 销毁延迟
+- **修复难度**: 低。添加超时参数
+
+### C42: MqttConnectionManager subscribe回调可重复注册
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L570-L588)
+- **问题描述**: `subscribeWithResult` 将 callback 添加到 `CopyOnWriteArrayList` 前不做去重，同一回调可被重复注册导致重复触发
+- **风险**: 中。消息重复处理或 UI 状态异常抖动
+- **修复难度**: 低。添加去重检查或 Set 结构
+
+### C43: MqttConnectionManager startHeartbeat并发启动风险
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L493-L542)
+- **问题描述**: `startHeartbeat` 先 `cancel()` 再赋值新 Job，非原子操作，旧 Job 尚未完成取消时新 Job 已启动，短暂双心跳并行
+- **风险**: 中。心跳频率翻倍，增加网络负载
+- **修复难度**: 低。使用原子操作或 Mutex 保护 Job 赋值
+
+### C44: NetworkStateManager onAvailable瞬态未验证状态
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/NetworkStateManager.kt` (L38-L40)
+- **问题描述**: `onAvailable` 可能在 `onCapabilitiesChanged`（携带 VALIDATED）之前触发，下游可能收到 `isValidated=false` 瞬态并做出错误决策
+- **风险**: 中。MQTT 连接决策可能基于未验证的网络状态
+- **修复难度**: 中。延迟发射或过滤瞬态状态
+
+### C45: AuthSessionStore锁内执行加密磁盘IO可能ANR
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/AuthSessionStore.kt` (L57-L68)
+- **问题描述**: `update()` 在 `@Synchronized` 锁内执行 `EncryptedSharedPreferences` 读写，涉及 MasterKey 解密和 AES-GCM，主线程调用可能导致 ANR
+- **风险**: 中。UI 线程调用时可能触发 ANR
+- **修复难度**: 中。将加密 IO 移到后台线程
+
+### C46: GatewayWifiManager activeSuggestions非线程安全
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/wifi/WifiManager.kt` (L67, L417, L471)
+- **问题描述**: `activeSuggestions` 是普通 `List` 变量，无同步机制，`clearNetworkSuggestions` 的读取-修改-写入序列非原子，并发时可能丢失更新
+- **风险**: 中。WiFi 建议列表状态不一致
+- **修复难度**: 低。使用 `AtomicReference` 或 `volatile` 修饰
+
+### C47: GatewayWifiManager disconnect未移除遗留网络配置
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/wifi/WifiManager.kt` (L441-L447)
+- **问题描述**: Android 10 以下 `disconnect()` 仅调用 `wifiManager.disconnect()`，不移除之前 `addNetwork()` 的配置，造成配置污染和安全风险
+- **风险**: 中。开放网络配置残留可能导致设备自动重连
+- **修复难度**: 低。添加 `removeNetwork()` 调用
+
+### C48: GatewayWifiManager hashCode去重不可靠
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/wifi/WifiManager.kt` (L458)
+- **问题描述**: `distinctBy { it.hashCode() }` 去重不可靠，hashCode 碰撞可能导致不同 suggestion 被错误去重
+- **风险**: 低。WiFi 建议去重不准确
+- **修复难度**: 低。使用 SSID 等稳定标识去重
+
+### C49: AppModule新分离式接口未提供Hilt绑定
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/di/AppModule.kt` (L15-L41)
+- **问题描述**: `ModuleInterfaces.kt` 中新的分离式接口未提供 `@Binds` 绑定，新接口完全不可注入，技术债务无法消除
+- **风险**: 中。新接口设计无法使用，迫使继续使用已弃用接口
+- **修复难度**: 低。为新接口添加 `@Binds` 绑定
+
+### C50: ModuleCoordinator modules Map非线程安全
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/di/ModuleCoordinator.kt` (L54, L56-L63)
+- **问题描述**: `modules` 使用 `mutableMapOf` 非线程安全，`registerModule`/`getModule` 可能在不同线程调用，存在并发修改风险
+- **风险**: 中。并发修改导致数据竞争或崩溃
+- **修复难度**: 低。使用 `ConcurrentHashMap` 替代
+
+### C51: ModuleCoordinator SharedFlow事件静默丢失
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/di/ModuleCoordinator.kt` (L31-L38)
+- **问题描述**: `MutableSharedFlow` 默认 buffer=0/replay=0，无 collector 时事件静默丢弃，重要事件（如 ConnectionStateChange）可能丢失
+- **风险**: 中。配置变更期间事件丢失导致 UI 状态不一致
+- **修复难度**: 低。配置 `replay=1` 或 `extraBufferCapacity`
+
+### C52: ModuleCoordinator强引用导致生命周期对象泄漏
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/di/ModuleCoordinator.kt` (L57)
+- **问题描述**: `registerModule` 以强引用存入 `modules`，若注册生命周期对象，Activity 销毁时无法 GC，内存泄漏
+- **风险**: 中。Activity/Fragment 泄漏
+- **修复难度**: 中。使用弱引用或生命周期感知注册
+
+### C53: SecurityManager安全检测报告包含敏感信息
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/SecurityManager.kt` (L157-L187)
+- **问题描述**: `getSecurityReport()` 返回包含详细 root 路径、调试器信息、模拟器特征的字符串，任何调用方（包括日志上报）都可能泄露设备指纹
+- **风险**: 中。设备指纹信息泄露增加被针对性攻击风险
+- **修复难度**: 低。限制报告访问权限或脱敏处理
+
+### C54: AppAuditLogStore日志内容未脱敏
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/debug/AppAuditLogStore.kt` (L48-L73)
+- **问题描述**: `sanitizeMessage()` 仅移除换行符和截断长度，未对 IP、配对码、Token、SSID 等脱敏。审计日志在 UI 完全可见，截图即可泄露敏感信息
+- **风险**: 中。敏感信息通过审计日志界面泄露
+- **修复难度**: 中。集成 `VpnLogRedaction` 脱敏逻辑
+
+### C55: MainScreen配对码输入无验证
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt` (L417-L422)
+- **问题描述**: `OutlinedTextField` 未限制数字键盘、未过滤非数字字符、未限制最大长度，用户可输入任意字符
+- **风险**: 中。输入验证缺失，超长输入可能导致显示异常
+- **修复难度**: 低。添加 `keyboardOptions` 和 `onValueChange` 过滤
+
+### C56: MainScreen审计日志滚动位置丢失
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt` (L286-L333)
+- **问题描述**: `AuditLogsScreen` 的 `LazyColumn` 未使用 `rememberLazyListState()`，配置变更后滚动位置丢失
+- **风险**: 低。用户体验问题
+- **修复难度**: 低。添加 `rememberLazyListState()`
+
+### C57: server/api HTTP服务器缺少MaxHeaderBytes
+- **提交哈希**: 1f9acee
+- **位置**: `server/api/main.go` (L1211-L1218), `server/tunnel/main.go` (L803-L810)
+- **问题描述**: HTTP 服务器未显式设置 `MaxHeaderBytes`，依赖 Go 默认 1MB。生产环境建议显式限制以防止内存耗尽攻击
+- **风险**: 中。DoS 攻击风险
+- **修复难度**: 低。添加 `MaxHeaderBytes` 配置
+
+### C58: server/socks5-proxy relay错误处理不完整
+- **提交哈希**: 1f9acee
+- **位置**: `server/socks5-proxy/main.go` (L1221-L1248)
+- **问题描述**: `io.Copy` 错误只保留第一个非预期错误，第二个被丢弃。错误过滤依赖字符串匹配，不够健壮
+- **风险**: 低。故障排查信息不完整
+- **修复难度**: 低。收集所有错误或使用错误包装
+
+### C59: server/socks5-proxy relay测试flaky
+- **提交哈希**: 1f9acee
+- **位置**: `server/socks5-proxy/main_test.go` (L294-L332)
+- **问题描述**: `TestRelay_ClosesPeerConnectionOnHalfClose` 依赖 `time.After(2s)` 超时，慢速 CI 下可能 flaky
+- **风险**: 低。测试可靠性
+- **修复难度**: 低。使用同步原语替代固定超时
+
+### C60: server/tunnel sendLoop双重select效率低
+- **提交哈希**: 1f9acee
+- **位置**: `server/tunnel/main.go` (L613-L638)
+- **问题描述**: `sendLoop` 外层 `select` 读取数据后内层又检查 `closeChan`，增加复杂度且可能不必要地尝试写入
+- **风险**: 低。代码复杂度
+- **修复难度**: 低。合并为单层 select
+
+### C61: server/tunnel notify测试仍有flaky风险
+- **提交哈希**: 1f9acee
+- **位置**: `server/tunnel/main_test.go` (L86-L88)
+- **问题描述**: 虽 C26 声称已修复，但代码仍使用 `time.After(300ms)` 验证无额外请求，慢 CI 下仍可能失败
+- **风险**: 低。测试可靠性
+- **修复难度**: 低。使用同步原语替代固定超时
+
+### C62: server/socks5-proxy IPFilter IPv6处理不完整
+- **提交哈希**: 1f9acee
+- **位置**: `server/socks5-proxy/main.go` (L248-L273)
+- **问题描述**: `IPFilter.IsAllowed` 对 IPv6 支持不完整，域名解析只选第一个 IPv4，若域名只有 IPv6 会返回 false
+- **风险**: 低。IPv6 场景下过滤失效
+- **修复难度**: 中。添加 IPv6 CIDR 支持
+
+### C63: VpnService connectionKey格式未来IPv6冲突
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L438)
+- **问题描述**: `connectionKey` 使用 `"$srcIp:$srcPort-$destinationIp:$destinationPort"` 简单拼接，IPv6 地址含 `:` 和 `-` 会产生解析歧义
+- **风险**: 低。未来 IPv6 支持时 key 冲突
+- **修复难度**: 低。使用结构化 key 或编码处理
+
+### C64: VpnService onDestroy重复调用stopProxyService
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L1113-L1147)
+- **问题描述**: `onDestroy()` 中若 `stopVpn()` 已被调用过，`stopProxyService()` 会被调用两次，虽幂等但冗余
+- **风险**: 低。代码冗余
+- **修复难度**: 低。添加状态检查避免重复调用
+
+### C65: VpnDnsConfig isValidIpv4接受前导零
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnDnsConfig.kt` (L67-L82)
+- **问题描述**: `octet.toIntOrNull() in 0..255` 接受前导零（如 `01`），严格模式下可能被解析为八进制导致语义不一致
+- **风险**: 低。IP 验证宽松
+- **修复难度**: 低。拒绝含前导零的 octet
+
+### C66: VpnLogRedaction IPv6验证缺陷
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnLogRedaction.kt` (L35-L55)
+- **问题描述**: `isValidIpv6` 对 IPv4-mapped IPv6 和空字符串处理有缺陷，且依赖 `InetAddress.getByName` 有性能开销
+- **风险**: 低。日志脱敏不准确
+- **修复难度**: 低。改进验证逻辑
+
+### C67: AuthSessionStore constantTimeEquals空指针风险
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/AuthSessionStore.kt` (L193-L200)
+- **问题描述**: `constantTimeEquals` 未对参数做 null 检查，未来调用方传入 null 会 NPE
+- **风险**: 低。防御性编程缺失
+- **修复难度**: 低。添加 null 检查
+
+### C68: GatewayWifiManager WiFiScan Flow receiver注销竞态
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/wifi/WifiManager.kt` (L74-L95)
+- **问题描述**: `callbackFlow` 的 `awaitClose` 注销 receiver，若 collector 在 `registerReceiver` 后快速取消，存在短暂 receiver 残留
+- **风险**: 低。极端场景下 receiver 泄漏
+- **修复难度**: 低。使用 `try-finally` 确保注销
+
+### C69: ModuleInterfaces新接口返回类型设计缺陷
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/di/ModuleInterfaces.kt` (L39-L44)
+- **问题描述**: `CommunicationCommandHandler.publish()` 返回 `Unit` 无法传递失败信息；`WiFiCommandHandler.scanWiFi()` 同步返回与异步扫描语义不符
+- **风险**: 低。接口设计与实现不一致
+- **修复难度**: 中。修改接口返回类型
+
+### C70: MqttTlsPinning每次创建新MessageDigest
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttTlsPinning.kt` (L68-L71)
+- **问题描述**: 每次 TLS 握手都创建新 `MessageDigest.getInstance("SHA-256")`，高频率重连时造成 GC 压力
+- **风险**: 低。性能优化空间
+- **修复难度**: 低。缓存 MessageDigest 实例或使用线程本地存储
