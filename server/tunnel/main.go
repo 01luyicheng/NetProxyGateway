@@ -38,6 +38,7 @@ const (
 	defaultIncomingMessageBurst         = 400
 	defaultNotifyStatusMaxAttempts      = 3
 	defaultNotifyStatusBaseBackoff      = 100 * time.Millisecond
+	defaultNotifyStatusMaxBackoffShift  = 30
 )
 
 type tokenBucketLimiter struct {
@@ -328,9 +329,8 @@ func notifyStatusBackoff(attempt int) time.Duration {
 	if attempt <= 0 {
 		attempt = 1
 	}
-	const maxAttempt = 30
-	if attempt > maxAttempt {
-		attempt = maxAttempt
+	if attempt > defaultNotifyStatusMaxBackoffShift {
+		attempt = defaultNotifyStatusMaxBackoffShift
 	}
 	multiplier := int64(1) << (attempt - 1)
 	return defaultNotifyStatusBaseBackoff * time.Duration(multiplier)

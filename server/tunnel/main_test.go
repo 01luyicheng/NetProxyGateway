@@ -415,6 +415,8 @@ func TestNotifyStatusBackoff(t *testing.T) {
 		{attempt: 1, expected: 100 * time.Millisecond},
 		{attempt: 2, expected: 200 * time.Millisecond},
 		{attempt: 3, expected: 400 * time.Millisecond},
+		{attempt: defaultNotifyStatusMaxBackoffShift, expected: defaultNotifyStatusBaseBackoff * time.Duration(int64(1)<<(defaultNotifyStatusMaxBackoffShift-1))},
+		{attempt: defaultNotifyStatusMaxBackoffShift + 1, expected: defaultNotifyStatusBaseBackoff * time.Duration(int64(1)<<(defaultNotifyStatusMaxBackoffShift-1))},
 	}
 
 	for _, tt := range tests {
