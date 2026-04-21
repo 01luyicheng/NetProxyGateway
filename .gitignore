@@ -24,6 +24,9 @@ server/api/api
 server/socks5-proxy/socks5-proxy
 server/tunnel/tunnel
 
+# Go vendor directory
+**/vendor/
+
 # Tooling
 .sisyphus/
 
