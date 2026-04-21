@@ -41,6 +41,9 @@ staged_diff.txt
 temp_diff.txt
 unstaged.txt
 *.tmp
+test_output.txt
+*.out
+cover_*
 
 # Kotlin
 .kotlin/
