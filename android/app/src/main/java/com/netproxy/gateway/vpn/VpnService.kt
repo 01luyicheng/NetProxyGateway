@@ -633,9 +633,10 @@ class GatewayVpnService : AndroidVpnService() {
     
     /**
      * 获取写入缓冲区（轮询）
+     * 使用 Math.floorMod 防止 AtomicInteger 溢出后产生负数索引
      */
     private fun getWriteBuffer(): ByteArray {
-        val index = writeBufferIndex.getAndIncrement() % writeBufferPool.size
+        val index = Math.floorMod(writeBufferIndex.getAndIncrement(), writeBufferPool.size)
         return writeBufferPool[index]
     }
     

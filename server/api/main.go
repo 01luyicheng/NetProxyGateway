@@ -27,6 +27,7 @@ const (
 	MaxPairingCodeConflictRetries = 10
 	BlockDuration                 = 15 * time.Minute
 	DefaultDBPath                 = "./api.db"
+	MinJWTSecretLength            = 32
 )
 
 // 错误消息常量 - 统一使用 ErrFailedToXxx 命名风格
@@ -116,11 +117,21 @@ func handleBindError(c *gin.Context, component string, err error) {
 	c.JSON(http.StatusBadRequest, gin.H{"error": ErrFailedToParseRequest})
 }
 
+func validateJWTSecret(secret string) error {
+	if secret == "" {
+		return errors.New("JWT_SECRET environment variable is not set. Please set a secure JWT secret before starting the server.")
+	}
+	if len(secret) < MinJWTSecretLength {
+		return fmt.Errorf("JWT_SECRET must be at least %d characters long", MinJWTSecretLength)
+	}
+	return nil
+}
+
 // NewServer 创建新服务器
 func NewServer() (*Server, error) {
 	jwtSecret := os.Getenv("JWT_SECRET")
-	if jwtSecret == "" {
-		log.Fatalf("FATAL: JWT_SECRET environment variable is not set. Please set a secure JWT secret before starting the server.")
+	if err := validateJWTSecret(jwtSecret); err != nil {
+		log.Fatalf("FATAL: %v", err)
 	}
 
 	// 检查管理员凭据是否配置

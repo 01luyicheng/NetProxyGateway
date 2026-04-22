@@ -569,48 +569,7 @@
      internal fun constructReturnPacket(...): Int { ... }
      ```
 
-### H17: writeBufferPool整数溢出 [新发现-已验证]
-- **状态**: 待修复 (与H13独立)
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L637-639)
-- **问题描述**: `writeBufferIndex.getAndIncrement()`在应用运行约21亿次调用后必然溢出。高流量场景下可能数天至数周内触发。与H13修复的`constructReturnPacket`边界检查是独立问题。
-- **风险**: 高。长时间运行后必崩溃。
-- **代码**:
-  ```kotlin
-  private val writeBufferPool = Array(4) { ByteArray(PACKET_BUFFER_SIZE) }
-  private val writeBufferIndex = AtomicInteger(0)
-  ...
-  private fun getWriteBuffer(): ByteArray {
-      val index = writeBufferIndex.getAndIncrement() % writeBufferPool.size
-      return writeBufferPool[index]
-  }
-  ```
-- **验证结果** (2026-04-19, Kimi-K2.5):
-  - ✅ 问题真实存在：L638 使用 `AtomicInteger.getAndIncrement()` 循环递增
-  - ✅ 数学验证：Int.MAX_VALUE = 2,147,483,647，溢出后变为负数
-  - ✅ 溢出机制：`-1 % 4 = -1`（Kotlin/Java 负数取模），导致 `writeBufferPool[-1]` 越界崩溃
-  - 溢出时间估算：
-    - 轻度使用（10包/秒）：约6.8年
-    - 中度使用（100包/秒）：约248天
-    - 高流量（1,000包/秒）：约24.8天
-    - 极高流量（10,000包/秒）：约2.5天
-  - ⚠️ 与H13完全独立：H13是数组访问边界检查，H17是索引计算溢出
-- **建议修复** (方案对比)：
-  - 方案1（推荐）：使用 `Math.floorMod` 正确处理负数
-    ```kotlin
-    private fun getWriteBuffer(): ByteArray {
-        val index = Math.floorMod(writeBufferIndex.getAndIncrement(), writeBufferPool.size)
-        return writeBufferPool[index]
-    }
-    ```
-  - 方案2：使用 ThreadLocal 彻底避免竞争和溢出问题
-    ```kotlin
-    private val writeBuffer = ThreadLocal<ByteArray>()
-    private fun getWriteBuffer(): ByteArray {
-        return writeBuffer.get() ?: ByteArray(PACKET_BUFFER_SIZE).also { writeBuffer.set(it) }
-    }
-    ```
 
----
 
 ## Medium Severity
 
@@ -632,21 +591,6 @@
 ---
 
 ## 新增问题
-
-### N20: writeBufferPool整数溢出导致数组越界
-- **状态**: 待修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` L629-631
-- **问题**: `AtomicInteger.getAndIncrement()`在Int.MAX_VALUE次调用后溢出为负数，取模后产生负数索引
-- **风险**: Critical。应用长时间运行后必然崩溃（约2^31次调用后）
-- **代码示例**:
-  ```kotlin
-  private fun getWriteBuffer(): ByteArray {
-      val index = writeBufferIndex.getAndIncrement() % writeBufferPool.size  // 溢出后index为负数！
-      return writeBufferPool[index]  // ArrayIndexOutOfBoundsException
-  }
-  ```
-- **建议修复**: 使用ThreadLocal替代轮询，或添加溢出处理
-- **关联问题**: H11的子问题
 
 ### N21: 配对码输入状态配置变更丢失
 - **状态**: 已修复
