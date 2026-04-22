@@ -6,6 +6,7 @@ import android.os.Build
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
+import java.util.concurrent.TimeUnit
 
 /**
  * Root 检测器
@@ -205,8 +206,11 @@ object RootDetector {
             val process = Runtime.getRuntime().exec(arrayOf("which", "busybox"))
             BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
                 val result = reader.readLine()
-                process.waitFor()
-                result != null && result.isNotEmpty()
+                val finished = process.waitFor(3, TimeUnit.SECONDS)
+                if (!finished) {
+                    process.destroy()
+                }
+                finished && result != null && result.isNotEmpty()
             }
         } catch (e: Exception) {
             false
@@ -242,7 +246,11 @@ object RootDetector {
                 val process = Runtime.getRuntime().exec(arrayOf("getprop", prop))
                 BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
                     val value = reader.readLine()
-                    process.waitFor()
+                    val finished = process.waitFor(3, TimeUnit.SECONDS)
+                    if (!finished) {
+                        process.destroy()
+                        return@use
+                    }
                     if (!value.isNullOrEmpty() && value != "0" && value != "") {
                         return true
                     }
@@ -312,7 +320,11 @@ object RootDetector {
                 val process = Runtime.getRuntime().exec(arrayOf("getprop", key))
                 BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
                     val value = reader.readLine()
-                    process.waitFor()
+                    val finished = process.waitFor(3, TimeUnit.SECONDS)
+                    if (!finished) {
+                        process.destroy()
+                        return@use
+                    }
                     if (value == badValue) {
                         return true
                     }
@@ -355,8 +367,11 @@ object RootDetector {
             val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
             BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
                 val output = reader.readLine()
-                process.waitFor()
-                output?.contains("uid=0") ?: false
+                val finished = process.waitFor(3, TimeUnit.SECONDS)
+                if (!finished) {
+                    process.destroy()
+                }
+                finished && (output?.contains("uid=0") ?: false)
             }
         } catch (e: Exception) {
             false

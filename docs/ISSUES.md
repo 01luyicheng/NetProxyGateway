@@ -93,12 +93,6 @@
 - **风险**: 调用方无法统一处理错误，可能导致未预期的行为
 - **建议修复**: 统一错误处理方式，移除静默失败版本
 
-### M3: Root检测执行命令未超时
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/RootDetector.kt` (L204-214, L240-L253)
-- **问题**: `process.waitFor()`没有设置超时，如果命令挂起会阻塞线程
-- **风险**: 线程被永久阻塞，影响应用响应
-- **建议修复**: 使用`waitFor(timeout, TimeUnit)`替代
-
 ### M9: TCP回包状态管理不完整
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L668-L687)
 - **问题**: 序列号和确认号固定为0，不符合TCP协议
