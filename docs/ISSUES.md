@@ -669,13 +669,6 @@
 - **风险**: 高。写入失败时可能导致应用崩溃
 - **修复难度**: 低。使用 Netty 内置的 `ChannelFutureListener.CLOSE_ON_FAILURE` 替代手动释放
 
-### N29: Socks5ProxyService异常后EventLoopGroup泄漏
-- **提交哈希**: 1f9acee
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyService.kt` (L89-L124)
-- **问题描述**: `bootstrap.bind()` 或 `sync()` 抛出异常时，`bossGroup` 和 `workerGroup` 未被关闭。`NioEventLoopGroup` 包含线程池，不调用 `shutdownGracefully()` 会导致线程和资源泄漏
-- **风险**: 高。线程泄漏、文件描述符耗尽、重复启动失败
-- **修复难度**: 低。在 catch 块或 finally 块中添加 `bossGroup?.shutdownGracefully()` 和 `workerGroup?.shutdownGracefully()`
-
 ### N30: Socks5ProxyHandler DNS解析阻塞EventLoop
 - **提交哈希**: 1f9acee
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt` (L111-L128)

@@ -116,6 +116,8 @@ class Socks5ProxyService : Service() {
 
             } catch (e: Exception) {
                 logger.error("SOCKS5 server failed to start", e)
+                bossGroup?.shutdownGracefully()
+                workerGroup?.shutdownGracefully()
                 stopSelf()
             } finally {
                 serverChannel = null
