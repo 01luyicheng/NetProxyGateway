@@ -59,6 +59,14 @@
   2. 或使用CopyOnWriteArrayList简化并发控制
   3. 添加单元测试验证竞争条件处理
 
+### H17: VirtualIpAllocator AtomicInteger溢出 [已修复]
+- **提交哈希**: e89e00d
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VirtualIpAllocator.kt` (L83, L104)
+- **问题**: `nextVirtualIp.getAndIncrement()`在达到`Int.MAX_VALUE`后溢出为负数。L72的`currentIp > MAX_IP`检查无法防止溢出（负数不满足条件），导致`require(ipNum in START_IP..MAX_IP)`抛出`IllegalArgumentException`
+- **风险**: 高。VPN服务长时间运行后必然崩溃
+- **修复**: 使用`Math.floorMod(nextVirtualIp.getAndIncrement(), MAX_IP - START_IP + 1) + START_IP`替代直接递增，与VpnService.kt中H11修复方式一致
+- **修复状态**: 已修复
+
 ### H7: SOCKS5连接池读取未设置超时
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (L327-341)
 - **问题**: `readFully`方法没有设置超时，可能永久阻塞
@@ -92,6 +100,14 @@
 - **问题**: 同一功能有两个版本，一个静默失败，一个返回错误
 - **风险**: 调用方无法统一处理错误，可能导致未预期的行为
 - **建议修复**: 统一错误处理方式，移除静默失败版本
+
+### M3: 安全检测命令执行未超时 [已修复]
+- **提交哈希**: e89e00d
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/RootDetector.kt` (L204-214, L240-L253, L312-L324, L367-378), `DebugDetector.kt` (L195, L201, L262, L292, L297, L337, L342), `EmulatorDetector.kt` (L297)
+- **问题**: `process.waitFor()`没有设置超时，如果命令被恶意hook或系统异常挂起会阻塞线程
+- **风险**: 线程被永久阻塞，影响应用响应，攻击者可利用此绕过安全检测
+- **修复**: 统一替换为`process.waitFor(3, TimeUnit.SECONDS)`，超时后调用`process.destroy()`清理资源
+- **修复状态**: 已修复
 
 ### M9: TCP回包状态管理不完整
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L668-L687)
@@ -656,12 +672,13 @@
 - **风险**: 高。严重影响连接池并发性能，可能导致连接获取超时
 - **修复难度**: 中。需要将 `socket.close()` 移出锁范围，改为异步关闭或在锁外执行
 
-### N28: Socks5ProxyHandler RelayHandler双重释放风险
+### N28: Socks5ProxyHandler RelayHandler释放语义优化 [已修复]
 - **提交哈希**: 1f9acee
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt` (L278-L289)
-- **问题描述**: `writeAndFlush(msg)` 失败时手动调用 `ReferenceCountUtil.release(msg)`，但 Netty 在写入失败时可能已自动释放 msg，导致双重释放 `IllegalReferenceCountException`
-- **风险**: 高。写入失败时可能导致应用崩溃
-- **修复难度**: 低。使用 Netty 内置的 `ChannelFutureListener.CLOSE_ON_FAILURE` 替代手动释放
+- **问题描述**: `writeAndFlush(msg)` 失败时手动调用 `ReferenceCountUtil.release(msg)`，但 Netty 在写入失败时会通过`ChannelOutboundBuffer.remove()`自动释放 msg。用户代码再release可能导致双重释放`IllegalReferenceCountException`
+- **风险**: 高。双重释放可能导致应用崩溃
+- **修复**: 使用`ReferenceCountUtil.safeRelease(msg)`替代`release(msg)`，safeRelease在refCnt<=0时静默返回，避免双重释放异常。同时保留`relayChannel.close()`及时清理失效连接
+- **修复状态**: 已修复
 
 ### N30: Socks5ProxyHandler DNS解析阻塞EventLoop
 - **提交哈希**: 1f9acee
