@@ -226,13 +226,20 @@ func (m *TunnelManager) Register(deviceID string, conn *websocket.Conn) *TunnelC
 }
 
 // Unregister 注销隧道
-func (m *TunnelManager) Unregister(deviceID string) {
+func (m *TunnelManager) Unregister(deviceID string, tunnel *TunnelConn) {
+	removed := false
+
 	m.mu.Lock()
-	if tunnel, ok := m.tunnels[deviceID]; ok {
-		tunnel.Close()
+	if current, ok := m.tunnels[deviceID]; ok && (tunnel == nil || current == tunnel) {
+		current.Close()
 		delete(m.tunnels, deviceID)
+		removed = true
 	}
 	m.mu.Unlock()
+
+	if !removed {
+		return
+	}
 
 	log.Printf("Tunnel unregistered for device: %s", deviceID)
 
@@ -507,7 +514,7 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 
 	// 注册隧道
 	tunnel := s.manager.Register(deviceID, conn)
-	defer s.manager.Unregister(deviceID)
+	defer s.manager.Unregister(deviceID, tunnel)
 
 	// 启动心跳检测
 	stopHeartbeat := make(chan struct{})

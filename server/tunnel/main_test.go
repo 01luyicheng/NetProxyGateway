@@ -138,6 +138,24 @@ func TestNotifyDeviceStatusDoesNotRetryOnBadRequest(t *testing.T) {
 	}
 }
 
+func TestUnregisterSkipsStaleTunnelInstance(t *testing.T) {
+	manager := NewTunnelManager(&Config{})
+	defer manager.Stop()
+
+	first := manager.Register("device-123", nil)
+	second := manager.Register("device-123", nil)
+
+	manager.Unregister("device-123", first)
+
+	current, ok := manager.Get("device-123")
+	if !ok {
+		t.Fatal("expected current tunnel to remain registered")
+	}
+	if current != second {
+		t.Fatal("expected stale unregister to keep the newest tunnel instance")
+	}
+}
+
 func TestValidateDeviceTokenAddsInternalAPIKeyHeader(t *testing.T) {
 	var headerValue string
 
