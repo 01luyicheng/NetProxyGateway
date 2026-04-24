@@ -404,7 +404,7 @@ fun connectToNetwork(ssid: String, password: String?, securityType: String): Boo
 
 **职责**:
 - 安全存储设备 ID 和认证 Token
-- 提供 SOCSK5 代理认证验证
+- 提供 SOCKS5 代理认证验证
 - 使用 EncryptedSharedPreferences 加密存储
 
 ```kotlin
@@ -577,7 +577,7 @@ type SessionToken struct {
 
 ### 4.3 SOCKS5 代理服务详解
 
-**文件**: [`server/socks5-proxy/main.go`](file:///c:/Users/21601/Documents/project/NetProxyGateway/server/socks5-proxy/main.go)
+**文件**: `server/socks5-proxy/main.go`
 
 **SOCKS5 握手流程**:
 

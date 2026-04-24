@@ -447,6 +447,9 @@ func normalizeOrigin(origin string) (string, string, error) {
 	}
 
 	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", "", fmt.Errorf("origin scheme must be http or https")
+	}
 	hostname := strings.ToLower(parsed.Hostname())
 	if hostname == "" {
 		return "", "", fmt.Errorf("origin host is empty")

@@ -232,6 +232,16 @@ func TestCheckOriginAllowsConfiguredWhitelistOriginWithDefaultHTTPPort(t *testin
 	}
 }
 
+func TestCheckOriginRejectsNonHTTPScheme(t *testing.T) {
+	tunnelServer := NewServer(&Config{AllowedOrigins: parseAllowedOrigins("https://app.example.com")})
+	req := httptest.NewRequest(http.MethodGet, "/tunnel", nil)
+	req.Header.Set("Origin", "ws://app.example.com")
+
+	if tunnelServer.upgrader.CheckOrigin(req) {
+		t.Fatal("expected non-http(s) origin to be rejected")
+	}
+}
+
 func TestAuthorizeStats(t *testing.T) {
 	tests := []struct {
 		name         string
