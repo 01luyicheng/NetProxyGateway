@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">NetProxyGateway</string>
+    <string name="app_name">网关助手</string>
 
     <string name="pairing_hint">输入6位识别码配对</string>
     <string name="pairing_title">配对</string>

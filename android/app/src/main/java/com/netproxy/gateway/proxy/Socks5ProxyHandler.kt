@@ -133,7 +133,8 @@ class Socks5ProxyHandler(
     private fun isPrivateIpv6Address(ip: String): Boolean {
         val normalized = ip.lowercase()
         if (normalized == "::1") return false
-        if (normalized.startsWith("fe8") || normalized.startsWith("fe9") || normalized.startsWith("fea") || normalized.startsWith("feb")) {
+        if (normalized.startsWith("fe8") || normalized.startsWith("fe9") ||
+            normalized.startsWith("fea") || normalized.startsWith("feb")) {
             return false
         }
         if (normalized.startsWith("ff")) return false
@@ -279,8 +280,10 @@ private class RelayHandler(
         if (relayChannel.isActive) {
             relayChannel.writeAndFlush(msg).addListener(ChannelFutureListener { future ->
                 if (!future.isSuccess) {
-                    ReferenceCountUtil.release(msg)
+                    // Netty releases msg automatically on write failure;
+                    // do NOT call ReferenceCountUtil.release(msg) here.
                     ctx.close()
+                    relayChannel.close()
                 }
             })
         } else {
