@@ -6,6 +6,7 @@ import java.io.BufferedReader
 import java.io.File
 import java.io.FileReader
 import java.io.InputStreamReader
+import java.util.concurrent.TimeUnit
 
 /**
  * 反调试检测器
@@ -191,13 +192,16 @@ object DebugDetector {
                     val lowerLine = line?.lowercase() ?: continue
                     for (debugger in DEBUGGER_PROCESS_NAMES) {
                         if (lowerLine.contains(debugger)) {
-                            process.waitFor()
+                            process.waitFor(3, TimeUnit.SECONDS).let { finished ->
+                                if (!finished) process.destroy()
+                            }
                             return true
                         }
                     }
                 }
-                process.waitFor()
-                false
+                val finished = process.waitFor(3, TimeUnit.SECONDS)
+                if (!finished) process.destroy()
+                finished && false
             }
         } catch (e: Exception) {
             false
@@ -256,7 +260,11 @@ object DebugDetector {
                 val process = Runtime.getRuntime().exec(arrayOf("getprop", prop))
                 BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
                     val value = reader.readLine()
-                    process.waitFor()
+                    val finished = process.waitFor(3, TimeUnit.SECONDS)
+                    if (!finished) {
+                        process.destroy()
+                        return@use
+                    }
 
                     when (prop) {
                         "ro.debuggable" -> if (value == "1") return true
@@ -282,12 +290,15 @@ object DebugDetector {
 
                 while (reader.readLine().also { line = it } != null) {
                     if (line?.contains("jdwp") == true) {
-                        jdwpProcess.waitFor()
+                        jdwpProcess.waitFor(3, TimeUnit.SECONDS).let { finished ->
+                            if (!finished) jdwpProcess.destroy()
+                        }
                         return true
                     }
                 }
-                jdwpProcess.waitFor()
-                false
+                val finished = jdwpProcess.waitFor(3, TimeUnit.SECONDS)
+                if (!finished) jdwpProcess.destroy()
+                finished && false
             }
         } catch (e: Exception) {
             false
@@ -325,12 +336,15 @@ object DebugDetector {
                 while (reader.readLine().also { line = it } != null) {
                     val lowerLine = line?.lowercase() ?: continue
                     if (lowerLine.contains("frida") || lowerLine.contains("gadget")) {
-                        process.waitFor()
+                        process.waitFor(3, TimeUnit.SECONDS).let { finished ->
+                            if (!finished) process.destroy()
+                        }
                         return true
                     }
                 }
-                process.waitFor()
-                false
+                val finished = process.waitFor(3, TimeUnit.SECONDS)
+                if (!finished) process.destroy()
+                finished && false
             }
         } catch (e: Exception) {
             false

@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">NetProxyGateway</string>
+    <!-- 注意：应用品牌名保持为 NetProxyGateway，values-zh-rCN 中使用本地化名称 "网关助手" -->
 
     <string name="pairing_hint">Enter 6-digit pairing code</string>
     <string name="pairing_title">Pairing</string>

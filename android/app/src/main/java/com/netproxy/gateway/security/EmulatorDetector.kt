@@ -10,6 +10,7 @@ import java.io.BufferedReader
 import java.io.File
 import java.io.FileReader
 import java.io.InputStreamReader
+import java.util.concurrent.TimeUnit
 
 /**
  * 模拟器检测器
@@ -293,7 +294,11 @@ object EmulatorDetector {
                 val process = Runtime.getRuntime().exec(arrayOf("getprop", prop))
                 BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
                     val value = reader.readLine()
-                    process.waitFor()
+                    val finished = process.waitFor(3, TimeUnit.SECONDS)
+                    if (!finished) {
+                        process.destroy()
+                        return@use
+                    }
 
                     if (expectedValue == null) {
                         // 只要属性存在就算检测到

@@ -70,7 +70,7 @@ class VirtualIpAllocatorImpl @Inject constructor() : VirtualIpAllocator {
 
             // 检查是否需要重置 IP 池（在递增之前检查，避免使用无效 IP）
             val currentIp = nextVirtualIp.get()
-            if (currentIp > MAX_IP) {
+            if (currentIp > MAX_IP || currentIp < START_IP) {
                 // 在持有锁的情况下执行重置，确保只发生一次
                 // 其他线程会在锁外等待，直到重置完成
                 poolResetTriggered = true
@@ -78,7 +78,7 @@ class VirtualIpAllocatorImpl @Inject constructor() : VirtualIpAllocator {
                 reverseIpMap.clear()
                 nextVirtualIp.set(START_IP)
             }
-            
+
             // 获取下一个 IP 编号（原子操作）
             var ipNum = nextVirtualIp.getAndIncrement()
 
@@ -88,12 +88,13 @@ class VirtualIpAllocatorImpl @Inject constructor() : VirtualIpAllocator {
             var attempts = 0
 
             do {
-                // 确保 IP 在有效范围内
-                require(ipNum in START_IP..MAX_IP) {
-                    "Invalid IP number: $ipNum (must be in $START_IP..$MAX_IP)"
+                // 正常范围内直接使用，超出范围（溢出为负数或大于MAX_IP）使用 floorMod 映射
+                val safeIpNum = if (ipNum in START_IP..MAX_IP) {
+                    ipNum
+                } else {
+                    Math.floorMod(ipNum, MAX_IP - START_IP + 1) + START_IP
                 }
-
-                assignedIp = "$NETWORK_PREFIX.$ipNum"
+                assignedIp = "$NETWORK_PREFIX.$safeIpNum"
 
                 // 找到可用 IP，退出循环
                 if (!reverseIpMap.containsKey(assignedIp)) {
@@ -102,11 +103,6 @@ class VirtualIpAllocatorImpl @Inject constructor() : VirtualIpAllocator {
 
                 // IP 被占用，使用原子操作获取下一个 IP
                 ipNum = nextVirtualIp.getAndIncrement()
-                // 处理回绕：如果超过最大值，重置到起始值
-                if (ipNum > MAX_IP) {
-                    ipNum = START_IP
-                    nextVirtualIp.set(START_IP + 1)
-                }
                 attempts++
 
                 // 防止无限循环，限制尝试次数
@@ -114,7 +110,7 @@ class VirtualIpAllocatorImpl @Inject constructor() : VirtualIpAllocator {
                     "IP pool exhausted: cannot allocate virtual IP for $realDstIp"
                 }
             } while (true)
-            
+
             // 在确认分配成功后才标记为新分配
             isNewAllocation = true
             virtualIpPool[realDstIp] = assignedIp

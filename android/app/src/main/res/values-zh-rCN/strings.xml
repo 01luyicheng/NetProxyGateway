@@ -40,7 +40,7 @@
     <string name="error_failed_to_establish_vpn">建立 VPN 失败</string>
 
     <string name="notification_vpn_channel_name">VPN 服务</string>
-    <string name="notification_vpn_channel_description">NetProxyGateway VPN 正在运行</string>
+    <string name="notification_vpn_channel_description">网关助手 VPN 正在运行</string>
     <string name="notification_vpn_content_text">VPN 运行中</string>
 
     <string name="notification_proxy_channel_name">SOCKS5 代理服务</string>

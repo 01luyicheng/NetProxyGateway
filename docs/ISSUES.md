@@ -672,13 +672,14 @@
 - **风险**: 高。严重影响连接池并发性能，可能导致连接获取超时
 - **修复难度**: 中。需要将 `socket.close()` 移出锁范围，改为异步关闭或在锁外执行
 
-### N28: Socks5ProxyHandler RelayHandler释放语义优化 [已修复]
-- **提交哈希**: 1f9acee
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt` (L278-L289)
-- **问题描述**: `writeAndFlush(msg)` 失败时手动调用 `ReferenceCountUtil.release(msg)`，但 Netty 在写入失败时会通过`ChannelOutboundBuffer.remove()`自动释放 msg。用户代码再release可能导致双重释放`IllegalReferenceCountException`
-- **风险**: 高。双重释放可能导致应用崩溃
-- **修复**: 使用`ReferenceCountUtil.safeRelease(msg)`替代`release(msg)`，safeRelease在refCnt<=0时静默返回，避免双重释放异常。同时保留`relayChannel.close()`及时清理失效连接
-- **修复状态**: 已修复
+### N28: Socks5ProxyHandler RelayHandler释放语义优化 [引入新问题]
+- **提交哈希**: 4de9b42
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt` (L283-L285)
+- **问题描述**: 将`ReferenceCountUtil.release(msg)`改为`ReferenceCountUtil.safeRelease(msg)`，意图避免双重释放。但Netty的`ChannelOutboundBuffer.remove()`在write失败时已自动释放msg，`safeRelease`只是吞掉`IllegalReferenceCountException`异常，不能阻止对已经释放的池化ByteBuf进行操作，可能导致内存损坏或未定义行为。原注释"Netty releases msg automatically on write failure; do NOT call release here"是正确的
+- **风险**: 高。池化ByteBuf被重复释放后可能归还到对象池，再次分配时获取到脏数据，导致数据损坏或崩溃
+- **修复难度**: 低。回滚该修改，恢复原始不释放逻辑；或改为先检查`refCnt() > 0`再释放
+- **修复状态**: 待修复
+- **关联问题**: N45
 
 ### N30: Socks5ProxyHandler DNS解析阻塞EventLoop
 - **提交哈希**: 1f9acee
@@ -764,3 +765,28 @@
 - **问题描述**: `subscribeWithResult` 注册回调到 `topicCallbacks`，但没有提供 `unsubscribe(topic, callback)` API。MQTT 长连接期间，持有 UI 组件闭包的回调永久留存无法清理
 - **风险**: 中。MQTT 长连接场景下可能导致 Activity/ViewModel 内存泄漏
 - **修复难度**: 中。添加 `unsubscribe(topic, callback)` 方法，支持精细化回调生命周期管理
+
+### N44: VirtualIpAllocator floorMod边界偏移
+- **提交哈希**: 4de9b42
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VirtualIpAllocator.kt` (L95)
+- **问题描述**: 溢出IP映射使用`Math.floorMod(ipNum, MAX_IP - START_IP + 1) + START_IP`，未先将ipNum归一化到以0为起点的范围。导致边界偏移：ipNum=255时映射到2而非预期的1，ipNum=254意外走else分支时映射到1而非254
+- **风险**: 高。IP分配错误可能导致虚拟IP冲突或合法IP被跳过，影响VPN流量转发
+- **修复难度**: 低。修正为`Math.floorMod(ipNum - START_IP, MAX_IP - START_IP + 1) + START_IP`
+- **修复状态**: 待修复
+
+### N45: Socks5ProxyHandler double-free风险
+- **提交哈希**: 4de9b42
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt` (L283-L285)
+- **问题描述**: `writeAndFlush(msg)`失败时调用`ReferenceCountUtil.safeRelease(msg)`，但Netty的`ChannelOutboundBuffer.remove()`已在失败时自动释放msg。`safeRelease`仅捕获异常，不能阻止对已经释放的池化ByteBuf进行操作。原注释明确说明"do NOT call release here"
+- **风险**: 高。池化ByteBuf重复释放后归还对象池，再次分配时可能获取脏数据，导致数据损坏或应用崩溃
+- **修复难度**: 低。回滚修改恢复原始不释放逻辑；如需处理race condition应先检查`refCnt() > 0`
+- **修复状态**: 待修复
+- **关联问题**: N28
+
+### N46: DebugDetector语义隐晦代码
+- **提交哈希**: 4de9b42
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt` (L204, L301, L347)
+- **问题描述**: 多处使用`finished && false`表达式，结果永远为`false`，但写法隐晦浪费认知负担。代码风格也不一致：有的用`.let{}`有的用直接赋值
+- **风险**: 低。无运行时风险，但可读性差，维护时易误解
+- **修复难度**: 低。统一改为显式`false`并加注释说明意图；统一代码风格
+- **修复状态**: 待修复
