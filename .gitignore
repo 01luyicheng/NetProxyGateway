@@ -51,7 +51,7 @@ cover_*
 # Kotlin
 .kotlin/
 
-# AI IDE tooling
+# AI IDE tooling - IDE specific config directories
 .agents/
 .claude/
 .codebuddy/
@@ -61,5 +61,7 @@ cover_*
 .qwen/
 .trae/
 .windsurf/
-skills/
-skills-lock.json
+
+# AI skills are tracked in version control
+# skills/
+# skills-lock.json
