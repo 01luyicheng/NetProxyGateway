@@ -50,3 +50,16 @@ cover_*
 
 # Kotlin
 .kotlin/
+
+# AI IDE tooling
+.agents/
+.claude/
+.codebuddy/
+.iflow/
+.kiro/
+.qoder/
+.qwen/
+.trae/
+.windsurf/
+skills/
+skills-lock.json
