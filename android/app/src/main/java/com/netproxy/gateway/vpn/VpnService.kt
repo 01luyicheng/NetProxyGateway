@@ -124,9 +124,8 @@ class GatewayVpnService : AndroidVpnService() {
     private val activeConnections = ConcurrentHashMap<String, ConnectionSession>()
     // TUN读取缓冲区
     private val packetBuffer = ByteArray(PACKET_BUFFER_SIZE)
-    // 回包写入缓冲区池
-    private val writeBufferPool = Array(4) { ByteArray(PACKET_BUFFER_SIZE) }
-    private val writeBufferIndex = AtomicInteger(0)
+    // 回包写入缓冲区（每个线程独立，避免竞争）
+    private val writeBuffer = ThreadLocal<ByteArray>()
     
     // 虚拟IP分配（用于回包构造）
     private val virtualIpPool = ConcurrentHashMap<String, String>() // realDstIp -> virtualSrcIp
@@ -632,12 +631,13 @@ class GatewayVpnService : AndroidVpnService() {
     }
     
     /**
-     * 获取写入缓冲区（轮询）
-     * 使用 Math.floorMod 防止 AtomicInteger 溢出后产生负数索引
+     * 获取写入缓冲区（线程本地）
+     * 每个线程拥有独立缓冲区，彻底消除竞争
      */
     private fun getWriteBuffer(): ByteArray {
-        val index = Math.floorMod(writeBufferIndex.getAndIncrement(), writeBufferPool.size)
-        return writeBufferPool[index]
+        return writeBuffer.get() ?: ByteArray(PACKET_BUFFER_SIZE).also {
+            writeBuffer.set(it)
+        }
     }
     
     /**
