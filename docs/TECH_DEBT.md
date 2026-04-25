@@ -590,3 +590,38 @@
 - **问题描述**: 每次 TLS 握手都创建新 `MessageDigest.getInstance("SHA-256")`，高频率重连时造成 GC 压力
 - **风险**: 低。性能优化空间
 - **修复难度**: 低。缓存 MessageDigest 实例或使用线程本地存储
+
+### C71: server/api 管理员密码明文存储
+- **提交哈希**: f8497b8
+- **位置**: `server/api/main.go` (L138-L142)
+- **问题描述**: `ADMIN_USER` 和 `ADMIN_PASS` 从环境变量读取后直接字符串比较，无 bcrypt 等慢哈希存储。进程环境变量可被同一机器其他用户读取（`/proc/<pid>/environ`），密码在内存中以明文 String 存在且无复杂度要求
+- **风险**: 中。密码泄露风险，不符合安全存储最佳实践
+- **修复难度**: 中。使用 bcrypt 存储密码哈希，启动时验证复杂度，读取后立即覆盖内存
+
+### C72: server/tunnel Stats接口单一Token长期有效
+- **提交哈希**: f8497b8
+- **位置**: `server/tunnel/main.go` (L757-L772)
+- **问题描述**: `authorizeStats` 使用单一 `StatsToken` 进行鉴权，Token 长期有效无过期机制。如果 Token 泄露，攻击者可长期访问统计信息。没有限流保护和访问日志
+- **风险**: 中。统计信息泄露，无法追踪异常访问
+- **修复难度**: 低。添加 Token 轮换机制、IP 白名单、访问日志和限流
+
+### C73: 内部API调用缺少重试和熔断机制
+- **提交哈希**: f8497b8
+- **位置**: `server/socks5-proxy/main.go` (L480-L547), `server/tunnel/main.go` (L527-L583)
+- **问题描述**: `validateWithAPI` 和 `validateDeviceToken` 在 API 服务暂时不可用时直接失败，没有重试机制。`notifyDeviceStatus` 虽有重试但其他内部调用没有。缺乏熔断保护，API 服务故障时可能级联影响
+- **风险**: 中。服务间调用不可靠，单点故障级联扩散
+- **修复难度**: 中。统一内部 HTTP 客户端配置，添加重试、超时和熔断机制
+
+### C74: Go服务端缺少结构化日志
+- **提交哈希**: f8497b8
+- **位置**: `server/api/main.go`, `server/socks5-proxy/main.go`, `server/tunnel/main.go`
+- **问题描述**: 三个服务均使用标准库 `log` 包打印日志，缺少日志级别、结构化字段（如 request_id、device_id）、日志轮转等能力。不利于生产环境故障排查和监控集成
+- **风险**: 低。运维和故障排查效率受影响
+- **修复难度**: 低。引入 `slog` 或 `zap` 等结构化日志库，统一日志格式
+
+### C75: SOCKS5连接池缺少并发回归测试
+- **提交哈希**: f8497b8
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/proxy/Socks5ConnectionPoolTest.kt`
+- **问题描述**: 测试仅覆盖单线程场景。ISSUES.md H5 记录的"连接池清理竞争条件"是关键缺陷，但测试中没有并发借用/归还/清理的竞态测试，修复后缺乏回归保护
+- **风险**: 中。关键缺陷缺乏回归测试，修复后可能再次引入
+- **修复难度**: 中。添加多线程并发测试，模拟 borrow/return/cleanup 竞态条件
