@@ -647,7 +647,7 @@ class GatewayVpnService : AndroidVpnService() {
     private fun constructReturnPacket(buffer: ByteArray, session: ConnectionSession, payloadLen: Int): Int {
         val ipHeaderLen = 20
         val tcpHeaderLen = 20
-        if (payloadLen <= 0) {
+        if (payloadLen < 0) {
             return 0
         }
         val maxPayloadLen = buffer.size - ipHeaderLen - tcpHeaderLen
