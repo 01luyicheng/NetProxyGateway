@@ -359,24 +359,32 @@ func (m *TunnelManager) cleanupDeadTunnels() {
 		case <-ticker.C:
 		}
 
-		var deadTunnels []*TunnelConn
-		var deadIDs []string
+		m.cleanupDeadTunnelsOnce()
+	}
+}
 
-		m.mu.Lock()
-		for deviceID, tunnel := range m.tunnels {
-			if !tunnel.IsAlive(m.config.HeartbeatTimeout) {
-				log.Printf("Cleaning up dead tunnel for device: %s", deviceID)
+// cleanupDeadTunnelsOnce 执行一次死连接清理（用于测试）
+func (m *TunnelManager) cleanupDeadTunnelsOnce() {
+	var deadTunnels []*TunnelConn
+	var deadIDs []string
+
+	m.mu.Lock()
+	for deviceID, tunnel := range m.tunnels {
+		if !tunnel.IsAlive(m.config.HeartbeatTimeout) {
+			log.Printf("Cleaning up dead tunnel for device: %s", deviceID)
+			// 实例匹配检查：只有当前 map 中的实例才删除
+			if current, ok := m.tunnels[deviceID]; ok && current == tunnel {
 				deadTunnels = append(deadTunnels, tunnel)
 				deadIDs = append(deadIDs, deviceID)
 				delete(m.tunnels, deviceID)
 			}
 		}
-		m.mu.Unlock()
+	}
+	m.mu.Unlock()
 
-		for i, tunnel := range deadTunnels {
-			tunnel.Close()
-			go m.notifyDeviceStatus(deadIDs[i], "offline", "")
-		}
+	for i, tunnel := range deadTunnels {
+		tunnel.Close()
+		go m.notifyDeviceStatus(deadIDs[i], "offline", "")
 	}
 }
 
