@@ -280,9 +280,8 @@ private class RelayHandler(
         if (relayChannel.isActive) {
             relayChannel.writeAndFlush(msg).addListener(ChannelFutureListener { future ->
                 if (!future.isSuccess) {
-                    // Netty typically releases outbound msg on write failure,
-                    // but use safeRelease to avoid double-release race condition.
-                    ReferenceCountUtil.safeRelease(msg)
+                    // Netty releases msg automatically on write failure;
+                    // do NOT call ReferenceCountUtil.release(msg) here.
                     ctx.close()
                     relayChannel.close()
                 }

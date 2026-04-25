@@ -92,7 +92,7 @@ class VirtualIpAllocatorImpl @Inject constructor() : VirtualIpAllocator {
                 val safeIpNum = if (ipNum in START_IP..MAX_IP) {
                     ipNum
                 } else {
-                    Math.floorMod(ipNum, MAX_IP - START_IP + 1) + START_IP
+                    Math.floorMod(ipNum - START_IP, MAX_IP - START_IP + 1) + START_IP
                 }
                 assignedIp = "$NETWORK_PREFIX.$safeIpNum"
 
