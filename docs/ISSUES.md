@@ -390,7 +390,9 @@
   ```
 
 ### H11: writeBufferPool 线程安全问题
-- **状态**: 待修复
+- **状态**: 已修复
+- **修复提交**: d01ddd1
+- **修复方式**: 使用ThreadLocal替代共享缓冲区池，每个线程拥有独立缓冲区
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L120-122, L619-622)
 - **问题验证**:
   - `getAndIncrement() % writeBufferPool.size` 不是原子操作
@@ -489,7 +491,9 @@
   ```
 
 ### H14: constructReturnPacket 拒绝0长度payload过于严格 [新发现-已验证]
-- **状态**: 待修复
+- **状态**: 已修复
+- **修复提交**: 6829cf3
+- **修复方式**: 将payloadLen检查从`<= 0`改为`< 0`，允许0长度TCP控制包
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L650)
 - **问题描述**: H13修复中 `if (payloadLen <= 0) return 0` 检查过于严格。0长度payload是合法的TCP场景（如ACK包、FIN包）。当前实现会丢弃这些正常包。
 - **风险**: 中。可能导致TCP连接异常，ACK包丢失，连接超时。
@@ -803,25 +807,28 @@
 
 ### N44: VirtualIpAllocator floorMod边界偏移
 - **提交哈希**: 4de9b42
+- **修复提交**: 2ca17ee
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VirtualIpAllocator.kt` (L95)
 - **问题描述**: 溢出IP映射使用`Math.floorMod(ipNum, MAX_IP - START_IP + 1) + START_IP`，未先将ipNum归一化到以0为起点的范围。导致边界偏移：ipNum=255时映射到2而非预期的1，ipNum=254意外走else分支时映射到1而非254
 - **风险**: 高。IP分配错误可能导致虚拟IP冲突或合法IP被跳过，影响VPN流量转发
 - **修复难度**: 低。修正为`Math.floorMod(ipNum - START_IP, MAX_IP - START_IP + 1) + START_IP`
-- **修复状态**: 待修复
+- **修复状态**: 已修复
 
 ### N45: Socks5ProxyHandler double-free风险
 - **提交哈希**: 4de9b42
+- **修复提交**: 9f4b1b9
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt` (L283-L285)
 - **问题描述**: `writeAndFlush(msg)`失败时调用`ReferenceCountUtil.safeRelease(msg)`，但Netty的`ChannelOutboundBuffer.remove()`已在失败时自动释放msg。`safeRelease`仅捕获异常，不能阻止对已经释放的池化ByteBuf进行操作。原注释明确说明"do NOT call release here"
 - **风险**: 高。池化ByteBuf重复释放后归还对象池，再次分配时可能获取脏数据，导致数据损坏或应用崩溃
 - **修复难度**: 低。回滚修改恢复原始不释放逻辑；如需处理race condition应先检查`refCnt() > 0`
-- **修复状态**: 待修复
+- **修复状态**: 已修复
 - **关联问题**: N28
 
 ### N46: DebugDetector语义隐晦代码
 - **提交哈希**: 4de9b42
+- **修复提交**: 165c272
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt` (L204, L301, L347)
 - **问题描述**: 多处使用`finished && false`表达式，结果永远为`false`，但写法隐晦浪费认知负担。代码风格也不一致：有的用`.let{}`有的用直接赋值
 - **风险**: 低。无运行时风险，但可读性差，维护时易误解
 - **修复难度**: 低。统一改为显式`false`并加注释说明意图；统一代码风格
-- **修复状态**: 待修复
+- **修复状态**: 已修复
