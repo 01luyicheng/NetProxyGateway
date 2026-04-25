@@ -527,7 +527,7 @@ interface NetworkQueryHandler {
 
 ### 4.2 REST API 服务详解
 
-**文件**: [`server/api/main.go`](file:///c:/Users/21601/Documents/project/NetProxyGateway/server/api/main.go)
+**文件**: [`server/api/main.go`](server/api/main.go)
 
 **核心数据结构**:
 
@@ -639,7 +639,7 @@ type IPFilter struct {
 
 ### 4.4 隧道网关详解
 
-**文件**: [`server/tunnel/main.go`](file:///c:/Users/21601/Documents/project/NetProxyGateway/server/tunnel/main.go)
+**文件**: [`server/tunnel/main.go`](server/tunnel/main.go)
 
 **WebSocket 消息格式**:
 

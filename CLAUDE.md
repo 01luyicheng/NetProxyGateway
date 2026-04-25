@@ -125,8 +125,8 @@ AGENTS.md是CLAUDE.md的符号链接。
 
 ## 7) 验证门禁（必须通过）
 
-- 构建：`android\\gradlew.bat -p android assembleDebug --stacktrace --no-daemon`
-- 单元测试：`android\\gradlew.bat -p android :app:testDebugUnitTest --stacktrace --no-daemon`
+- 构建：`make android-build`
+- 单元测试：`make android-test`
 - 对于有针对性的更改，先运行最窄相关的测试，然后根据需要运行更广泛的测试套件。
 - 任何更改都要让subagents交叉审查，确保代码质量。
 
@@ -161,5 +161,5 @@ AGENTS.md是CLAUDE.md的符号链接。
 为维护跨会话的连续性：
 
 - 每个通过验证的合并提交必须注明Agent使用的模型名称和日期
-- 在开始工作前，必须验证：`android\gradlew.bat -p android :app:testDebugUnitTest` 通过
+- 在开始工作前，必须验证：`make android-test` 通过
 - 如果 main 分支测试失败，通过在第 5 节（技术风险）中提交明确的阻塞问题来解除阻塞

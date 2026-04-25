@@ -652,7 +652,7 @@
 - **风险**: High。UI状态可能不一致
 - **引入来源**: 本次ViewModel变更引入
 - **修复**: 使用`_uiState.update{}`原子操作合并为一次更新；init块中的初始化也改为update形式
-- **验证**: `./gradlew.bat :app:testDebugUnitTest` 全量测试通过
+- **验证**: `make android-test` 全量测试通过
 
 ### N23: 测试直接实例化Android Service
 - **状态**: 已修复
@@ -675,7 +675,7 @@
 - **问题**: 混合使用`_uiState.value = `和`_uiState.update{}`，风格不一致
 - **风险**: Low。单协程作用域内无实际竞态，但防范未来隐患
 - **修复**: 统一使用`_uiState.update{}`，共修复7处直接赋值，全部改为原子更新操作
-- **验证**: `./gradlew.bat :app:testDebugUnitTest` 全量测试通过
+- **验证**: `make android-test` 全量测试通过
 
 ### N26: Service语言监听器残留风险
 - **状态**: 已修复

@@ -165,7 +165,7 @@ if (!BuildConfig.DEBUG && BuildConfig.MQTT_TRUST_ALL_CERTS) {
 
 ### 2.2 Core 模块
 
-**接口定义**: [`ModuleInterfaces.kt`](file:///c:/Users/21601/Documents/project/NetProxyGateway/android/app/src/main/java/com/netproxy/gateway/di/ModuleInterfaces.kt#L22-L32)
+**接口定义**: [`ModuleInterfaces.kt`](android/app/src/main/java/com/netproxy/gateway/di/ModuleInterfaces.kt#L22-L32)
 
 ```kotlin
 interface CoreQueryHandler {
@@ -183,7 +183,7 @@ sealed class NetworkState {
 
 ### 2.3 Communication 模块
 
-**接口定义**: [`ModuleInterfaces.kt`](file:///c:/Users/21601/Documents/project/NetProxyGateway/android/app/src/main/java/com/netproxy/gateway/di/ModuleInterfaces.kt#L39-L64)
+**接口定义**: [`ModuleInterfaces.kt`](android/app/src/main/java/com/netproxy/gateway/di/ModuleInterfaces.kt#L39-L64)
 
 ```kotlin
 // 命令处理器
@@ -210,7 +210,7 @@ sealed class MqttConnectionState {
 }
 ```
 
-**实现类**: [`MqttConnectionManager.kt`](file:///c:/Users/21601/Documents/project/NetProxyGateway/android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt#L45-L316)
+**实现类**: [`MqttConnectionManager.kt`](android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt#L45-L316)
 
 **关键方法**:
 - `connect(deviceId: String, authToken: String)`: 建立 MQTT 连接
@@ -220,7 +220,7 @@ sealed class MqttConnectionState {
 
 ### 2.4 Network 模块
 
-**接口定义**: [`ModuleInterfaces.kt`](file:///c:/Users/21601/Documents/project/NetProxyGateway/android/app/src/main/java/com/netproxy/gateway/di/ModuleInterfaces.kt#L71-L98)
+**接口定义**: [`ModuleInterfaces.kt`](android/app/src/main/java/com/netproxy/gateway/di/ModuleInterfaces.kt#L71-L98)
 
 ```kotlin
 // 命令处理器
@@ -256,7 +256,7 @@ enum class VpnState {
 
 ### 2.5 WiFi 模块
 
-**接口定义**: [`ModuleInterfaces.kt`](file:///c:/Users/21601/Documents/project/NetProxyGateway/android/app/src/main/java/com/netproxy/gateway/di/ModuleInterfaces.kt#L105-L130)
+**接口定义**: [`ModuleInterfaces.kt`](android/app/src/main/java/com/netproxy/gateway/di/ModuleInterfaces.kt#L105-L130)
 
 ```kotlin
 // 命令处理器
@@ -294,7 +294,7 @@ data class WifiConnectionInfo(
 
 ### 2.6 Config 模块
 
-**接口定义**: [`ModuleInterfaces.kt`](file:///c:/Users/21601/Documents/project/NetProxyGateway/android/app/src/main/java/com/netproxy/gateway/di/ModuleInterfaces.kt#L163-L190)
+**接口定义**: [`ModuleInterfaces.kt`](android/app/src/main/java/com/netproxy/gateway/di/ModuleInterfaces.kt#L163-L190)
 
 ```kotlin
 // 命令处理器
@@ -314,7 +314,7 @@ interface ConfigQueryHandler {
 
 ### 2.7 认证会话管理
 
-**实现类**: [`AuthSessionStore.kt`](file:///c:/Users/21601/Documents/project/NetProxyGateway/android/app/src/main/java/com/netproxy/gateway/connection/AuthSessionStore.kt#L17-L201)
+**实现类**: [`AuthSessionStore.kt`](android/app/src/main/java/com/netproxy/gateway/connection/AuthSessionStore.kt#L17-L201)
 
 ```kotlin
 @Singleton
@@ -353,7 +353,7 @@ data class ProxyAuthSession(
 
 ### 2.8 统一返回类型
 
-**AppResult 类型**: [`AppResult.kt`](file:///c:/Users/21601/Documents/project/NetProxyGateway/android/app/src/main/java/com/netproxy/gateway/result/AppResult.kt)
+**AppResult 类型**: [`AppResult.kt`](android/app/src/main/java/com/netproxy/gateway/result/AppResult.kt)
 
 ```kotlin
 sealed class AppResult<out T> {
@@ -480,7 +480,7 @@ SOCKS5_TLS_KEY=/path/to/key.key
 
 ### 3.7 连接池实现
 
-**实现类**: [`Socks5ConnectionPool.kt`](file:///c:/Users/21601/Documents/project/NetProxyGateway/android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt#L69-L432)
+**实现类**: [`Socks5ConnectionPool.kt`](android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt#L69-L432)
 
 **配置参数**：
 ```kotlin
@@ -513,7 +513,7 @@ fun getStats(): ConnectionPoolStats
 
 ### 3.8 Android SOCKS5 代理实现
 
-**实现类**: [`Socks5ProxyHandler.kt`](file:///c:/Users/21601/Documents/project/NetProxyGateway/android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt#L19-L234)
+**实现类**: [`Socks5ProxyHandler.kt`](android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt#L19-L234)
 
 **基于 Netty 框架**：
 - 使用 `io.netty.handler.codec.socksx.v5` 包

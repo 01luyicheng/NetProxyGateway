@@ -67,11 +67,13 @@
 
 ### Android
 ```bash
-# 检查依赖更新
-./gradlew dependencyUpdates
+# 检查依赖漏洞
+make android-dep-check
 
-# 检查依赖报告
-./gradlew dependencies --configuration implementation
+# 查看依赖树
+make android-build
+# 或直接在 android 目录下运行：
+# ./gradlew dependencies --configuration implementation
 ```
 
 ### Go

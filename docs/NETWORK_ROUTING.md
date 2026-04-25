@@ -23,10 +23,10 @@
 
 | 流量类型 | 目标地址 | 出口 | 实现方式 | 代码位置 |
 |---------|---------|------|---------|----------|
-| 内网流量 | RFC1918 私有 IP | WiFi | `protect()` + Socket 直连 | [VpnService.kt L366-374](file:///c:/Users/21601/Documents/project/NetProxyGateway/android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt#L366-L374) |
-| DNS 查询 | DNS 服务器 + 端口 53 | WiFi | `protect()` + DatagramSocket | [VpnService.kt L356-365](file:///c:/Users/21601/Documents/project/NetProxyGateway/android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt#L356-L365) |
-| 外网流量 | 公网 IP | 蜂窝数据 (通过代理) | 本地 SOCKS5 代理 | [VpnService.kt L376-387](file:///c:/Users/21601/Documents/project/NetProxyGateway/android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt#L376-L387) |
-| 云服务器 | 特定 IP | 蜂窝数据 | **未实现** (`excludeRoute`) | [VpnService.kt L254-258](file:///c:/Users/21601/Documents/project/NetProxyGateway/android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt#L254-L258) |
+| 内网流量 | RFC1918 私有 IP | WiFi | `protect()` + Socket 直连 | [VpnService.kt L366-374](android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt#L366-L374) |
+| DNS 查询 | DNS 服务器 + 端口 53 | WiFi | `protect()` + DatagramSocket | [VpnService.kt L356-365](android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt#L356-L365) |
+| 外网流量 | 公网 IP | 蜂窝数据 (通过代理) | 本地 SOCKS5 代理 | [VpnService.kt L376-387](android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt#L376-L387) |
+| 云服务器 | 特定 IP | 蜂窝数据 | **未实现** (`excludeRoute`) | [VpnService.kt L254-258](android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt#L254-L258) |
 
 ### 核心限制
 

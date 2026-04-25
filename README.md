@@ -10,8 +10,8 @@
 
 ## 验证命令
 
-- 构建：`android\gradlew.bat -p android assembleDebug --stacktrace --no-daemon`
-- 测试：`android\gradlew.bat -p android :app:testDebugUnitTest --stacktrace --no-daemon`
+- 构建：`make android-build`
+- 测试：`make android-test`
 
 ## 目录
 
