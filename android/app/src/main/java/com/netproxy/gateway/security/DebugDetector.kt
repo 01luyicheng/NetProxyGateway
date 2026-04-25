@@ -201,7 +201,8 @@ object DebugDetector {
                 }
                 val finished = process.waitFor(3, TimeUnit.SECONDS)
                 if (!finished) process.destroy()
-                finished && false
+                // 未检测到调试器进程
+                false
             }
         } catch (e: Exception) {
             false
@@ -298,7 +299,8 @@ object DebugDetector {
                 }
                 val finished = jdwpProcess.waitFor(3, TimeUnit.SECONDS)
                 if (!finished) jdwpProcess.destroy()
-                finished && false
+                // 未检测到 JDWP 进程
+                false
             }
         } catch (e: Exception) {
             false
@@ -344,7 +346,8 @@ object DebugDetector {
                 }
                 val finished = process.waitFor(3, TimeUnit.SECONDS)
                 if (!finished) process.destroy()
-                finished && false
+                // 未检测到 Frida 进程
+                false
             }
         } catch (e: Exception) {
             false
