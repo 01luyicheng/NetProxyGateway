@@ -138,6 +138,88 @@ func TestNotifyDeviceStatusDoesNotRetryOnBadRequest(t *testing.T) {
 	}
 }
 
+func TestUnregisterSkipsStaleTunnelInstance(t *testing.T) {
+	manager := NewTunnelManager(&Config{})
+	defer manager.Stop()
+
+	first := manager.Register("device-123", nil)
+	second := manager.Register("device-123", nil)
+
+	manager.Unregister("device-123", first)
+
+	current, ok := manager.Get("device-123")
+	if !ok {
+		t.Fatal("expected current tunnel to remain registered")
+	}
+	if current != second {
+		t.Fatal("expected stale unregister to keep the newest tunnel instance")
+	}
+}
+
+func TestUnregisterRemovesMatchingInstance(t *testing.T) {
+	manager := NewTunnelManager(&Config{})
+	defer manager.Stop()
+
+	tunnel := manager.Register("device-456", nil)
+	manager.Unregister("device-456", tunnel)
+
+	_, ok := manager.Get("device-456")
+	if ok {
+		t.Fatal("expected tunnel to be unregistered when instance matches")
+	}
+}
+
+func TestUnregisterNilTunnelRemovesCurrent(t *testing.T) {
+	manager := NewTunnelManager(&Config{})
+	defer manager.Stop()
+
+	manager.Register("device-789", nil)
+	manager.Unregister("device-789", nil)
+
+	_, ok := manager.Get("device-789")
+	if ok {
+		t.Fatal("expected nil tunnel unregister to remove current mapping")
+	}
+}
+
+func TestUnregisterNonExistentDevice(t *testing.T) {
+	manager := NewTunnelManager(&Config{})
+	defer manager.Stop()
+
+	manager.Unregister("device-not-exist", nil)
+
+	_, ok := manager.Get("device-not-exist")
+	if ok {
+		t.Fatal("expected unregister of non-existent device to be no-op")
+	}
+}
+
+func TestCleanupDeadTunnelsSkipsReplacedInstance(t *testing.T) {
+	config := &Config{HeartbeatTimeout: 50 * time.Millisecond}
+	manager := NewTunnelManager(config)
+	defer manager.Stop()
+
+	first := manager.Register("device-cleanup", nil)
+	second := manager.Register("device-cleanup", nil)
+
+	// 等待旧连接超时，但保持新连接活跃
+	time.Sleep(100 * time.Millisecond)
+	second.UpdatePing()
+
+	manager.cleanupDeadTunnelsOnce()
+
+	current, ok := manager.Get("device-cleanup")
+	if !ok {
+		t.Fatal("expected current tunnel to remain after cleanup of stale instance")
+	}
+	if current != second {
+		t.Fatal("expected cleanup to keep the current active tunnel")
+	}
+	if current == first {
+		t.Fatal("expected cleanup to skip stale instance")
+	}
+}
+
 func TestValidateDeviceTokenAddsInternalAPIKeyHeader(t *testing.T) {
 	var headerValue string
 

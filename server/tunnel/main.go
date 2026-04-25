@@ -226,13 +226,20 @@ func (m *TunnelManager) Register(deviceID string, conn *websocket.Conn) *TunnelC
 }
 
 // Unregister 注销隧道
-func (m *TunnelManager) Unregister(deviceID string) {
+func (m *TunnelManager) Unregister(deviceID string, tunnel *TunnelConn) {
+	removed := false
+
 	m.mu.Lock()
-	if tunnel, ok := m.tunnels[deviceID]; ok {
-		tunnel.Close()
+	if current, ok := m.tunnels[deviceID]; ok && (tunnel == nil || current == tunnel) {
+		current.Close()
 		delete(m.tunnels, deviceID)
+		removed = true
 	}
 	m.mu.Unlock()
+
+	if !removed {
+		return
+	}
 
 	log.Printf("Tunnel unregistered for device: %s", deviceID)
 
@@ -352,24 +359,32 @@ func (m *TunnelManager) cleanupDeadTunnels() {
 		case <-ticker.C:
 		}
 
-		var deadTunnels []*TunnelConn
-		var deadIDs []string
+		m.cleanupDeadTunnelsOnce()
+	}
+}
 
-		m.mu.Lock()
-		for deviceID, tunnel := range m.tunnels {
-			if !tunnel.IsAlive(m.config.HeartbeatTimeout) {
-				log.Printf("Cleaning up dead tunnel for device: %s", deviceID)
+// cleanupDeadTunnelsOnce 执行一次死连接清理（用于测试）
+func (m *TunnelManager) cleanupDeadTunnelsOnce() {
+	var deadTunnels []*TunnelConn
+	var deadIDs []string
+
+	m.mu.Lock()
+	for deviceID, tunnel := range m.tunnels {
+		if !tunnel.IsAlive(m.config.HeartbeatTimeout) {
+			log.Printf("Cleaning up dead tunnel for device: %s", deviceID)
+			// 实例匹配检查：只有当前 map 中的实例才删除
+			if current, ok := m.tunnels[deviceID]; ok && current == tunnel {
 				deadTunnels = append(deadTunnels, tunnel)
 				deadIDs = append(deadIDs, deviceID)
 				delete(m.tunnels, deviceID)
 			}
 		}
-		m.mu.Unlock()
+	}
+	m.mu.Unlock()
 
-		for i, tunnel := range deadTunnels {
-			tunnel.Close()
-			go m.notifyDeviceStatus(deadIDs[i], "offline", "")
-		}
+	for i, tunnel := range deadTunnels {
+		tunnel.Close()
+		go m.notifyDeviceStatus(deadIDs[i], "offline", "")
 	}
 }
 
@@ -507,7 +522,7 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 
 	// 注册隧道
 	tunnel := s.manager.Register(deviceID, conn)
-	defer s.manager.Unregister(deviceID)
+	defer s.manager.Unregister(deviceID, tunnel)
 
 	// 启动心跳检测
 	stopHeartbeat := make(chan struct{})
