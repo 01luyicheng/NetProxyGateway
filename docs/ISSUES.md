@@ -742,13 +742,6 @@
 - **风险**: 高。安全设计意图失效，token 无法被主动擦除
 - **修复难度**: 中。将 `ProxyAuthSession.authToken` 类型改为 `CharArray`，在业务层传递时保持 `CharArray` 形式
 
-### N38: server/api cleanup协程泄漏
-- **提交哈希**: 1f9acee
-- **位置**: `server/api/main.go` (L1171-L1172, L413-L442)
-- **问题描述**: `cleanupExpiredSessions` 和 `cleanupExpiredLoginAttempts` 后台协程使用 `for range ticker.C` 无限循环，无退出条件。`Server.Close()` 只关闭数据库，不通知清理协程退出
-- **风险**: 高。影响优雅关闭和资源管理，热重启场景下是实质性泄漏
-- **修复难度**: 低。为 Server 添加 `context.Context` 和关闭通道，协程监听 context.Done() 或通道退出
-
 ### N39: server/api JWT Secret长度未验证
 - **提交哈希**: 1f9acee
 - **位置**: `server/api/main.go` (L121-L124, L190)
