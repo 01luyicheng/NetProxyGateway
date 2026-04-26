@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -700,5 +702,73 @@ func TestTokenBucketLimiterAllowsAgainAfterRefill(t *testing.T) {
 
 	if !limiter.Allow() {
 		t.Fatal("expected message to pass after token refill")
+	}
+}
+
+func TestHeartbeatDoesNotPingAfterTunnelClosed(t *testing.T) {
+	tunnelServer := NewServer(&Config{
+		HeartbeatInterval: 10 * time.Millisecond,
+		HeartbeatTimeout:  time.Second,
+	})
+	tunnel := NewTunnelConn("device-closed", nil)
+	tunnel.Close()
+
+	done := make(chan struct{})
+	go func() {
+		tunnelServer.heartbeat(tunnel, make(chan struct{}))
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected heartbeat to stop quickly for closed tunnel")
+	}
+}
+
+func TestHeartbeatStopsAfterRuntimeClose(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("failed to upgrade websocket: %v", err)
+			return
+		}
+		defer conn.Close()
+
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer wsServer.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(wsServer.URL, "http")
+	clientConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("failed to dial websocket server: %v", err)
+	}
+	defer clientConn.Close()
+
+	tunnelServer := NewServer(&Config{
+		HeartbeatInterval: 10 * time.Millisecond,
+		HeartbeatTimeout:  time.Second,
+	})
+	tunnel := NewTunnelConn("device-runtime-close", clientConn)
+
+	done := make(chan struct{})
+	go func() {
+		tunnelServer.heartbeat(tunnel, make(chan struct{}))
+		close(done)
+	}()
+
+	time.Sleep(30 * time.Millisecond)
+	tunnel.Close()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected heartbeat to stop quickly after runtime close")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -112,11 +113,15 @@ type TunnelConn struct {
 	Conn           *websocket.Conn
 	LastPing       time.Time
 	mu             sync.RWMutex
+	connMu         sync.Mutex
 	sendChan       chan []byte
 	messageLimiter *tokenBucketLimiter
 	closeChan      chan struct{}
 	closeOnce      sync.Once
+	closed         bool
 }
+
+var errTunnelClosed = errors.New("tunnel closed")
 
 // NewTunnelConn 创建新的隧道连接
 func NewTunnelConn(deviceID string, conn *websocket.Conn) *TunnelConn {
@@ -169,11 +174,25 @@ func (t *TunnelConn) Send(data []byte) error {
 // Close 关闭连接
 func (t *TunnelConn) Close() {
 	t.closeOnce.Do(func() {
+		t.connMu.Lock()
+		t.closed = true
 		close(t.closeChan)
 		if t.Conn != nil {
 			_ = t.Conn.Close()
 		}
+		t.connMu.Unlock()
 	})
+}
+
+func (t *TunnelConn) WritePing(deadline time.Time) error {
+	t.connMu.Lock()
+	defer t.connMu.Unlock()
+
+	if t.closed || t.Conn == nil {
+		return errTunnelClosed
+	}
+
+	return t.Conn.WriteControl(websocket.PingMessage, []byte{}, deadline)
 }
 
 // TunnelManager 隧道管理器
@@ -613,8 +632,11 @@ func (s *Server) heartbeat(tunnel *TunnelConn, stop chan struct{}) {
 				return
 			}
 
-			// 发送ping
-			if err := tunnel.Conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(10*time.Second)); err != nil {
+			// 发送 ping（与 Close 共享同一把锁，避免“检查后到写入前”的竞态窗口）
+			if err := tunnel.WritePing(time.Now().Add(10 * time.Second)); err != nil {
+				if errors.Is(err, errTunnelClosed) {
+					return
+				}
 				log.Printf("Failed to send ping: %v", err)
 				tunnel.Close()
 				return

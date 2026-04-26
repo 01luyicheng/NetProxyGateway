@@ -764,13 +764,6 @@
 - **修复**: 将 `GetOrConnectTunnel` 中的 `RLock` 改为 `Lock`，在锁保护内完成连接存活检查和删除操作，消除 Check-Then-Act 竞态
 - **修复状态**: 已修复
 
-### N42: server/tunnel heartbeat在Close后尝试发送Ping
-- **提交哈希**: 1f9acee
-- **位置**: `server/tunnel/main.go` (L586-L610)
-- **问题描述**: `IsAlive()` 返回 true 后、`WriteControl` 发送 ping 前，`Close()` 可能被其他 goroutine 调用。向已关闭连接写入产生错误日志和冗余的 `Close()` 调用
-- **风险**: 中。可观察性问题，产生不必要的错误日志，影响监控
-- **修复难度**: 低。在 `WriteControl` 前检查 `closeChan`，或使用更一致的状态管理
-
 ### N43: MqttConnectionManager MQTT回调无法注销导致内存泄漏
 - **提交哈希**: 1f9acee
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L81, L566-L617)
