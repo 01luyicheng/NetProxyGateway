@@ -764,13 +764,6 @@
 - **修复**: 将 `GetOrConnectTunnel` 中的 `RLock` 改为 `Lock`，在锁保护内完成连接存活检查和删除操作，消除 Check-Then-Act 竞态
 - **修复状态**: 已修复
 
-### N41: server/tunnel validateDeviceToken每次创建新HTTP客户端
-- **提交哈希**: 1f9acee
-- **位置**: `server/tunnel/main.go` (L527-L583)
-- **问题描述**: 每次 WebSocket 连接建立时调用 `validateDeviceToken`，每次都创建新的 `http.Client`。无法复用 TCP 连接池，高频场景下造成连接开销和资源浪费
-- **风险**: 中。性能问题，与已修复的 `notifyDeviceStatus` 问题（C24）相同
-- **修复难度**: 低。将 `http.Client` 作为 `Server` 字段，初始化时创建一次并复用
-
 ### N42: server/tunnel heartbeat在Close后尝试发送Ping
 - **提交哈希**: 1f9acee
 - **位置**: `server/tunnel/main.go` (L586-L610)

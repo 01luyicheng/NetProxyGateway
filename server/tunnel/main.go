@@ -390,9 +390,10 @@ func (m *TunnelManager) cleanupDeadTunnelsOnce() {
 
 // Server WebSocket服务器
 type Server struct {
-	manager  *TunnelManager
-	upgrader websocket.Upgrader
-	config   *Config
+	manager    *TunnelManager
+	upgrader   websocket.Upgrader
+	config     *Config
+	httpClient *http.Client
 }
 
 // NewServer 创建服务器
@@ -400,6 +401,9 @@ func NewServer(config *Config) *Server {
 	server := &Server{
 		manager: NewTunnelManager(config),
 		config:  config,
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+		},
 	}
 
 	server.upgrader = websocket.Upgrader{
@@ -555,11 +559,6 @@ func (s *Server) validateDeviceToken(deviceID, token string) bool {
 		return false
 	}
 
-	// 创建带超时的HTTP客户端
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-	}
-
 	// 发送验证请求到API服务
 	req, err := http.NewRequest(
 		http.MethodPost,
@@ -575,7 +574,7 @@ func (s *Server) validateDeviceToken(deviceID, token string) bool {
 		req.Header.Set("X-Internal-API-Key", s.config.InternalAPIKey)
 	}
 
-	resp, err := client.Do(req)
+	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		log.Printf("Failed to call validation API: %v", err)
 		return false

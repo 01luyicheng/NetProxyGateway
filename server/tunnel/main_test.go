@@ -4,10 +4,17 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 func TestNotifyDeviceStatusAddsInternalAPIKeyHeader(t *testing.T) {
 	var (
@@ -243,6 +250,46 @@ func TestValidateDeviceTokenAddsInternalAPIKeyHeader(t *testing.T) {
 
 	if headerValue != "internal-secret" {
 		t.Fatalf("expected internal api key header to be forwarded, got %q", headerValue)
+	}
+}
+
+func TestNewServerInitializesReusableHTTPClient(t *testing.T) {
+	tunnelServer := NewServer(&Config{})
+
+	if tunnelServer.httpClient == nil {
+		t.Fatal("expected NewServer to initialize reusable httpClient")
+	}
+
+	if tunnelServer.httpClient.Timeout != 10*time.Second {
+		t.Fatalf("expected reusable httpClient timeout to be 10s, got %v", tunnelServer.httpClient.Timeout)
+	}
+}
+
+func TestValidateDeviceTokenUsesServerHTTPClient(t *testing.T) {
+	tunnelServer := NewServer(&Config{
+		APIEndpoint:       "http://token-validate.test",
+		HeartbeatInterval: time.Second,
+		HeartbeatTimeout:  2 * time.Second,
+	})
+
+	requests := 0
+	tunnelServer.httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			requests++
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"valid":true}`)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+
+	if !tunnelServer.validateDeviceToken("device-123", "token-abc") {
+		t.Fatal("expected token validation to succeed with injected server httpClient")
+	}
+
+	if requests != 1 {
+		t.Fatalf("expected injected server httpClient to handle exactly one request, got %d", requests)
 	}
 }
 
