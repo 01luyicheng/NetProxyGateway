@@ -40,6 +40,7 @@ const (
 	defaultNotifyStatusMaxAttempts      = 3
 	defaultNotifyStatusBaseBackoff      = 100 * time.Millisecond
 	defaultNotifyStatusMaxBackoffShift  = 30
+	maxHTTPHeaderBytes                  = 1 << 20
 )
 
 type tokenBucketLimiter struct {
@@ -828,6 +829,18 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:           addr,
+		Handler:        handler,
+		MaxHeaderBytes: maxHTTPHeaderBytes,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+}
+
 // Run 运行服务器
 func (s *Server) Run() error {
 	// 启动清理协程
@@ -839,14 +852,7 @@ func (s *Server) Run() error {
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/stats", s.handleStats)
 
-	httpServer := &http.Server{
-		Addr:              s.config.Addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       120 * time.Second,
-	}
+	httpServer := newHTTPServer(s.config.Addr, mux)
 
 	log.Printf("Tunnel server starting on %s", s.config.Addr)
 

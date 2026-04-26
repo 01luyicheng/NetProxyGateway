@@ -881,3 +881,11 @@ func TestCreatePairingSessionDatabaseErrorReturns500(t *testing.T) {
 		t.Fatalf("expected 1 generation attempt before database error, got %d", attempts)
 	}
 }
+
+func TestNewHTTPServerSetsMaxHeaderBytes(t *testing.T) {
+	server := newHTTPServer(":8080", gin.New())
+
+	if server.MaxHeaderBytes != MaxHTTPHeaderBytes {
+		t.Fatalf("expected MaxHeaderBytes=%d, got %d", MaxHTTPHeaderBytes, server.MaxHeaderBytes)
+	}
+}

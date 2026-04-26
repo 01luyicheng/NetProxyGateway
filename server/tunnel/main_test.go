@@ -772,3 +772,11 @@ func TestHeartbeatStopsAfterRuntimeClose(t *testing.T) {
 		t.Fatal("expected heartbeat to stop quickly after runtime close")
 	}
 }
+
+func TestNewHTTPServerSetsMaxHeaderBytes(t *testing.T) {
+	server := newHTTPServer("0.0.0.0:8443", http.NewServeMux())
+
+	if server.MaxHeaderBytes != maxHTTPHeaderBytes {
+		t.Fatalf("expected MaxHeaderBytes=%d, got %d", maxHTTPHeaderBytes, server.MaxHeaderBytes)
+	}
+}

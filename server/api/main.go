@@ -28,6 +28,7 @@ const (
 	BlockDuration                 = 15 * time.Minute
 	DefaultDBPath                 = "./api.db"
 	MinJWTSecretLength            = 32
+	MaxHTTPHeaderBytes            = 1 << 20
 )
 
 // 错误消息常量 - 统一使用 ErrFailedToXxx 命名风格
@@ -1212,6 +1213,18 @@ func (s *Server) healthCheck(c *gin.Context) {
 	})
 }
 
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:           addr,
+		Handler:        handler,
+		MaxHeaderBytes: MaxHTTPHeaderBytes,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+}
+
 func main() {
 	// 设置Gin模式
 	gin.SetMode(gin.ReleaseMode)
@@ -1262,14 +1275,7 @@ func main() {
 	tlsCert := os.Getenv("TLS_CERT")
 	tlsKey := os.Getenv("TLS_KEY")
 
-	httpServer := &http.Server{
-		Addr:              ":" + port,
-		Handler:           r,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
+	httpServer := newHTTPServer(":"+port, r)
 
 	// 验证TLS配置
 	if enableTLS {
