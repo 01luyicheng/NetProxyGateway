@@ -609,27 +609,6 @@
 - **风险**: 高。测试不可靠，可能掩盖真实问题或产生假阴性
 - **修复难度**: 低。调整 `tearDown` 中 `unmockkAll()` 和 `Dispatchers.resetMain()` 的顺序，确保测试隔离
 
-### N48: Go StreamConn.Read 数据截断违反 net.Conn 契约
-- **提交哈希**: f8497b8
-- **位置**: `server/socks5-proxy/main.go` (L303-L311)
-- **问题描述**: `StreamConn.Read` 方法从 `DataChan` 读取数据后使用 `copy(p, data)` 复制到调用者缓冲区。当 `len(p) < len(data)` 时，剩余数据被丢弃而非缓存供下次读取。这违反了 `net.Conn` 接口契约，可能导致数据丢失
-- **风险**: 高。数据截断导致协议交互失败或数据损坏
-- **修复难度**: 中。添加 `WriteBuffer` 字段缓存剩余数据，下次 `Read` 优先返回缓存数据
-- **代码示例**:
-  ```go
-  func (s *StreamConn) Read(p []byte) (n int, err error) {
-      s.mu.Lock()
-      if len(s.WriteBuffer) > 0 {
-          n = copy(p, s.WriteBuffer)
-          s.WriteBuffer = s.WriteBuffer[n:]
-          s.mu.Unlock()
-          return n, nil
-      }
-      s.mu.Unlock()
-      // ... 从 DataChan 读取
-  }
-  ```
-
 ### N49: EmulatorDetector 电话权限在 Android 10+ 上可能误判
 - **提交哈希**: f8497b8
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/security/EmulatorDetector.kt` (L372-L441)
@@ -777,12 +756,13 @@
 - **风险**: 高。使用弱 JWT 密钥可能导致令牌被伪造，造成未授权访问
 - **修复难度**: 低。添加最小长度检查（如 32 字符），不足时拒绝启动
 
-### N40: server/socks5-proxy GetOrConnectTunnel连接存活检查竞态
+### N40: server/socks5-proxy GetOrConnectTunnel连接存活检查竞态 [已修复]
 - **提交哈希**: 1f9acee
 - **位置**: `server/socks5-proxy/main.go` (L479-L577)
 - **问题描述**: RLock 释放后调用 `isConnAlive`，期间其他 goroutine 可能删除连接并创建新连接。返回的连接可能已被替换或即将关闭，典型的 Check-Then-Act 竞态
 - **风险**: 高。返回失效连接导致客户端操作失败，影响连接稳定性
-- **修复难度**: 中。将 `isConnAlive` 调用放在锁保护的原子操作中，或返回连接时增加引用计数
+- **修复**: 将 `GetOrConnectTunnel` 中的 `RLock` 改为 `Lock`，在锁保护内完成连接存活检查和删除操作，消除 Check-Then-Act 竞态
+- **修复状态**: 已修复
 
 ### N41: server/tunnel validateDeviceToken每次创建新HTTP客户端
 - **提交哈希**: 1f9acee

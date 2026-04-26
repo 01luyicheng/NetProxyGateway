@@ -41,6 +41,15 @@ func generateRandomStreamID() (string, error) {
 	return hex.EncodeToString(randomBytes), nil
 }
 
+// defaultTLSConfig 返回带有安全默认值的 TLS 客户端配置。
+// 每次调用返回新的独立实例，可安全用于不同客户端。
+// 调用方不得修改返回的值。
+func defaultTLSConfig() *tls.Config {
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+}
+
 // Config 服务配置
 type Config struct {
 	Addr           string
@@ -74,9 +83,7 @@ func NewAPISessionStore(apiEndpoint string, internalAPIKey string) *APISessionSt
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					MinVersion: tls.VersionTLS12,
-				},
+				TLSClientConfig: defaultTLSConfig(),
 			},
 		},
 	}
@@ -301,9 +308,27 @@ func NewStreamConn(streamID, deviceID string, tunnelConn *websocket.Conn, tunnel
 
 // Read 实现 net.Conn 的 Read 方法
 func (s *StreamConn) Read(p []byte) (n int, err error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	s.mu.Lock()
+	if len(s.WriteBuffer) > 0 {
+		n = copy(p, s.WriteBuffer)
+		s.WriteBuffer = s.WriteBuffer[n:]
+		s.mu.Unlock()
+		return n, nil
+	}
+	s.mu.Unlock()
+
 	select {
 	case data := <-s.DataChan:
+		s.mu.Lock()
 		n = copy(p, data)
+		if n < len(data) {
+			s.WriteBuffer = append(s.WriteBuffer, data[n:]...)
+		}
+		s.mu.Unlock()
 		return n, nil
 	case <-s.CloseChan:
 		return 0, io.EOF
@@ -457,18 +482,14 @@ func NewTunnelClient(tunnelEndpoint string) *TunnelClient {
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					MinVersion: tls.VersionTLS12,
-				},
+				TLSClientConfig: defaultTLSConfig(),
 			},
 		},
 		wsDialer: &websocket.Dialer{
 			HandshakeTimeout: 10 * time.Second,
-			TLSClientConfig: &tls.Config{
-				MinVersion: tls.VersionTLS12,
-			},
-			ReadBufferSize:  64 * 1024,
-			WriteBufferSize: 64 * 1024,
+			TLSClientConfig:  defaultTLSConfig(),
+			ReadBufferSize:   64 * 1024,
+			WriteBufferSize:  64 * 1024,
 		},
 		connections: make(map[string]*websocket.Conn),
 		dialing:     make(map[string]chan struct{}),
