@@ -49,7 +49,7 @@
   - 两者都操作 `isStopping` 标志，但 `onDestroy()` 不重置该标志
 - **风险**: 中。不一致的清理顺序可能导致竞态条件或资源泄漏
 - **建议**: 提取统一的清理方法，确保两处使用相同的清理顺序和逻辑
-- **注意**: H9/H14/H15修复后，serviceScope和连接池的清理问题已解决，但清理顺序仍可统一优化。
+- **注意**: H9/H15修复后，serviceScope和连接池的部分清理问题已解决，但清理顺序仍可统一优化；H14 仍未完全修复。
 
 ### C9: Tunnel Gateway 单点故障与状态丢失风险
 - **位置**: `server/tunnel/`
@@ -360,6 +360,28 @@
 - **风险**: 中。高并发场景下连接归还性能下降
 - **修复难度**: 中。维护每个目标地址的连接计数器，避免遍历
 
+### C76: VpnService 回包缓冲区缺少分配行为回归测试
+- **提交哈希**: d01ddd1
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt`
+- **问题描述**: N52/N54 已将 ThreadLocal 方案替换为局部变量方案（`val buffer = ByteArray(PACKET_BUFFER_SIZE)`），现有测试未验证该分配行为在高并发场景下的内存表现，也未覆盖 `processTcpReturn` 的 `available() > 0` 边界条件。
+- **风险**: 低。缺少回归保护，后续重构可能重新引入 ThreadLocal 或不当的缓冲策略
+- **修复难度**: 低。补充 `processTcpReturn` 在 `available()` 返回不同值时的行为测试
+
+### C78: VpnService 回包路径缺少TCP状态机
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L582-L624, L649-L726)
+- **问题描述**: `processTcpReturn()` 仅在有数据可读时构造回包（`available > 0 && read > 0`），无法发送纯TCP控制包（ACK/FIN/RST）。`constructReturnPacket()` 固定设置 `PSH+ACK` flags，序列号和确认号固定为0。这导致TCP连接建立/终止流程不完整，依赖对端容忍非标准行为。
+- **风险**: 中。与严格TCP实现不兼容，可能导致连接建立失败或异常断开
+- **修复难度**: 高。需要实现完整的TCP状态机，正确管理序列号、确认号和标志位
+- **关联问题**: ISSUES.md H14, N36
+
+### C77: Socks5ProxyHandler double-free 修复缺少 write-failure 回归测试
+- **提交哈希**: 9f4b1b9
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/proxy/Socks5ProxyHandlerTest.kt` (L22 起)
+- **问题描述**: N45 的修复修改了 `RelayHandler` 的 write-failure 分支，但当前测试只覆盖认证和 CONNECT 流程，没有构造 `relayChannel.writeAndFlush(msg)` 失败的路径来验证不会再次 release `msg`。
+- **风险**: 低。该修复点缺乏测试保护，未来容易被误改回双重释放
+- **修复难度**: 低。增加一个模拟 write 失败的 Netty 回归测试
+
 ### C38: Socks5ConnectionPool readFully无限循环风险
 - **提交哈希**: 1f9acee
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (L395-L420)
@@ -625,3 +647,19 @@
 - **问题描述**: 测试仅覆盖单线程场景。ISSUES.md H5 记录的"连接池清理竞争条件"是关键缺陷，但测试中没有并发借用/归还/清理的竞态测试，修复后缺乏回归保护
 - **风险**: 中。关键缺陷缺乏回归测试，修复后可能再次引入
 - **修复难度**: 中。添加多线程并发测试，模拟 borrow/return/cleanup 竞态条件
+
+### C79: StreamConn deadline 方法空实现导致 goroutine 泄漏
+- **提交哈希**: 9f4b1b9
+- **位置**: `server/socks5-proxy/main.go` (L464-L476)
+- **问题描述**: 详见 ISSUES.md N56。`SetReadDeadline`、`SetDeadline`、`SetWriteDeadline` 三个方法均为空实现，`Read()` 阻塞 select 无超时保护，远端静默时永久阻塞导致 goroutine 泄漏。
+- **风险**: 高
+- **修复难度**: 中
+- **关联问题**: ISSUES.md N56
+
+### C80: processReturnTraffic 单协程串行处理模型
+- **提交哈希**: d01ddd1
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L536-L562)
+- **问题描述**: 详见 ISSUES.md N57。`processReturnTraffic` 使用单协程串行遍历所有活跃连接，单个连接 I/O 阻塞会导致所有后续连接回包处理停滞。
+- **风险**: 中
+- **修复难度**: 高
+- **关联问题**: ISSUES.md N57, TECH_DEBT.md C78
