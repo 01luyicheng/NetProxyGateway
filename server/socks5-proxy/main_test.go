@@ -364,6 +364,103 @@ func TestStreamConn_Close_Idempotent(t *testing.T) {
 	}
 }
 
+func TestStreamConn_ReadPreservesRemainderAcrossSmallBuffers(t *testing.T) {
+	conn := &StreamConn{
+		DataChan:      make(chan []byte, 1),
+		CloseChan:     make(chan struct{}),
+		Connected:     make(chan bool, 1),
+		tunnelWriteMu: &sync.Mutex{},
+	}
+	conn.DataChan <- []byte("ABCD")
+
+	buf := make([]byte, 2)
+
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("first read failed: %v", err)
+	}
+	if n != 2 || string(buf[:n]) != "AB" {
+		t.Fatalf("first read got %q (%d), want AB (2)", string(buf[:n]), n)
+	}
+
+	n, err = conn.Read(buf)
+	if err != nil {
+		t.Fatalf("second read failed: %v", err)
+	}
+	if n != 2 || string(buf[:n]) != "CD" {
+		t.Fatalf("second read got %q (%d), want CD (2)", string(buf[:n]), n)
+	}
+}
+
+func TestStreamConn_ReadReturnsQueuedDataBeforeEOF(t *testing.T) {
+	conn := &StreamConn{
+		DataChan:      make(chan []byte, 1),
+		CloseChan:     make(chan struct{}),
+		Connected:     make(chan bool, 1),
+		tunnelWriteMu: &sync.Mutex{},
+	}
+	conn.DataChan <- []byte("XY")
+	close(conn.CloseChan)
+
+	buf := make([]byte, 4)
+
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("expected queued data before EOF, got err: %v", err)
+	}
+	if n != 2 || string(buf[:n]) != "XY" {
+		t.Fatalf("read got %q (%d), want XY (2)", string(buf[:n]), n)
+	}
+
+	n, err = conn.Read(buf)
+	if err != io.EOF {
+		t.Fatalf("expected EOF after queued data is consumed, got n=%d err=%v", n, err)
+	}
+}
+
+func TestStreamConn_ReadAcrossGoroutinesDeliversBufferedRemainderBeforeEOF(t *testing.T) {
+	conn := &StreamConn{
+		DataChan:      make(chan []byte, 1),
+		CloseChan:     make(chan struct{}),
+		Connected:     make(chan bool, 1),
+		tunnelWriteMu: &sync.Mutex{},
+	}
+	conn.DataChan <- []byte("ABCD")
+
+	firstBuf := make([]byte, 2)
+	n, err := conn.Read(firstBuf)
+	if err != nil {
+		t.Fatalf("first read failed: %v", err)
+	}
+	if n != 2 || string(firstBuf[:n]) != "AB" {
+		t.Fatalf("first read got %q (%d), want AB (2)", string(firstBuf[:n]), n)
+	}
+
+	secondBuf := make([]byte, 2)
+	resultCh := make(chan struct {
+		n   int
+		err error
+	}, 1)
+
+	go func() {
+		n, err := conn.Read(secondBuf)
+		resultCh <- struct {
+			n   int
+			err error
+		}{n: n, err: err}
+	}()
+
+	close(conn.CloseChan)
+
+	result := <-resultCh
+	if result.err != nil {
+		t.Fatalf("second read should return buffered remainder before EOF, got err: %v", result.err)
+	}
+	if result.n != 2 || string(secondBuf[:result.n]) != "CD" {
+		t.Fatalf("second read got %q (%d), want CD (2)", string(secondBuf[:result.n]), result.n)
+	}
+}
+
 // TestHandleConnectResponse_FailedConnection_CleansUpStream 验证连接失败时清理stream
 func TestHandleConnectResponse_FailedConnection_CleansUpStream(t *testing.T) {
 	tc := &TunnelClient{
