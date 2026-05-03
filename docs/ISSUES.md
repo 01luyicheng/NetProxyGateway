@@ -1,5 +1,11 @@
 # NetProxyGateway 缺陷清单（待修复）
-不要在此文档记录问题的验证状态（如“已验证真实存在”）、建议修复方式、“新发现”，不要记录日期，使用7位提交哈希识别问题存在的版本。需要记录问题存在的提交哈希、问题文件路径、问题行号、问题描述、风险、修复难度、修复状态。
+不要在此文档记录日期；用 7 位提交哈希作为“时间锚点”识别问题存在的版本。
+
+字段约定：
+- **提交哈希**：该问题在此提交存在（若仅存在于未提交工作区变更，记录当前 HEAD 的 7 位哈希并标注 `(worktree)`）
+- **修复提交**：修复该问题的提交（若已修复）
+
+需要记录：问题存在的提交哈希、问题文件路径、问题行号、问题描述、风险、修复难度、修复状态。
 ## Critical
 
 ### C1: SSL信任所有证书配置风险 [已降级为Medium]
@@ -241,67 +247,6 @@
 
 ## Medium Severity
 
-### M14: Android 10+ WiFi连接限制（API废弃）
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/wifi/GatewayWifiManager.kt` (L322-361)
-- **问题描述**: 使用`WifiConfiguration` API在Android 10+上已被废弃，且Android 10+对后台应用启动WiFi连接有限制，可能导致连接失败或需要用户手动确认
-- **风险**: 中。代码已实现适配，影响有限，但需要引导用户手动操作
-- **建议修复**:
-  - 引导用户手动连接WiFi
-  - 使用Suggestion API（需要用户批准）
-  - 使用NetworkSpecifier进行请求（Android 10+）
-
-### M15: 5G网络切换问题（系统行为）
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/NetworkStateManager.kt`
-- **问题描述**: 5G NSA/SA模式切换、5G与4G切换时，网络接口可能发生变化，当前代码仅检测基础网络类型（WiFi/Cellular/Ethernet），未针对5G网络变化做特殊处理，可能导致VPN隧道中断
-- **风险**: 中。网络切换时可能导致连接中断
-- **建议修复**:
-  - 监听网络变化并自动重建VPN连接
-  - 实现连接保活和快速恢复机制
-  - 提示用户在远程协助期间保持网络稳定
-
----
-
-## High Severity
-
-### H19: 电池优化和后台执行限制
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt`
-- **问题描述**: 
-  - Android Doze模式和App Standby可能限制后台网络活动
-  - 在某些厂商ROM（如小米、华为）上VPN服务可能被强制停止或限制网络访问
-  - 未检测是否已被用户加入电池优化白名单
-- **风险**: 高。影响VPN服务持续运行，在省电模式下可能导致连接中断
-- **建议修复**:
-  - 检测电池优化白名单状态并提示用户
-  - 引导用户将应用加入白名单
-  - 实现连接状态监控和自动重连
-  - 检测被杀死后由系统广播唤醒
-
----
-
-## Low Severity
-
-### L6: 系统私有DNS设置未检测
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnDnsConfig.kt`
-- **问题描述**: VpnDnsConfig仅提供基础DNS服务器解析和路由判断功能，未检测Android系统的"私有DNS"(DNS over HTTPS/TLS)设置。当用户启用此功能时，系统的DNS查询可能被强制重定向到加密DNS服务器，影响VPN的DNS分流逻辑
-- **风险**: 低。可引导用户解决
-- **建议修复**:
-  - 检测私有DNS设置状态并提示用户
-  - 引导用户关闭私有DNS或设置为自动
-  - 在VPN中强制指定DNS服务器
-
-### L7: 随机MAC地址功能未处理
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/wifi/GatewayWifiManager.kt`
-- **问题描述**: WifiManager未检测或处理Android的随机MAC地址功能。当系统使用随机MAC连接WiFi时，某些企业级AP可能基于MAC地址实施访问控制，导致内网访问受限
-- **风险**: 低。特定企业场景下可能出现问题
-- **建议修复**:
-  - 检测随机MAC设置并提示用户
-  - 引导用户为特定WiFi网络关闭随机MAC
-  - 在企业场景下提供相关说明文档
-
----
-
-## Medium Severity
-
 ### M13: MQTT 重连延迟递增逻辑问题
 - **状态**: 待修复
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L311-L321)
@@ -490,104 +435,32 @@
   }
   ```
 
-### H14: constructReturnPacket 拒绝0长度payload过于严格 [新发现-已验证]
-- **状态**: 已修复
-- **修复提交**: 6829cf3
-- **修复方式**: 将payloadLen检查从`<= 0`改为`< 0`，允许0长度TCP控制包
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L650)
-- **问题描述**: H13修复中 `if (payloadLen <= 0) return 0` 检查过于严格。0长度payload是合法的TCP场景（如ACK包、FIN包）。当前实现会丢弃这些正常包。
-- **风险**: 中。可能导致TCP连接异常，ACK包丢失，连接超时。
-- **代码**:
-  ```kotlin
-  // L650: 问题代码
-  if (payloadLen <= 0) {
-      return 0
-  }
-  ```
-- **验证结果** (2026-04-19, Kimi-K2.5):
-  - ✅ 问题真实存在：L649-650 确实包含 `if (payloadLen <= 0) return 0`
-  - ⚠️ 当前调用上下文（processTcpReturn L601 的 `read > 0` 检查）掩盖了此问题，该检查在实际运行中不会触发
-  - 🔴 根本问题是架构缺陷：当前实现完全无法处理TCP控制包（ACK、FIN、RST），固定设置PSH标志，不适合发送纯控制包
-  - 建议修复分两层：短期将 `<=` 改为 `<`；长期实现完整的TCP状态机支持控制包
-- **建议修复**:
-  ```kotlin
-  // 短期修复：仅拒绝负数payload，允许0长度
-  if (payloadLen < 0) {
-      return 0
-  }
-  ```
-
-### H15: VpnService测试直接实例化Android Service [新发现-已验证]
+### H14: processTcpReturn 调用路径仍阻止0长度 TCP 控制包注入
 - **状态**: 待修复
-- **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt` (L1652, L1673, L1707)
+- **提交哈希**: d01ddd1
+- **相关提交**: 6829cf3（仅放宽 `constructReturnPacket()` 的 payloadLen 检查，未解决 `processTcpReturn()` 的调用门槛）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L582-L607, L647-L651)
+- **问题描述**: `constructReturnPacket()` 内部已允许 `payloadLen == 0`，但 `processTcpReturn()` 仍要求 `available > 0` 且 `read > 0` 才会调用构包路径。结果是0长度 TCP 控制包（如ACK/FIN/RST）在运行时依旧不会被注入；同时构造出的TCP头仍固定为 `PSH+ACK`，并不适合纯控制包。
+- **风险**: 高。当前返回路径对纯TCP控制包支持不完整，可能导致连接状态推进异常或超时。
+- **修复难度**: 高。需要实现完整的TCP状态机，或至少补齐控制包注入与正确 flags/seq/ack 维护
+
+### H15: VpnService测试直接实例化Android Service
+- **状态**: 待修复
+- **提交哈希**: d01ddd1
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt` (L1697, L1718, L1752, L1793)
 - **问题描述**: 测试代码直接实例化 `GatewayVpnService()`，违反Android组件生命周期规范。`VpnService`必须通过系统创建并调用`onCreate()`后才能使用。直接实例化可能导致依赖未初始化、Hilt注入失败。
 - **风险**: 高。测试不可靠，与实际运行时不一致，可能产生假阳性/假阴性结果。
-- **代码**:
-  ```kotlin
-  // 问题代码示例（L1652, L1673, L1707）
-  val service = GatewayVpnService()
-  ```
-- **验证结果** (2026-04-19, Kimi-K2.5):
-  - ✅ 问题真实存在：3处直接实例化 GatewayVpnService()
-  - ✅ GatewayVpnService 是 @AndroidEntryPoint 类，有 @Inject lateinit 字段
-  - ⚠️ 当前测试能通过是因为只测试不依赖注入的私有方法，并通过反射手动设置所需字段
-  - 🔴 隐患：如果未来测试访问注入字段（如 authSessionStore），会抛出 UninitializedPropertyAccessException
-  - 对比：项目中 Socks5ProxyServiceTest 正确使用 Robolectric 的 ServiceController
-- **建议修复**: 使用Robolectric的`ServiceController`正确创建和启动Service：
-  ```kotlin
-  @RunWith(RobolectricTestRunner::class)
-  @Config(application = HiltTestApplication::class, sdk = [33])
-  @HiltAndroidTest
-  class VpnServiceTest {
-      @get:Rule
-      val hiltRule = HiltAndroidRule(this)
-      
-      @Before
-      fun setUp() {
-          hiltRule.inject()
-      }
-      
-      @Test
-      fun testExample() {
-          val controller = Robolectric.buildService(GatewayVpnService::class.java)
-          val service = controller.create().get()
-          // 测试代码
-      }
-  }
-  ```
+- **修复难度**: 中。需要引入/调整 Robolectric + Hilt 测试基座，或将纯逻辑下沉为可直接单测的无 Android 组件类
 
-### H16: VpnService测试过度使用反射 [新发现-已验证]
+### H16: VpnService测试过度使用反射
 - **状态**: 待修复
+- **提交哈希**: d01ddd1
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt` (L1748-1816)
 - **问题描述**: 测试大量使用反射访问私有方法和内部类（`createSessionForReflection`、`invokeConstructReturnPacket`、`invokeProcessTcpReturn`）。代码结构变化会导致测试崩溃，重构时需要同步更新大量反射代码。
 - **风险**: 高。维护困难，重构风险大，可读性差，IDE重构工具无法识别反射引用。
-- **验证结果** (2026-04-19, Kimi-K2.5):
-  - ✅ 问题真实存在：6个反射辅助方法，11次直接反射调用
-  - 反射访问的成员：
-    - 内部类：`ConnectionSession` (private data class)
-    - 私有方法：`constructReturnPacket`, `processTcpReturn`
-    - 私有字段：`socks5ConnectionPool`, `activeConnections`, `vpnOutputStream`
-  - 具体反射方法：
-    - `createSessionForReflection` - 通过反射创建内部类（4次调用）
-    - `invokeConstructReturnPacket` - 反射调用私有方法（3次调用）
-    - `invokeProcessTcpReturn` - 反射调用私有方法（1次调用）
-    - `setPrivateField/getPrivateField` - 反射访问字段（3次调用）
-  - 脆弱性：字符串名称耦合（如 `it.simpleName == "ConnectionSession"`），IDE重构无法识别
-- **建议修复**:
-  1. 将需要测试的逻辑提取为package-private或internal方法
-  2. 使用@VisibleForTesting注解标记
-  3. 或重构代码使其更易测试（依赖注入替代内部状态访问）
-  4. 示例：
-     ```kotlin
-     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
-     internal fun constructReturnPacket(...): Int { ... }
-     ```
+- **修复难度**: 中。需要调整可测试性边界（减少私有成员反射耦合），或将关键逻辑下沉为可直接单测的纯 Kotlin 组件
 
 
-
-## Medium Severity
-
----
 
 ## Low Severity
 
@@ -629,7 +502,7 @@
 - **修复**: 将`remember`改为`rememberSaveable`
 
 ### N22: MainViewModel状态更新竞争条件
-- **状态**: 已修复（2026-04-18 验证并修复）
+- **状态**: 已修复
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` L58,66-75
 - **问题**: 两次独立的`_uiState.value`更新之间存在竞态窗口
 - **风险**: High。UI状态可能不一致
@@ -653,7 +526,7 @@
 - **修复**: 提取为命名常量`NOTIFICATION_ID`
 
 ### N25: MainViewModel状态更新方式不一致
-- **状态**: 已修复（2026-04-18 验证并修复）
+- **状态**: 已修复
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` L58,84,90,96,111,117,121,134,145,154,165,173
 - **问题**: 混合使用`_uiState.value = `和`_uiState.update{}`，风格不一致
 - **风险**: Low。单协程作用域内无实际竞态，但防范未来隐患
@@ -666,18 +539,6 @@
 - **问题**: 系统强制杀Service后监听器可能残留在单例map中
 - **风险**: Low。影响小，最多2个监听器残留
 - **修复**: 在`onCreate()`中先执行防御性`unregister`再`register`
-
----
-
-## High Severity
-
-> 当前无 High Severity 问题
-
----
-
-## Medium Severity
-
-> 当前无 Medium Severity 问题
 
 ---
 
@@ -791,3 +652,76 @@
 - **风险**: 低。无运行时风险，但可读性差，维护时易误解
 - **修复难度**: 低。统一改为显式`false`并加注释说明意图；统一代码风格
 - **修复状态**: 已修复
+
+### N51: server/socks5-proxy StreamConn.Read 在关闭边界可能丢失已排队数据
+- **状态**: 已修复
+- **位置**: `server/socks5-proxy/main.go` (L301-L308, L370-L372, L711-L715)
+- **问题描述**: 旧实现直接 `select` 等待 `DataChan` 和 `CloseChan`。当 `CloseChan` 已关闭且 `DataChan` 中仍有已排队未读数据时，两个分支会同时就绪，`Read()` 可能直接返回 `io.EOF`，导致尾部数据未被消费。另一角度：即使 `CloseChan` 关闭后，其他 goroutine 仍可能向 `DataChan` 写入数据，若 `Read()` 优先选择 `CloseChan` 分支返回 `io.EOF`，这些已写入数据将丢失。
+- **风险**: 中。连接关闭边界下可能截断隧道中的尾部数据，造成协议交互不完整
+- **修复**: `Read()` 现在使用双 `select` 模式优先消费已排队数据；`CloseChan` 分支使用 `for` 循环非阻塞排空 `DataChan` 后再返回 `io.EOF`
+- **修复状态**: 已修复
+
+### N52: VpnService ThreadLocal writeBuffer 在 IO 线程池上长期滞留
+- **状态**: 已修复（通过N54替代方案）
+- **提交哈希**: d01ddd1
+- **位置**: `VpnService.kt processTcpReturn() 方法内`
+- **问题描述**: H11 修复将共享缓冲区池替换为 `ThreadLocal<ByteArray>`，但初始实现未清理当前线程中的缓冲区引用。`Dispatchers.IO` 使用进程级线程池，工作线程可能在服务停止后继续驻留该缓冲区引用。
+- **风险**: 中。会形成线程池工作线程上的缓冲区驻留/滞留
+- **修复**: 将 ThreadLocal 替换为局部变量 `val buffer = ByteArray(PACKET_BUFFER_SIZE)`，彻底消除线程池滞留风险
+- **修复状态**: 已修复
+
+### N54: VpnService ThreadLocal writeBuffer.remove() 抵消缓冲区复用价值
+- **状态**: 已修复
+- **提交哈希**: d01ddd1
+- **位置**: `VpnService.kt processTcpReturn() 方法内`
+- **问题描述**: N52的修复在 `processTcpReturn()` 的 `finally` 块中调用 `writeBuffer.remove()`，导致每次调用结束后ThreadLocal被清空，下次调用 `getWriteBuffer()` 时重新创建 `ByteArray`。ThreadLocal完全退化为每次重新分配，无任何复用价值。`processReturnTraffic` 是单协程顺序执行，同一时刻只有一个 `processTcpReturn` 在执行，直接用局部变量更简单安全。
+- **风险**: 中。每次调用分配 `PACKET_BUFFER_SIZE` 大小的数组增加GC压力；ThreadLocal使用不当增加代码复杂度
+- **修复**: 将 ThreadLocal 替换为局部变量，移除 `getWriteBuffer()` 和 `finally` 中的 `remove()`
+- **修复状态**: 已修复
+
+### N53: server/socks5-proxy StreamConn.Read 在小缓冲区下会直接截断数据
+- **状态**: 已修复
+- **位置**: `server/socks5-proxy/main.go` (L285, L301-L305)
+- **问题描述**: 旧实现从 `DataChan` 取出一整块数据后仅执行 `n := copy(p, data)` 并直接返回，没有保存 `data[n:]` 的剩余部分；结构体中的 `WriteBuffer` 字段也没有参与读取路径。只要调用方提供的 `p` 小于单次消息长度，尾部数据就会被无条件丢弃。
+- **风险**: 高。违反 `net.Conn` 流语义，导致数据截断、协议交互失败或上层解析错误
+- **修复**: `Read()` 现在会缓存未消费 remainder，并在后续读取时优先返回缓存数据；同时增加了小缓冲区回归测试
+- **修复状态**: 已修复
+- **关联问题**: N48（同一问题的不同角度描述，N48 从接口契约角度，N53 从具体场景角度）
+
+### N55: DebugDetector 4个方法正常完成路径未调用 process.destroy()
+- **状态**: 待修复
+- **提交哈希**: 4de9b42
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt` (L202-L205, L260-L275, L300-L303, L347-L350)
+- **问题描述**: `checkDebuggerProcess()`、`checkJDWP()`、`checkFrida()`、`checkDebugProperties()` 4个方法仅在超时路径（`!finished`）调用 `process.destroy()`，正常完成路径未显式释放 process 资源（依赖 `Process` 对象生命周期/GC）。同时这些方法只读取 stdout，未读取/处理 stderr，极端情况下可能导致外部命令阻塞或资源释放不及时。
+- **风险**: 中。频繁调用时可能造成短期句柄/FD 压力或阻塞风险，进而影响安全检测的稳定性与性能
+- **修复难度**: 低。使用 `try-finally` 确保 `process.destroy()` 在所有路径被调用
+- **关联问题**: M3
+
+### N56: server/socks5-proxy StreamConn.SetReadDeadline 空实现导致 goroutine 泄漏
+- **状态**: 待修复
+- **提交哈希**: 9f4b1b9
+- **位置**: `server/socks5-proxy/main.go` (L464-L476, L327-L337, L1258-L1285)
+- **问题描述**: `SetReadDeadline`、`SetDeadline`、`SetWriteDeadline` 三个方法均为空实现（仅返回 `nil`），不存储 deadline 值也无实际逻辑。`Read()` 的阻塞 `select`（L327-337）无 `time.After` 超时保护。当远端目标服务器停止发送数据但不关闭连接时，`Read()` 永久阻塞在等待 `DataChan` 或 `CloseChan`。`relay()` 中通过 `io.Copy` 间接调用 `Read()`，无任何 deadline 设置。`readLoop` 的 60 秒 websocket 超时只关闭 websocket 连接，不关闭关联的 StreamConn。
+- **风险**: 高。长连接场景（SSH、数据库连接、WebSocket）下，远端静默可导致每个连接泄漏一个 goroutine 及其关联的 StreamConn、channel 等内存资源
+- **修复难度**: 中。实现基于 timer 的 `SetReadDeadline`，或在 `Read()` 的阻塞 select 中添加 idle 超时
+- **关联问题**: TECH_DEBT.md C79
+
+### N57: VpnService processReturnTraffic 单协程串行处理模型导致回包处理停滞
+- **状态**: 待修复
+- **提交哈希**: d01ddd1
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L536-L562, L593-L598)
+- **问题描述**: `processReturnTraffic` 使用单协程串行遍历所有活跃连接（`activeConnections.forEach`），对每个连接同步调用 `processTcpReturn`。虽然 `input.available()` 检查可降低阻塞概率，但 `available()` 返回的是估计值，在 `available()` 和 `read()` 之间数据量可能变化。当 `available() > 0` 时 `read()` 通常不阻塞，但极端情况下（如连接被对端 RST）可能阻塞最多 `soTimeout`（30秒）。任何一个连接的 I/O 阻塞都会导致所有后续连接的回包处理停滞。
+- **风险**: 中。高延迟或慢速上游连接场景下，单个连接的阻塞可导致其他连接回包延迟
+- **修复难度**: 高。需要将串行处理改为并行处理（如每个连接独立协程），或使用 NIO 非阻塞 I/O
+- **关联问题**: ISSUES.md H14, TECH_DEBT.md C78
+
+### N58: VpnService processTcpReturn 依赖 InputStream.available() 不可靠
+- **状态**: 待修复
+- **提交哈希**: d01ddd1
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (processTcpReturn 中 available() 检查处)
+- **问题描述**: `processTcpReturn` 使用 `input.available() > 0` 判断是否有回包数据可读。`available()` 返回的是估计值而非保证值，可能返回 0 但实际有数据已到达（尤其在网络延迟或 TCP 窗口滑动场景）。若 `available()` 返回 0，当前实现会跳过该连接的读取，导致回包被延迟到下一轮循环，增加延迟。
+- **风险**: 中。极端网络条件下回包延迟增加，影响实时性要求高的应用
+- **修复难度**: 中。需要引入非阻塞 I/O 或 select/poll 机制替代 available() 估计值判断
+- **关联问题**: N57
+
+

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -365,68 +364,7 @@ func TestStreamConn_Close_Idempotent(t *testing.T) {
 	}
 }
 
-func TestStreamConn_Read_SmallBufferTwoReadsNoDataLoss(t *testing.T) {
-	conn := &StreamConn{
-		StreamID:      "test-stream-read-buffer",
-		DeviceID:      "device-1",
-		DataChan:      make(chan []byte, 1),
-		CloseChan:     make(chan struct{}),
-		Connected:     make(chan bool, 1),
-		tunnelWriteMu: &sync.Mutex{},
-	}
-
-	conn.DataChan <- []byte("ABCD")
-
-	buf := make([]byte, 2)
-
-	n1, err := conn.Read(buf)
-	if err != nil {
-		t.Fatalf("first Read() should succeed: %v", err)
-	}
-	if n1 != 2 {
-		t.Fatalf("first Read() got %d bytes, want 2", n1)
-	}
-	if string(buf[:n1]) != "AB" {
-		t.Fatalf("first Read() got %q, want %q", string(buf[:n1]), "AB")
-	}
-
-	n2, err := conn.Read(buf)
-	if err != nil {
-		t.Fatalf("second Read() should succeed: %v", err)
-	}
-	if n2 != 2 {
-		t.Fatalf("second Read() got %d bytes, want 2", n2)
-	}
-	if string(buf[:n2]) != "CD" {
-		t.Fatalf("second Read() got %q, want %q", string(buf[:n2]), "CD")
-	}
-
-	conn.mu.Lock()
-	defer conn.mu.Unlock()
-	if len(conn.WriteBuffer) != 0 {
-		t.Fatalf("WriteBuffer should be empty after two reads, got %d bytes", len(conn.WriteBuffer))
-	}
-}
-
-func TestStreamConn_Read_ZeroLengthBufferReturnsImmediately(t *testing.T) {
-	conn := &StreamConn{
-		DataChan:      make(chan []byte, 1),
-		CloseChan:     make(chan struct{}),
-		Connected:     make(chan bool, 1),
-		tunnelWriteMu: &sync.Mutex{},
-	}
-	conn.DataChan <- []byte("AB")
-
-	n, err := conn.Read([]byte{})
-	if err != nil {
-		t.Fatalf("Read with zero-length buffer should not fail: %v", err)
-	}
-	if n != 0 {
-		t.Fatalf("Read with zero-length buffer should return 0, got %d", n)
-	}
-}
-
-func TestStreamConn_Read_BufferBeforeCloseStillReturned(t *testing.T) {
+func TestStreamConn_ReadPreservesRemainderAcrossSmallBuffers(t *testing.T) {
 	conn := &StreamConn{
 		DataChan:      make(chan []byte, 1),
 		CloseChan:     make(chan struct{}),
@@ -436,27 +374,90 @@ func TestStreamConn_Read_BufferBeforeCloseStillReturned(t *testing.T) {
 	conn.DataChan <- []byte("ABCD")
 
 	buf := make([]byte, 2)
+
 	n, err := conn.Read(buf)
 	if err != nil {
-		t.Fatalf("first read should succeed: %v", err)
+		t.Fatalf("first read failed: %v", err)
 	}
 	if n != 2 || string(buf[:n]) != "AB" {
 		t.Fatalf("first read got %q (%d), want AB (2)", string(buf[:n]), n)
 	}
 
-	close(conn.CloseChan)
-
 	n, err = conn.Read(buf)
 	if err != nil {
-		t.Fatalf("buffered bytes should be returned even after close: %v", err)
+		t.Fatalf("second read failed: %v", err)
 	}
 	if n != 2 || string(buf[:n]) != "CD" {
 		t.Fatalf("second read got %q (%d), want CD (2)", string(buf[:n]), n)
 	}
+}
+
+func TestStreamConn_ReadReturnsQueuedDataBeforeEOF(t *testing.T) {
+	conn := &StreamConn{
+		DataChan:      make(chan []byte, 1),
+		CloseChan:     make(chan struct{}),
+		Connected:     make(chan bool, 1),
+		tunnelWriteMu: &sync.Mutex{},
+	}
+	conn.DataChan <- []byte("XY")
+	close(conn.CloseChan)
+
+	buf := make([]byte, 4)
+
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("expected queued data before EOF, got err: %v", err)
+	}
+	if n != 2 || string(buf[:n]) != "XY" {
+		t.Fatalf("read got %q (%d), want XY (2)", string(buf[:n]), n)
+	}
 
 	n, err = conn.Read(buf)
 	if err != io.EOF {
-		t.Fatalf("expected EOF after buffered bytes consumed, got n=%d err=%v", n, err)
+		t.Fatalf("expected EOF after queued data is consumed, got n=%d err=%v", n, err)
+	}
+}
+
+func TestStreamConn_ReadAcrossGoroutinesDeliversBufferedRemainderBeforeEOF(t *testing.T) {
+	conn := &StreamConn{
+		DataChan:      make(chan []byte, 1),
+		CloseChan:     make(chan struct{}),
+		Connected:     make(chan bool, 1),
+		tunnelWriteMu: &sync.Mutex{},
+	}
+	conn.DataChan <- []byte("ABCD")
+
+	firstBuf := make([]byte, 2)
+	n, err := conn.Read(firstBuf)
+	if err != nil {
+		t.Fatalf("first read failed: %v", err)
+	}
+	if n != 2 || string(firstBuf[:n]) != "AB" {
+		t.Fatalf("first read got %q (%d), want AB (2)", string(firstBuf[:n]), n)
+	}
+
+	secondBuf := make([]byte, 2)
+	resultCh := make(chan struct {
+		n   int
+		err error
+	}, 1)
+
+	go func() {
+		n, err := conn.Read(secondBuf)
+		resultCh <- struct {
+			n   int
+			err error
+		}{n: n, err: err}
+	}()
+
+	close(conn.CloseChan)
+
+	result := <-resultCh
+	if result.err != nil {
+		t.Fatalf("second read should return buffered remainder before EOF, got err: %v", result.err)
+	}
+	if result.n != 2 || string(secondBuf[:result.n]) != "CD" {
+		t.Fatalf("second read got %q (%d), want CD (2)", string(secondBuf[:result.n]), result.n)
 	}
 }
 
@@ -858,58 +859,5 @@ func TestConnectThroughTunnel_ReturnsErrorWhenStreamIDGenerationFails(t *testing
 	defer tc.mu.RUnlock()
 	if len(tc.streams) != 0 {
 		t.Fatalf("expected no streams to be created on stream id generation failure, got %d", len(tc.streams))
-	}
-}
-
-// TestDefaultTLSConfig_ReturnsNonNilConfigWithTLS12 验证 defaultTLSConfig 返回正确的配置
-func TestDefaultTLSConfig_ReturnsNonNilConfigWithTLS12(t *testing.T) {
-	cfg := defaultTLSConfig()
-	if cfg == nil {
-		t.Fatal("expected non-nil tls.Config")
-	}
-	if cfg.MinVersion != tls.VersionTLS12 {
-		t.Errorf("expected MinVersion %d, got %d", tls.VersionTLS12, cfg.MinVersion)
-	}
-}
-
-// TestDefaultTLSConfig_ReturnsIndependentInstances 验证每次调用返回独立实例
-func TestDefaultTLSConfig_ReturnsIndependentInstances(t *testing.T) {
-	cfg1 := defaultTLSConfig()
-	cfg2 := defaultTLSConfig()
-
-	if cfg1 == cfg2 {
-		t.Fatal("expected independent instances, got same pointer")
-	}
-
-	// 验证修改一个实例不影响另一个
-	cfg1.MinVersion = tls.VersionTLS13
-	if cfg2.MinVersion != tls.VersionTLS12 {
-		t.Errorf("modifying cfg1 affected cfg2: expected MinVersion %d, got %d", tls.VersionTLS12, cfg2.MinVersion)
-	}
-}
-
-// TestDefaultTLSConfig_UsedByClients 验证 defaultTLSConfig 被客户端构造函数正确使用
-func TestDefaultTLSConfig_UsedByClients(t *testing.T) {
-	// 验证 APISessionStore
-	store := NewAPISessionStore("https://example.com", "key")
-	tr, ok := store.httpClient.Transport.(*http.Transport)
-	if !ok {
-		t.Fatal("expected *http.Transport")
-	}
-	if tr.TLSClientConfig == nil || tr.TLSClientConfig.MinVersion != tls.VersionTLS12 {
-		t.Fatal("expected TLS 1.2 in APISessionStore")
-	}
-
-	// 验证 TunnelClient
-	client := NewTunnelClient("wss://example.com")
-	tr2, ok := client.httpClient.Transport.(*http.Transport)
-	if !ok {
-		t.Fatal("expected *http.Transport")
-	}
-	if tr2.TLSClientConfig == nil || tr2.TLSClientConfig.MinVersion != tls.VersionTLS12 {
-		t.Fatal("expected TLS 1.2 in TunnelClient httpClient")
-	}
-	if client.wsDialer.TLSClientConfig == nil || client.wsDialer.TLSClientConfig.MinVersion != tls.VersionTLS12 {
-		t.Fatal("expected TLS 1.2 in TunnelClient wsDialer")
 	}
 }

@@ -124,9 +124,7 @@ class GatewayVpnService : AndroidVpnService() {
     private val activeConnections = ConcurrentHashMap<String, ConnectionSession>()
     // TUN读取缓冲区
     private val packetBuffer = ByteArray(PACKET_BUFFER_SIZE)
-    // 回包写入缓冲区（每个线程独立，避免竞争）
-    private val writeBuffer = ThreadLocal<ByteArray>()
-    
+
     // 虚拟IP分配（用于回包构造）
     private val virtualIpPool = ConcurrentHashMap<String, String>() // realDstIp -> virtualSrcIp
     private val reverseIpMap = ConcurrentHashMap<String, String>() // virtualSrcIp -> realDstIp
@@ -593,7 +591,7 @@ class GatewayVpnService : AndroidVpnService() {
             val input = socket.getInputStream()
             val available = input.available()
             if (available > 0) {
-                val buffer = getWriteBuffer()
+                val buffer = ByteArray(PACKET_BUFFER_SIZE)
                 val payloadOffset = 40 // 20-byte IP header + 20-byte TCP header
                 val read = input.read(buffer, payloadOffset, minOf(available, buffer.size - payloadOffset))
                 if (read > 0) {
@@ -628,16 +626,6 @@ class GatewayVpnService : AndroidVpnService() {
         // UDP回包处理（类似TCP，但协议号不同）
         // 当前实现中UDP使用DatagramSocket，处理方式略有不同
         // 简化实现：UDP通常在forwardViaWifi中直接处理
-    }
-    
-    /**
-     * 获取写入缓冲区（线程本地）
-     * 每个线程拥有独立缓冲区，彻底消除竞争
-     */
-    private fun getWriteBuffer(): ByteArray {
-        return writeBuffer.get() ?: ByteArray(PACKET_BUFFER_SIZE).also {
-            writeBuffer.set(it)
-        }
     }
     
     /**

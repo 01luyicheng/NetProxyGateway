@@ -41,15 +41,6 @@ func generateRandomStreamID() (string, error) {
 	return hex.EncodeToString(randomBytes), nil
 }
 
-// defaultTLSConfig 返回带有安全默认值的 TLS 客户端配置。
-// 每次调用返回新的独立实例，可安全用于不同客户端。
-// 调用方不得修改返回的值。
-func defaultTLSConfig() *tls.Config {
-	return &tls.Config{
-		MinVersion: tls.VersionTLS12,
-	}
-}
-
 // Config 服务配置
 type Config struct {
 	Addr           string
@@ -83,7 +74,9 @@ func NewAPISessionStore(apiEndpoint string, internalAPIKey string) *APISessionSt
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 			Transport: &http.Transport{
-				TLSClientConfig: defaultTLSConfig(),
+				TLSClientConfig: &tls.Config{
+					MinVersion: tls.VersionTLS12,
+				},
 			},
 		},
 	}
@@ -280,17 +273,20 @@ func (f *IPFilter) IsAllowed(ip string) bool {
 }
 
 // StreamConn 隧道流连接
+// StreamConn 表示一条通过 tunnel 的流连接。
+// 锁层次: readMu -> mu (允许嵌套，但反之不可，否则会死锁)
 type StreamConn struct {
-	StreamID      string
-	DeviceID      string
-	TunnelConn    *websocket.Conn
-	tunnelWriteMu *sync.Mutex
-	DataChan      chan []byte
-	CloseChan     chan struct{}
-	Connected     chan bool
-	Closed        int32
-	WriteBuffer   []byte
-	mu            sync.Mutex
+	StreamID       string
+	DeviceID       string
+	TunnelConn     *websocket.Conn
+	tunnelWriteMu  *sync.Mutex
+	DataChan       chan []byte
+	CloseChan      chan struct{}
+	Connected      chan bool
+	Closed         int32
+	readRemainder  []byte
+	readMu         sync.Mutex
+	mu             sync.Mutex
 }
 
 // NewStreamConn 创建新的流连接
@@ -308,14 +304,17 @@ func NewStreamConn(streamID, deviceID string, tunnelConn *websocket.Conn, tunnel
 
 // Read 实现 net.Conn 的 Read 方法
 func (s *StreamConn) Read(p []byte) (n int, err error) {
+	s.readMu.Lock()
+	defer s.readMu.Unlock()
+
 	if len(p) == 0 {
 		return 0, nil
 	}
 
 	s.mu.Lock()
-	if len(s.WriteBuffer) > 0 {
-		n = copy(p, s.WriteBuffer)
-		s.WriteBuffer = s.WriteBuffer[n:]
+	if len(s.readRemainder) > 0 {
+		n = copy(p, s.readRemainder)
+		s.readRemainder = s.readRemainder[n:]
 		s.mu.Unlock()
 		return n, nil
 	}
@@ -323,16 +322,38 @@ func (s *StreamConn) Read(p []byte) (n int, err error) {
 
 	select {
 	case data := <-s.DataChan:
-		s.mu.Lock()
-		n = copy(p, data)
-		if n < len(data) {
-			s.WriteBuffer = append(s.WriteBuffer, data[n:]...)
-		}
-		s.mu.Unlock()
-		return n, nil
+		return s.consumeReadChunk(p, data), nil
+	default:
+	}
+
+	select {
+	case data := <-s.DataChan:
+		return s.consumeReadChunk(p, data), nil
 	case <-s.CloseChan:
+		for drainCount := 0; drainCount < cap(s.DataChan); drainCount++ {
+			select {
+			case data := <-s.DataChan:
+				if len(data) > 0 {
+					return s.consumeReadChunk(p, data), nil
+				}
+				// 零长度数据包，继续检查下一块
+				continue
+			default:
+				return 0, io.EOF
+			}
+		}
 		return 0, io.EOF
 	}
+}
+
+func (s *StreamConn) consumeReadChunk(p []byte, data []byte) int {
+	n := copy(p, data)
+	if n < len(data) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.readRemainder = append(s.readRemainder[:0], data[n:]...)
+	}
+	return n
 }
 
 // Write 实现 net.Conn 的 Write 方法
@@ -391,43 +412,62 @@ func (s *StreamConn) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
+// WriteToDataChan 将数据写入 DataChan，若 StreamConn 已关闭则返回错误
+func (s *StreamConn) WriteToDataChan(data []byte) error {
+	if atomic.LoadInt32(&s.Closed) == 1 {
+		return fmt.Errorf("stream closed")
+	}
+
+	select {
+	case s.DataChan <- data:
+		return nil
+	case <-s.CloseChan:
+		return fmt.Errorf("stream closed")
+	default:
+		return fmt.Errorf("data channel full")
+	}
+}
+
+// sendDisconnect 异步发送 disconnect 消息
+func (s *StreamConn) sendDisconnect() {
+	msg := struct {
+		Type string `json:"type"`
+		Data struct {
+			StreamID string `json:"stream_id"`
+		} `json:"data"`
+	}{
+		Type: "disconnect",
+		Data: struct {
+			StreamID string `json:"stream_id"`
+		}{
+			StreamID: s.StreamID,
+		},
+	}
+
+	data, _ := json.Marshal(msg)
+
+	s.mu.Lock()
+	tunnelConn := s.TunnelConn
+	writeMu := s.tunnelWriteMu
+	s.mu.Unlock()
+
+	if tunnelConn != nil {
+		if writeMu != nil {
+			writeMu.Lock()
+			defer writeMu.Unlock()
+		}
+
+		_ = tunnelConn.SetWriteDeadline(time.Now().Add(streamCloseWriteLimit))
+		_ = tunnelConn.WriteMessage(websocket.BinaryMessage, data)
+		_ = tunnelConn.SetWriteDeadline(time.Time{})
+	}
+}
+
 // Close 实现 net.Conn 的 Close 方法
 func (s *StreamConn) Close() error {
 	if atomic.CompareAndSwapInt32(&s.Closed, 0, 1) {
 		close(s.CloseChan)
-
-		// 发送断开连接消息
-		msg := struct {
-			Type string `json:"type"`
-			Data struct {
-				StreamID string `json:"stream_id"`
-			} `json:"data"`
-		}{
-			Type: "disconnect",
-			Data: struct {
-				StreamID string `json:"stream_id"`
-			}{
-				StreamID: s.StreamID,
-			},
-		}
-
-		data, _ := json.Marshal(msg)
-
-		s.mu.Lock()
-		tunnelConn := s.TunnelConn
-		writeMu := s.tunnelWriteMu
-		s.mu.Unlock()
-
-		if tunnelConn != nil {
-			if writeMu != nil {
-				writeMu.Lock()
-				defer writeMu.Unlock()
-			}
-
-			_ = tunnelConn.SetWriteDeadline(time.Now().Add(streamCloseWriteLimit))
-			_ = tunnelConn.WriteMessage(websocket.BinaryMessage, data)
-			_ = tunnelConn.SetWriteDeadline(time.Time{})
-		}
+		go s.sendDisconnect()
 	}
 	return nil
 }
@@ -482,14 +522,18 @@ func NewTunnelClient(tunnelEndpoint string) *TunnelClient {
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 			Transport: &http.Transport{
-				TLSClientConfig: defaultTLSConfig(),
+				TLSClientConfig: &tls.Config{
+					MinVersion: tls.VersionTLS12,
+				},
 			},
 		},
 		wsDialer: &websocket.Dialer{
 			HandshakeTimeout: 10 * time.Second,
-			TLSClientConfig:  defaultTLSConfig(),
-			ReadBufferSize:   64 * 1024,
-			WriteBufferSize:  64 * 1024,
+			TLSClientConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			},
+			ReadBufferSize:  64 * 1024,
+			WriteBufferSize: 64 * 1024,
 		},
 		connections: make(map[string]*websocket.Conn),
 		dialing:     make(map[string]chan struct{}),
@@ -728,11 +772,8 @@ func (tc *TunnelClient) handleData(data json.RawMessage) {
 		return
 	}
 
-	select {
-	case stream.DataChan <- resp.Data:
-	case <-stream.CloseChan:
-	default:
-		log.Printf("DataChan full for stream %s, closing stream", resp.StreamID)
+	if err := stream.WriteToDataChan(resp.Data); err != nil {
+		log.Printf("Failed to write to DataChan for stream %s: %v, closing stream", resp.StreamID, err)
 		stream.Close()
 		tc.RemoveStream(resp.StreamID)
 	}
