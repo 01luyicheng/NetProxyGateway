@@ -605,6 +605,43 @@ func TestCleanupLoginAttemptsRemovesExpiredBlockedEntry(t *testing.T) {
 	}
 }
 
+func TestServerCloseStopsCleanupWorkers(t *testing.T) {
+	db, err := sql.Open("sqlite3", "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("failed to open in-memory db: %v", err)
+	}
+	if err := initSchema(db); err != nil {
+		_ = db.Close()
+		t.Fatalf("failed to init schema: %v", err)
+	}
+
+	server := &Server{
+		db:                          db,
+		loginAttempts:               make(map[string]*LoginAttempt),
+		cleanupSessionsInterval:     10 * time.Millisecond,
+		cleanupLoginAttemptsInterval: 10 * time.Millisecond,
+	}
+	server.startCleanupWorkers()
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- server.Close()
+	}()
+
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("expected close to succeed, got error: %v", err)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("expected close to return after stopping cleanup workers")
+	}
+
+	if err := db.Ping(); err == nil {
+		t.Fatal("expected database to be closed after server close")
+	}
+}
+
 func TestValidateSessionExpiredTokenDeleteFailureDoesNotLogRawToken(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -842,5 +879,13 @@ func TestCreatePairingSessionDatabaseErrorReturns500(t *testing.T) {
 	}
 	if attempts != 1 {
 		t.Fatalf("expected 1 generation attempt before database error, got %d", attempts)
+	}
+}
+
+func TestNewHTTPServerSetsMaxHeaderBytes(t *testing.T) {
+	server := newHTTPServer(":8080", gin.New())
+
+	if server.MaxHeaderBytes != MaxHTTPHeaderBytes {
+		t.Fatalf("expected MaxHeaderBytes=%d, got %d", MaxHTTPHeaderBytes, server.MaxHeaderBytes)
 	}
 }

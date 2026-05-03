@@ -28,6 +28,7 @@ const (
 	BlockDuration                 = 15 * time.Minute
 	DefaultDBPath                 = "./api.db"
 	MinJWTSecretLength            = 32
+	MaxHTTPHeaderBytes            = 1 << 20
 )
 
 // 错误消息常量 - 统一使用 ErrFailedToXxx 命名风格
@@ -109,6 +110,11 @@ type Server struct {
 
 	jwtSecret      []byte
 	internalAPIKey []byte
+
+	cleanupStop                  chan struct{}
+	cleanupWorkers               sync.WaitGroup
+	cleanupSessionsInterval      time.Duration
+	cleanupLoginAttemptsInterval time.Duration
 }
 
 // handleBindError 统一处理请求绑定错误
@@ -259,6 +265,11 @@ func initSchema(db *sql.DB) error {
 
 // Close 关闭服务器资源
 func (s *Server) Close() error {
+	if s.cleanupStop != nil {
+		close(s.cleanupStop)
+		s.cleanupWorkers.Wait()
+	}
+
 	if s.db != nil {
 		return s.db.Close()
 	}
@@ -420,34 +431,68 @@ func (s *Server) cleanupLoginAttempts(now time.Time) {
 	}
 }
 
-// cleanupExpiredLoginAttempts 定时清理过期登录限流记录
-func (s *Server) cleanupExpiredLoginAttempts() {
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
+func (s *Server) startCleanupWorkers() {
+	if s.cleanupStop != nil {
+		return
+	}
 
-	for range ticker.C {
-		s.cleanupLoginAttempts(time.Now())
+	s.cleanupStop = make(chan struct{})
+	s.cleanupWorkers.Add(2)
+
+	go s.cleanupExpiredSessions(s.cleanupStop)
+	go s.cleanupExpiredLoginAttempts(s.cleanupStop)
+}
+
+// cleanupExpiredLoginAttempts 定时清理过期登录限流记录
+func (s *Server) cleanupExpiredLoginAttempts(stop <-chan struct{}) {
+	interval := s.cleanupLoginAttemptsInterval
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	defer s.cleanupWorkers.Done()
+
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			s.cleanupLoginAttempts(time.Now())
+		}
 	}
 }
 
 // cleanupExpiredSessions 清理过期会话
-func (s *Server) cleanupExpiredSessions() {
-	ticker := time.NewTicker(5 * time.Minute)
+func (s *Server) cleanupExpiredSessions(stop <-chan struct{}) {
+	interval := s.cleanupSessionsInterval
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	defer s.cleanupWorkers.Done()
 
-	for range ticker.C {
-		now := time.Now().Unix()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			now := time.Now().Unix()
 
-		// 清理过期配对会话
-		_, err := s.db.Exec("DELETE FROM pairing_sessions WHERE expires_at < ?", now)
-		if err != nil {
-			log.Printf("Failed to cleanup expired pairing sessions: %v", err)
-		}
+			// 清理过期配对会话
+			_, err := s.db.Exec("DELETE FROM pairing_sessions WHERE expires_at < ?", now)
+			if err != nil {
+				log.Printf("Failed to cleanup expired pairing sessions: %v", err)
+			}
 
-		// 清理过期会话令牌
-		_, err = s.db.Exec("DELETE FROM session_tokens WHERE expires_at < ?", now)
-		if err != nil {
-			log.Printf("Failed to cleanup expired session tokens: %v", err)
+			// 清理过期会话令牌
+			_, err = s.db.Exec("DELETE FROM session_tokens WHERE expires_at < ?", now)
+			if err != nil {
+				log.Printf("Failed to cleanup expired session tokens: %v", err)
+			}
 		}
 	}
 }
@@ -1168,6 +1213,18 @@ func (s *Server) healthCheck(c *gin.Context) {
 	})
 }
 
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:           addr,
+		Handler:        handler,
+		MaxHeaderBytes: MaxHTTPHeaderBytes,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+}
+
 func main() {
 	// 设置Gin模式
 	gin.SetMode(gin.ReleaseMode)
@@ -1179,8 +1236,7 @@ func main() {
 	defer server.Close()
 
 	// 启动清理协程
-	go server.cleanupExpiredSessions()
-	go server.cleanupExpiredLoginAttempts()
+	server.startCleanupWorkers()
 
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -1219,14 +1275,7 @@ func main() {
 	tlsCert := os.Getenv("TLS_CERT")
 	tlsKey := os.Getenv("TLS_KEY")
 
-	httpServer := &http.Server{
-		Addr:              ":" + port,
-		Handler:           r,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
+	httpServer := newHTTPServer(":"+port, r)
 
 	// 验证TLS配置
 	if enableTLS {

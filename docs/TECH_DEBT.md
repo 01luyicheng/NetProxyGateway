@@ -515,13 +515,6 @@
 - **风险**: 低。用户体验问题
 - **修复难度**: 低。添加 `rememberLazyListState()`
 
-### C57: server/api HTTP服务器缺少MaxHeaderBytes
-- **提交哈希**: 1f9acee
-- **位置**: `server/api/main.go` (L1211-L1218), `server/tunnel/main.go` (L803-L810)
-- **问题描述**: HTTP 服务器未显式设置 `MaxHeaderBytes`，依赖 Go 默认 1MB。生产环境建议显式限制以防止内存耗尽攻击
-- **风险**: 中。DoS 攻击风险
-- **修复难度**: 低。添加 `MaxHeaderBytes` 配置
-
 ### C58: server/socks5-proxy relay错误处理不完整
 - **提交哈希**: 1f9acee
 - **位置**: `server/socks5-proxy/main.go` (L1221-L1248)

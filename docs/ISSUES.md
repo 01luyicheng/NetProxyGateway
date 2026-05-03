@@ -482,27 +482,6 @@
 - **风险**: 高。测试不可靠，可能掩盖真实问题或产生假阴性
 - **修复难度**: 低。调整 `tearDown` 中 `unmockkAll()` 和 `Dispatchers.resetMain()` 的顺序，确保测试隔离
 
-### N48: Go StreamConn.Read 数据截断违反 net.Conn 契约
-- **提交哈希**: f8497b8
-- **位置**: `server/socks5-proxy/main.go` (L303-L311)
-- **问题描述**: `StreamConn.Read` 方法从 `DataChan` 读取数据后使用 `copy(p, data)` 复制到调用者缓冲区。当 `len(p) < len(data)` 时，剩余数据被丢弃而非缓存供下次读取。这违反了 `net.Conn` 接口契约，可能导致数据丢失
-- **风险**: 高。数据截断导致协议交互失败或数据损坏
-- **修复难度**: 中。添加 `WriteBuffer` 字段缓存剩余数据，下次 `Read` 优先返回缓存数据
-- **代码示例**:
-  ```go
-  func (s *StreamConn) Read(p []byte) (n int, err error) {
-      s.mu.Lock()
-      if len(s.WriteBuffer) > 0 {
-          n = copy(p, s.WriteBuffer)
-          s.WriteBuffer = s.WriteBuffer[n:]
-          s.mu.Unlock()
-          return n, nil
-      }
-      s.mu.Unlock()
-      // ... 从 DataChan 读取
-  }
-  ```
-
 ### N49: EmulatorDetector 电话权限在 Android 10+ 上可能误判
 - **提交哈希**: f8497b8
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/security/EmulatorDetector.kt` (L372-L441)
@@ -624,13 +603,6 @@
 - **风险**: 高。安全设计意图失效，token 无法被主动擦除
 - **修复难度**: 中。将 `ProxyAuthSession.authToken` 类型改为 `CharArray`，在业务层传递时保持 `CharArray` 形式
 
-### N38: server/api cleanup协程泄漏
-- **提交哈希**: 1f9acee
-- **位置**: `server/api/main.go` (L1171-L1172, L413-L442)
-- **问题描述**: `cleanupExpiredSessions` 和 `cleanupExpiredLoginAttempts` 后台协程使用 `for range ticker.C` 无限循环，无退出条件。`Server.Close()` 只关闭数据库，不通知清理协程退出
-- **风险**: 高。影响优雅关闭和资源管理，热重启场景下是实质性泄漏
-- **修复难度**: 低。为 Server 添加 `context.Context` 和关闭通道，协程监听 context.Done() 或通道退出
-
 ### N39: server/api JWT Secret长度未验证
 - **提交哈希**: 1f9acee
 - **位置**: `server/api/main.go` (L121-L124, L190)
@@ -638,26 +610,13 @@
 - **风险**: 高。使用弱 JWT 密钥可能导致令牌被伪造，造成未授权访问
 - **修复难度**: 低。添加最小长度检查（如 32 字符），不足时拒绝启动
 
-### N40: server/socks5-proxy GetOrConnectTunnel连接存活检查竞态
+### N40: server/socks5-proxy GetOrConnectTunnel连接存活检查竞态 [已修复]
 - **提交哈希**: 1f9acee
 - **位置**: `server/socks5-proxy/main.go` (L479-L577)
 - **问题描述**: RLock 释放后调用 `isConnAlive`，期间其他 goroutine 可能删除连接并创建新连接。返回的连接可能已被替换或即将关闭，典型的 Check-Then-Act 竞态
 - **风险**: 高。返回失效连接导致客户端操作失败，影响连接稳定性
-- **修复难度**: 中。将 `isConnAlive` 调用放在锁保护的原子操作中，或返回连接时增加引用计数
-
-### N41: server/tunnel validateDeviceToken每次创建新HTTP客户端
-- **提交哈希**: 1f9acee
-- **位置**: `server/tunnel/main.go` (L527-L583)
-- **问题描述**: 每次 WebSocket 连接建立时调用 `validateDeviceToken`，每次都创建新的 `http.Client`。无法复用 TCP 连接池，高频场景下造成连接开销和资源浪费
-- **风险**: 中。性能问题，与已修复的 `notifyDeviceStatus` 问题（C24）相同
-- **修复难度**: 低。将 `http.Client` 作为 `Server` 字段，初始化时创建一次并复用
-
-### N42: server/tunnel heartbeat在Close后尝试发送Ping
-- **提交哈希**: 1f9acee
-- **位置**: `server/tunnel/main.go` (L586-L610)
-- **问题描述**: `IsAlive()` 返回 true 后、`WriteControl` 发送 ping 前，`Close()` 可能被其他 goroutine 调用。向已关闭连接写入产生错误日志和冗余的 `Close()` 调用
-- **风险**: 中。可观察性问题，产生不必要的错误日志，影响监控
-- **修复难度**: 低。在 `WriteControl` 前检查 `closeChan`，或使用更一致的状态管理
+- **修复**: 将 `GetOrConnectTunnel` 中的 `RLock` 改为 `Lock`，在锁保护内完成连接存活检查和删除操作，消除 Check-Then-Act 竞态
+- **修复状态**: 已修复
 
 ### N43: MqttConnectionManager MQTT回调无法注销导致内存泄漏
 - **提交哈希**: 1f9acee
