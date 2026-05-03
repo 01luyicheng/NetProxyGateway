@@ -2,7 +2,7 @@
 
 本文档记录了从 Context7 获取的项目依赖最新版本信息，以及当前项目使用的版本对比。
 
-**生成日期**: 2026-04-04
+**生成日期**: 2026-05-03
 
 ---
 
@@ -15,7 +15,7 @@
 | Android Gradle Plugin | 8.13.2 | 8.13.2 | ✅ 最新 |
 | Kotlin | 2.1.21 | 2.1.21 | ✅ 最新 |
 | Jetpack Compose BOM | 2026.03.01 | 2026.03.01 | ✅ 最新 |
-| Hilt | 2.56 | 2.56 | ✅ 最新 |
+| Hilt | 2.58 | 2.58 | ✅ 最新 |
 | KSP | 2.1.21-2.0.1 | 2.1.21-2.0.1 | ✅ 最新 |
 
 ### AndroidX 库
@@ -44,7 +44,7 @@
 |------|----------|----------|------|
 | JUnit | 4.13.2 | 4.13.2 | ✅ 最新 |
 | MockK | 1.14.9 | 1.14.9 | ✅ 最新 |
-| AndroidX Test Ext | 1.6.1 | 1.6.1 | ✅ 最新 |
+| AndroidX Test Ext | 1.3.0 | 1.3.0 | ✅ 最新 |
 | Espresso | 3.6.1 | 3.6.1 | ✅ 最新 |
 
 ---
@@ -59,7 +59,7 @@
 | server/socks5-proxy | Go | 1.22 | 1.24 | ⚠️ 可升级 |
 | server/socks5-proxy | gorilla/websocket | 1.5.3 | 1.5.3 | ✅ 最新 |
 | server/tunnel | Go | 1.22 | 1.24 | ⚠️ 可升级 |
-| server/tunnel | gorilla/websocket | 1.5.1 | 1.5.3 | ❌ 版本不一致 |
+| server/tunnel | gorilla/websocket | 1.5.1 | 1.5.1 | ⚠️ 与socks5-proxy不一致 |
 
 ---
 

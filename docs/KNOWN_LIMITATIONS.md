@@ -11,7 +11,7 @@
 - **描述**: VPN服务在解析数据包时，遇到非IPv4版本（版本号不为4）的数据包直接返回null并丢弃。
 - **原因（设计决策）**: 当前产品专注于IPv4网络环境，IPv6支持会增加代码复杂度和测试范围。
 - **影响范围**: 在IPv6网络环境下，所有IPv6流量将被丢弃，无法通过VPN隧道传输。
-- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L269-L274)
+- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L298-L303)
 - **未来计划**: 暂无计划支持，需根据市场需求评估。
 
 ### L-IPV6-02: SOCKS5代理仅监听IPv4地址
@@ -32,7 +32,7 @@
 - **描述**: VPN Builder仅添加IPv4地址`10.0.0.2`和IPv4路由`0.0.0.0/0`，未配置IPv6地址和路由。
 - **原因（设计决策）**: 当前产品定位为IPv4远程网络协助，IPv6配置会增加系统复杂度和潜在兼容性问题。
 - **影响范围**: IPv6流量无法进入VPN隧道，系统会将其路由到默认网络接口而非VPN。
-- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L73-75, L156-165)
+- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L78-L80, L185-L189)
 - **未来计划**: 暂无计划支持，需根据市场需求评估。
 
 ### L-IPV6-05: DNS配置仅支持IPv4服务器
@@ -60,7 +60,7 @@
 - **描述**: `WifiConnectionInfo`数据类仅包含`ipAddress: Int`字段，用于存储IPv4地址，未获取或存储IPv6地址信息。
 - **原因（设计决策）**: 当前WiFi管理功能仅关注IPv4连接状态，用于网络诊断和日志记录。
 - **影响范围**: 无法获取或显示设备的IPv6地址信息。
-- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/wifi/GatewayWifiManager.kt` (L39-46, L277-292)
+- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/wifi/WifiManager.kt` (L39-L46, L283-L299)
 - **未来计划**: 暂无计划支持，需根据市场需求评估。
 
 ---
@@ -71,28 +71,28 @@
 - **描述**: 传输层payload提取逻辑不处理IP分片，假设所有数据包均为完整包。
 - **原因（设计决策）**: 处理IP分片需要实现复杂的重组逻辑和缓冲区管理，增加代码复杂度和内存开销。在MTU配置合理的情况下，分片情况较少见。
 - **影响范围**: 遇到分片的数据包时，可能无法正确提取payload或导致连接异常。
-- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L809-L824)
+- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L840-L854)
 - **未来计划**: 暂无计划支持，建议通过合理配置MTU减少分片发生。
 
 ### L-PROTO-02: ICMP协议未支持
 - **描述**: `parseProtocol`函数未处理ICMP协议（协议号1），ICMP数据包被丢弃。
 - **原因（设计决策）**: ICMP协议需要特殊处理（如ping请求/响应、错误报告），实现完整的ICMP支持需要额外的协议状态管理。
 - **影响范围**: 工程师无法使用ping、traceroute等基本网络诊断工具测试内网连通性。
-- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L794-L796)
+- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L825-L827)
 - **未来计划**: 考虑在后续版本中支持基本的ICMP echo请求/响应（ping）。
 
 ### L-PROTO-03: 多播/广播流量未转发
 - **描述**: 流量处理逻辑未识别多播（224.0.0.0/4, ff00::/8）和广播（255.255.255.255）地址，此类流量未进入转发逻辑。
 - **原因（设计决策）**: 多播和广播流量通常用于局域网内设备发现和服务发现，通过VPN隧道转发需要特殊处理（如IGMP代理），复杂度较高。
 - **影响范围**: 依赖多播的设备发现协议（如mDNS、SSDP）无法通过VPN工作，工程师无法自动发现内网设备。
-- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L288-L308)
+- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L317-L337)
 - **未来计划**: 暂无计划支持，工程师需手动输入目标设备IP地址。
 
 ### L-PROTO-04: 链路本地地址访问受限
 - **描述**: `isPrivateIp`仅检查RFC1918私有地址，未处理链路本地地址（169.254.0.0/16, fe80::/10）。
 - **原因（设计决策）**: 链路本地地址通常用于无DHCP环境下的自动配置，远程网络协助场景下较少需要访问此类地址。
 - **影响范围**: 某些使用链路本地地址的设备（如部分打印机、IoT设备）可能无法通过当前逻辑访问。
-- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L347-L349)
+- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L376-L377)
 - **未来计划**: 评估实际使用场景后决定是否支持。
 
 ### L-PROTO-05: UDP打洞和NAT穿透缺失
@@ -110,15 +110,29 @@
 - **描述**: 不同品牌路由器使用不同的默认管理端口（80、443、8080、8443等）和协议（HTTP、HTTPS），当前代码未提供端口扫描或协议识别功能。
 - **原因（设计决策）**: 端口扫描和协议识别功能可能被安全软件标记为恶意行为，且不同设备差异过大难以统一处理。
 - **影响范围**: 工程师需要手动知道目标设备的访问方式（端口和协议）。
-- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/GatewayVpnService.kt`, `Socks5ProxyHandler.kt`
+- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt`, `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt`
 - **未来计划**: 考虑提供常见设备品牌的默认端口参考文档，而非自动扫描。
 
 ### L-PROD-02: 缺乏设备发现协议支持
 - **描述**: 未实现mDNS（Bonjour）、SSDP（UPnP）、WS-Discovery等设备发现协议。
 - **原因（设计决策）**: 设备发现协议通常依赖多播/广播，而当前架构不支持多播/广播流量转发（见L-PROTO-03）。
 - **影响范围**: 工程师无法自动发现内网中的路由器、AP、打印机等设备，需要手动输入IP地址。
-- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L288-L308 determineRouteType函数，多播/广播地址检查逻辑)
+- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L317-L337 determineRouteType函数，多播/广播地址检查逻辑)
 - **未来计划**: 若未来支持多播转发，将同步评估设备发现协议支持。
+
+### L-PROD-03: 特殊网络管理协议未支持
+- **描述**: 未针对SNMP（161/162端口）、TR-069/CWMP（7547端口）、NETCONF（830端口）等网络管理协议进行特殊处理。
+- **原因（设计决策）**: 这些协议在远程协助场景中使用频率较低，特殊处理会增加代码复杂度。
+- **影响范围**: 某些网络管理协议在当前的TCP/UDP转发逻辑中可能工作不正常。
+- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt`, `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt`
+- **未来计划**: 根据实际用户反馈，优先支持使用最广泛的协议。
+
+### L-PROD-04: 网络管理工具集成缺失
+- **描述**: 缺乏与SSH（22端口）、Telnet（23端口）、Winbox（8291端口）、RouterOS API等常用网络管理工具的集成。
+- **原因（设计决策）**: 保持产品简洁性，工程师可通过外部工具通过SOCKS5代理连接。
+- **影响范围**: 工程师需要使用外部工具通过SOCKS5代理连接，体验不如内置集成无缝。
+- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyService.kt`
+- **未来计划**: 暂无计划内置协议客户端，保持产品简洁性。
 
 ### L-PROD-05: 多跳网络环境下的延迟和超时
 - **描述**: 未实现多跳网络环境下的延迟检测和自适应超时机制。远程协助场景下路径为：工程师 → 云服务器 → 手机VPN → 内网设备。
@@ -131,8 +145,15 @@
 - **描述**: 虚拟IP池使用固定的`10.0.0.x`网段，如果客户内网恰好使用相同网段，将导致IP冲突。
 - **原因（设计决策）**: 固定网段简化了IP分配逻辑，且`10.0.0.0/8`为私有地址范围，冲突概率相对较低。
 - **影响范围**: 若客户内网使用`10.0.0.0/24`网段，工程师无法访问内网设备。
-- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L119-L122, L746-L760)
+- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L120-L123, L798-L806)
 - **未来计划**: 考虑提供可配置的虚拟IP网段选项。
+
+### L-PROD-07: 访问控制和审计机制缺失
+- **描述**: 缺乏细粒度的访问控制（如限制可访问的内网IP范围、端口白名单）和操作审计日志。
+- **原因（设计决策）**: 当前产品定位为个人/小团队远程协助，企业级安全功能会增加复杂度。
+- **影响范围**: 在企业场景下可能存在安全风险，无法限制工程师可访问的范围或追溯操作记录。
+- **代码位置**: 全局（当前SecurityManager仅提供Root/调试/模拟器检测，无访问控制功能）
+- **未来计划**: 根据企业客户需求评估是否添加。
 
 ---
 
@@ -140,29 +161,11 @@
 
 > 以下是产品功能缺口记录，属于待实现的功能需求，而非设计决策或技术限制。
 
-### L-PROD-01: 路由器/AP管理界面端口和协议差异
-- **描述**: 不同品牌路由器使用不同的默认管理端口（80、443、8080、8443等）和协议（HTTP、HTTPS），当前代码未提供端口扫描或协议识别功能。
-- **影响范围**: 工程师需要手动知道目标设备的访问方式（端口和协议）。
-- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/GatewayVpnService.kt`, `Socks5ProxyHandler.kt`
-- **未来计划**: 考虑提供常见设备品牌的默认端口参考文档，而非自动扫描。
-
-### L-PROD-03: 特殊网络管理协议未支持
-- **描述**: 未针对SNMP（161/162端口）、TR-069/CWMP（7547端口）、NETCONF（830端口）等网络管理协议进行特殊处理。
-- **影响范围**: 某些网络管理协议在当前的TCP/UDP转发逻辑中可能工作不正常。
-- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt`, `VpnService.kt`
-- **未来计划**: 根据实际用户反馈，优先支持使用最广泛的协议。
-
-### L-PROD-04: 网络管理工具集成缺失
-- **描述**: 缺乏与SSH（22端口）、Telnet（23端口）、Winbox（8291端口）、RouterOS API等常用网络管理工具的集成。
-- **影响范围**: 工程师需要使用外部工具通过SOCKS5代理连接，体验不如内置集成无缝。
-- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyService.kt`
-- **未来计划**: 暂无计划内置协议客户端，保持产品简洁性。
-
-### L-PROD-07: 访问控制和审计机制缺失
-- **描述**: 缺乏细粒度的访问控制（如限制可访问的内网IP范围、端口白名单）和操作审计日志。
-- **影响范围**: 在企业场景下可能存在安全风险，无法限制工程师可访问的范围或追溯操作记录。
-- **代码位置**: 全局（当前SecurityManager仅提供Root/调试/模拟器检测，无访问控制功能）
-- **未来计划**: 根据企业客户需求评估是否添加。
+### L-FEAT-01: 多设备并发连接支持
+- **描述**: 当前架构仅支持单工程师-单设备连接，虚拟IP池设计为单会话场景。
+- **影响范围**: 不支持多工程师同时协助同一设备，或多设备同时被协助。
+- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VirtualIpAllocator.kt`
+- **未来计划**: 根据需求评估是否支持多会话并发。
 
 ---
 
@@ -172,14 +175,14 @@
 - **描述**: `CLOUD_SERVER`路由类型在代码中定义为枚举值，但实际未实现，相关数据包被直接忽略。
 - **原因（设计决策）**: 当前架构中云服务器仅作为MQTT信令通道，不直接转发数据流量（数据通过SOCKS5代理）。
 - **影响范围**: 无实际影响，该枚举值为预留设计。
-- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L254-L258)
+- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L283-L286)
 - **未来计划**: 若未来架构调整，可能启用该路由类型。
 
 ### L-TECH-02: WiFi连接API在Android 10+上的限制
 - **描述**: WiFi连接路径使用传统API（WifiConfiguration），在Android 10+上已被废弃且受限。Android 10+对后台应用启动WiFi连接有限制，可能导致连接失败或需要用户手动确认。
 - **原因（系统限制）**: Android系统API限制，Google官方废弃了旧版WiFi连接API，新版API需要用户交互确认。
 - **影响范围**: 在Android 10+设备上，自动WiFi连接功能受限，可能需要用户手动干预。
-- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/wifi/WifiManager.kt`（类：GatewayWifiManager）
+- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/wifi/WifiManager.kt`
 - **未来计划**: 评估使用Suggestion API或NetworkSpecifier进行请求（Android 10+）。
 
 ### L-TECH-03: MQTT TLS加密和证书固定限制
@@ -193,7 +196,7 @@
 - **描述**: 虚拟IP池使用固定的10.0.0.x网段（10.0.0.2-10.0.0.254），仅支持254个设备同时连接。
 - **原因（设计决策）**: 固定网段简化了IP分配逻辑，且当前产品定位为单设备远程协助场景。
 - **影响范围**: 不支持多设备同时连接的大规模部署场景。
-- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L746-760)
+- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L798-L806)
 - **未来计划**: 根据需求评估是否扩展IP池大小或支持动态网段配置。
 
 ### L-TECH-05: 服务端开发模式仅API服务支持
@@ -212,18 +215,18 @@
   - Tunnel 网关: `server/tunnel/main.go` (L569-572)
 - **未来计划**: 若需要完整的开发模式多服务联调支持，需实现密钥共享机制（如写入共享文件或使用配置中心）。
 
-### L-PROTO-06: MTU固定值限制
+### L-TECH-06: MTU固定值限制
 - **描述**: VPN MTU硬编码为1500，未根据实际网络环境自适应调整。
 - **原因（设计决策）**: 固定MTU简化了实现，1500是以太网标准MTU，适用于大多数场景。
 - **影响范围**: 在某些网络环境下（如PPPoE、VPN over VPN），固定MTU可能导致分片或性能下降。
-- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L75)
+- **代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L80)
 - **未来计划**: 考虑实现MTU自动探测或提供可配置的MTU选项。
 
 ---
 
 ## 文档维护说明
 
-- 本文档最后更新日期：2026-04-15
+- 本文档最后更新日期：2026-05-03
 - 新增限制应遵循本文档格式，明确说明设计决策原因
 - 当限制被解除时，应将其移至"已解除限制"章节并标注解除日期
 
@@ -239,4 +242,5 @@
 | 2026-03-31 | 新增限制项：L-IPV6-08（WiFi连接信息仅获取IPv4地址）、L-TECH-01（云服务器路由未实现） | AI Agent |
 | 2026-03-31 | 文档结构优化：按IPv6支持、协议支持、产品功能、其他技术限制分类组织 | AI Agent |
 | 2026-04-15 | 新增限制项：L-TECH-05（服务端开发模式仅API服务支持），记录跨服务开发模式不一致问题 | Kimi-K2.5 |
+| 2026-05-03 | 修正编号体系：删除重复的L-PROD-01，合并功能缺口到产品功能限制章节，重新编号为L-PROD-01到L-PROD-07；新增L-FEAT-01；修正所有代码行号引用；修正GatewayVpnService.kt为VpnService.kt；L-PROTO-06改为L-TECH-06 | AI Agent (Kimi-K2.6) |
 
