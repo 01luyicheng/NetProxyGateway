@@ -1,5 +1,7 @@
 # 技术债务清单
 
+> **编号说明**: C1 为预留编号，当前未使用。编号从 C2 开始。
+
 ## 当前活跃问题
 
 ### C2: 循环依赖风险（ModuleCoordinator 作为 Event Bus）
@@ -49,7 +51,7 @@
   - 两者都操作 `isStopping` 标志，但 `onDestroy()` 不重置该标志
 - **风险**: 中。不一致的清理顺序可能导致竞态条件或资源泄漏
 - **建议**: 提取统一的清理方法，确保两处使用相同的清理顺序和逻辑
-- **注意**: H9/H15修复后，serviceScope和连接池的部分清理问题已解决，但清理顺序仍可统一优化；H14 仍未完全修复。
+- **注意**: H15修复后，serviceScope和连接池的部分清理问题已解决，但清理顺序仍可统一优化；H14 仍未完全修复。
 
 ### C9: Tunnel Gateway 单点故障与状态丢失风险
 - **位置**: `server/tunnel/`
@@ -79,8 +81,8 @@
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt`
 - **问题描述**: 
   - 测试类未真正验证 `GatewayVpnService.stopVpn()` 和 `startVpn()` 的交互
-  - 没有测试 `serviceScope` 取消后重新启动的行为（H9问题的回归测试）
-  - 没有针对并发安全问题的专项测试（H11-H13）
+  - 没有测试 `serviceScope` 取消后重新启动的行为（回归测试缺失）
+  - 没有针对并发安全问题的专项测试（H11-H12）
   - 测试主要基于状态值的模拟验证，而非实际方法调用
 - **风险**: 中。关键缺陷缺乏回归测试，修复后可能再次引入
 - **建议**: 
@@ -360,28 +362,6 @@
 - **风险**: 中。高并发场景下连接归还性能下降
 - **修复难度**: 中。维护每个目标地址的连接计数器，避免遍历
 
-### C76: VpnService 回包缓冲区缺少分配行为回归测试
-- **提交哈希**: d01ddd1
-- **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt`
-- **问题描述**: N52/N54 已将 ThreadLocal 方案替换为局部变量方案（`val buffer = ByteArray(PACKET_BUFFER_SIZE)`），现有测试未验证该分配行为在高并发场景下的内存表现，也未覆盖 `processTcpReturn` 的 `available() > 0` 边界条件。
-- **风险**: 低。缺少回归保护，后续重构可能重新引入 ThreadLocal 或不当的缓冲策略
-- **修复难度**: 低。补充 `processTcpReturn` 在 `available()` 返回不同值时的行为测试
-
-### C78: VpnService 回包路径缺少TCP状态机
-- **提交哈希**: 1f9acee
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L582-L624, L649-L726)
-- **问题描述**: `processTcpReturn()` 仅在有数据可读时构造回包（`available > 0 && read > 0`），无法发送纯TCP控制包（ACK/FIN/RST）。`constructReturnPacket()` 固定设置 `PSH+ACK` flags，序列号和确认号固定为0。这导致TCP连接建立/终止流程不完整，依赖对端容忍非标准行为。
-- **风险**: 中。与严格TCP实现不兼容，可能导致连接建立失败或异常断开
-- **修复难度**: 高。需要实现完整的TCP状态机，正确管理序列号、确认号和标志位
-- **关联问题**: ISSUES.md H14, N36
-
-### C77: Socks5ProxyHandler double-free 修复缺少 write-failure 回归测试
-- **提交哈希**: 9f4b1b9
-- **位置**: `android/app/src/test/java/com/netproxy/gateway/proxy/Socks5ProxyHandlerTest.kt` (L22 起)
-- **问题描述**: N45 的修复修改了 `RelayHandler` 的 write-failure 分支，但当前测试只覆盖认证和 CONNECT 流程，没有构造 `relayChannel.writeAndFlush(msg)` 失败的路径来验证不会再次 release `msg`。
-- **风险**: 低。该修复点缺乏测试保护，未来容易被误改回双重释放
-- **修复难度**: 低。增加一个模拟 write 失败的 Netty 回归测试
-
 ### C38: Socks5ConnectionPool readFully无限循环风险
 - **提交哈希**: 1f9acee
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (L395-L420)
@@ -515,131 +495,153 @@
 - **风险**: 低。用户体验问题
 - **修复难度**: 低。添加 `rememberLazyListState()`
 
-### C58: server/socks5-proxy relay错误处理不完整
+### C57: server/socks5-proxy relay错误处理不完整
 - **提交哈希**: 1f9acee
-- **位置**: `server/socks5-proxy/main.go` (L1221-L1248)
+- **位置**: `server/socks5-proxy/main.go` (L1282-L1310)
 - **问题描述**: `io.Copy` 错误只保留第一个非预期错误，第二个被丢弃。错误过滤依赖字符串匹配，不够健壮
 - **风险**: 低。故障排查信息不完整
 - **修复难度**: 低。收集所有错误或使用错误包装
 
-### C59: server/socks5-proxy relay测试flaky
+### C58: server/socks5-proxy relay测试flaky
 - **提交哈希**: 1f9acee
 - **位置**: `server/socks5-proxy/main_test.go` (L294-L332)
 - **问题描述**: `TestRelay_ClosesPeerConnectionOnHalfClose` 依赖 `time.After(2s)` 超时，慢速 CI 下可能 flaky
 - **风险**: 低。测试可靠性
 - **修复难度**: 低。使用同步原语替代固定超时
 
-### C60: server/tunnel sendLoop双重select效率低
+### C59: server/tunnel sendLoop双重select效率低
 - **提交哈希**: 1f9acee
-- **位置**: `server/tunnel/main.go` (L613-L638)
+- **位置**: `server/tunnel/main.go` (L653-L677)
 - **问题描述**: `sendLoop` 外层 `select` 读取数据后内层又检查 `closeChan`，增加复杂度且可能不必要地尝试写入
 - **风险**: 低。代码复杂度
 - **修复难度**: 低。合并为单层 select
 
-### C61: server/tunnel notify测试仍有flaky风险
+### C60: server/tunnel notify测试仍有flaky风险
 - **提交哈希**: 1f9acee
 - **位置**: `server/tunnel/main_test.go` (L86-L88)
 - **问题描述**: 虽 C26 声称已修复，但代码仍使用 `time.After(300ms)` 验证无额外请求，慢 CI 下仍可能失败
 - **风险**: 低。测试可靠性
 - **修复难度**: 低。使用同步原语替代固定超时
 
-### C62: server/socks5-proxy IPFilter IPv6处理不完整
+### C61: server/socks5-proxy IPFilter IPv6处理不完整
 - **提交哈希**: 1f9acee
 - **位置**: `server/socks5-proxy/main.go` (L248-L273)
 - **问题描述**: `IPFilter.IsAllowed` 对 IPv6 支持不完整，域名解析只选第一个 IPv4，若域名只有 IPv6 会返回 false
 - **风险**: 低。IPv6 场景下过滤失效
 - **修复难度**: 中。添加 IPv6 CIDR 支持
 
-### C63: VpnService connectionKey格式未来IPv6冲突
+### C62: VpnService connectionKey格式未来IPv6冲突
 - **提交哈希**: 1f9acee
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L438)
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L435)
 - **问题描述**: `connectionKey` 使用 `"$srcIp:$srcPort-$destinationIp:$destinationPort"` 简单拼接，IPv6 地址含 `:` 和 `-` 会产生解析歧义
 - **风险**: 低。未来 IPv6 支持时 key 冲突
 - **修复难度**: 低。使用结构化 key 或编码处理
 
-### C64: VpnService onDestroy重复调用stopProxyService
+### C63: VpnService onDestroy重复调用stopProxyService
 - **提交哈希**: 1f9acee
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L1113-L1147)
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L1102-L1136)
 - **问题描述**: `onDestroy()` 中若 `stopVpn()` 已被调用过，`stopProxyService()` 会被调用两次，虽幂等但冗余
 - **风险**: 低。代码冗余
 - **修复难度**: 低。添加状态检查避免重复调用
 
-### C65: VpnDnsConfig isValidIpv4接受前导零
+### C64: VpnDnsConfig isValidIpv4接受前导零
 - **提交哈希**: 1f9acee
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnDnsConfig.kt` (L67-L82)
 - **问题描述**: `octet.toIntOrNull() in 0..255` 接受前导零（如 `01`），严格模式下可能被解析为八进制导致语义不一致
 - **风险**: 低。IP 验证宽松
 - **修复难度**: 低。拒绝含前导零的 octet
 
-### C66: VpnLogRedaction IPv6验证缺陷
+### C65: VpnLogRedaction IPv6验证缺陷
 - **提交哈希**: 1f9acee
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnLogRedaction.kt` (L35-L55)
 - **问题描述**: `isValidIpv6` 对 IPv4-mapped IPv6 和空字符串处理有缺陷，且依赖 `InetAddress.getByName` 有性能开销
 - **风险**: 低。日志脱敏不准确
 - **修复难度**: 低。改进验证逻辑
 
-### C67: AuthSessionStore constantTimeEquals空指针风险
+### C66: AuthSessionStore constantTimeEquals空指针风险
 - **提交哈希**: 1f9acee
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/AuthSessionStore.kt` (L193-L200)
 - **问题描述**: `constantTimeEquals` 未对参数做 null 检查，未来调用方传入 null 会 NPE
 - **风险**: 低。防御性编程缺失
 - **修复难度**: 低。添加 null 检查
 
-### C68: GatewayWifiManager WiFiScan Flow receiver注销竞态
+### C67: GatewayWifiManager WiFiScan Flow receiver注销竞态
 - **提交哈希**: 1f9acee
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/wifi/WifiManager.kt` (L74-L95)
 - **问题描述**: `callbackFlow` 的 `awaitClose` 注销 receiver，若 collector 在 `registerReceiver` 后快速取消，存在短暂 receiver 残留
 - **风险**: 低。极端场景下 receiver 泄漏
 - **修复难度**: 低。使用 `try-finally` 确保注销
 
-### C69: ModuleInterfaces新接口返回类型设计缺陷
+### C68: ModuleInterfaces新接口返回类型设计缺陷
 - **提交哈希**: 1f9acee
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/di/ModuleInterfaces.kt` (L39-L44)
 - **问题描述**: `CommunicationCommandHandler.publish()` 返回 `Unit` 无法传递失败信息；`WiFiCommandHandler.scanWiFi()` 同步返回与异步扫描语义不符
 - **风险**: 低。接口设计与实现不一致
 - **修复难度**: 中。修改接口返回类型
 
-### C70: MqttTlsPinning每次创建新MessageDigest
+### C69: MqttTlsPinning每次创建新MessageDigest
 - **提交哈希**: 1f9acee
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttTlsPinning.kt` (L68-L71)
 - **问题描述**: 每次 TLS 握手都创建新 `MessageDigest.getInstance("SHA-256")`，高频率重连时造成 GC 压力
 - **风险**: 低。性能优化空间
 - **修复难度**: 低。缓存 MessageDigest 实例或使用线程本地存储
 
-### C71: server/api 管理员密码明文存储
+### C70: server/api 管理员密码明文存储
 - **提交哈希**: f8497b8
 - **位置**: `server/api/main.go` (L138-L142)
 - **问题描述**: `ADMIN_USER` 和 `ADMIN_PASS` 从环境变量读取后直接字符串比较，无 bcrypt 等慢哈希存储。进程环境变量可被同一机器其他用户读取（`/proc/<pid>/environ`），密码在内存中以明文 String 存在且无复杂度要求
 - **风险**: 中。密码泄露风险，不符合安全存储最佳实践
 - **修复难度**: 中。使用 bcrypt 存储密码哈希，启动时验证复杂度，读取后立即覆盖内存
 
-### C72: server/tunnel Stats接口单一Token长期有效
+### C71: server/tunnel Stats接口单一Token长期有效
 - **提交哈希**: f8497b8
 - **位置**: `server/tunnel/main.go` (L757-L772)
 - **问题描述**: `authorizeStats` 使用单一 `StatsToken` 进行鉴权，Token 长期有效无过期机制。如果 Token 泄露，攻击者可长期访问统计信息。没有限流保护和访问日志
 - **风险**: 中。统计信息泄露，无法追踪异常访问
 - **修复难度**: 低。添加 Token 轮换机制、IP 白名单、访问日志和限流
 
-### C73: 内部API调用缺少重试和熔断机制
+### C72: 内部API调用缺少重试和熔断机制
 - **提交哈希**: f8497b8
 - **位置**: `server/socks5-proxy/main.go` (L480-L547), `server/tunnel/main.go` (L527-L583)
 - **问题描述**: `validateWithAPI` 和 `validateDeviceToken` 在 API 服务暂时不可用时直接失败，没有重试机制。`notifyDeviceStatus` 虽有重试但其他内部调用没有。缺乏熔断保护，API 服务故障时可能级联影响
 - **风险**: 中。服务间调用不可靠，单点故障级联扩散
 - **修复难度**: 中。统一内部 HTTP 客户端配置，添加重试、超时和熔断机制
 
-### C74: Go服务端缺少结构化日志
+### C73: Go服务端缺少结构化日志
 - **提交哈希**: f8497b8
 - **位置**: `server/api/main.go`, `server/socks5-proxy/main.go`, `server/tunnel/main.go`
 - **问题描述**: 三个服务均使用标准库 `log` 包打印日志，缺少日志级别、结构化字段（如 request_id、device_id）、日志轮转等能力。不利于生产环境故障排查和监控集成
 - **风险**: 低。运维和故障排查效率受影响
 - **修复难度**: 低。引入 `slog` 或 `zap` 等结构化日志库，统一日志格式
 
-### C75: SOCKS5连接池缺少并发回归测试
+### C74: SOCKS5连接池缺少并发回归测试
 - **提交哈希**: f8497b8
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/proxy/Socks5ConnectionPoolTest.kt`
 - **问题描述**: 测试仅覆盖单线程场景。ISSUES.md H5 记录的"连接池清理竞争条件"是关键缺陷，但测试中没有并发借用/归还/清理的竞态测试，修复后缺乏回归保护
 - **风险**: 中。关键缺陷缺乏回归测试，修复后可能再次引入
 - **修复难度**: 中。添加多线程并发测试，模拟 borrow/return/cleanup 竞态条件
+
+### C76: VpnService 回包缓冲区缺少分配行为回归测试
+- **提交哈希**: d01ddd1
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt`
+- **问题描述**: N52/N54 已将 ThreadLocal 方案替换为局部变量方案（`val buffer = ByteArray(PACKET_BUFFER_SIZE)`），现有测试未验证该分配行为在高并发场景下的内存表现，也未覆盖 `processTcpReturn` 的 `available() > 0` 边界条件。
+- **风险**: 低。缺少回归保护，后续重构可能重新引入 ThreadLocal 或不当的缓冲策略
+- **修复难度**: 低。补充 `processTcpReturn` 在 `available()` 返回不同值时的行为测试
+
+### C77: Socks5ProxyHandler double-free 修复缺少 write-failure 回归测试
+- **提交哈希**: 9f4b1b9
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/proxy/Socks5ProxyHandlerTest.kt` (L22 起)
+- **问题描述**: N45 的修复修改了 `RelayHandler` 的 write-failure 分支，但当前测试只覆盖认证和 CONNECT 流程，没有构造 `relayChannel.writeAndFlush(msg)` 失败的路径来验证不会再次 release `msg`。
+- **风险**: 低。该修复点缺乏测试保护，未来容易被误改回双重释放
+- **修复难度**: 低。增加一个模拟 write 失败的 Netty 回归测试
+
+### C78: VpnService 回包路径缺少TCP状态机
+- **提交哈希**: 1f9acee
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L582-L624, L649-L726)
+- **问题描述**: `processTcpReturn()` 仅在有数据可读时构造回包（`available > 0 && read > 0`），无法发送纯TCP控制包（ACK/FIN/RST）。`constructReturnPacket()` 固定设置 `PSH+ACK` flags，序列号和确认号固定为0。这导致TCP连接建立/终止流程不完整，依赖对端容忍非标准行为。
+- **风险**: 中。与严格TCP实现不兼容，可能导致连接建立失败或异常断开
+- **修复难度**: 高。需要实现完整的TCP状态机，正确管理序列号、确认号和标志位
+- **关联问题**: ISSUES.md H14, N36
 
 ### C79: StreamConn deadline 方法空实现导致 goroutine 泄漏
 - **提交哈希**: 9f4b1b9
@@ -653,6 +655,6 @@
 - **提交哈希**: d01ddd1
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L536-L562)
 - **问题描述**: 详见 ISSUES.md N57。`processReturnTraffic` 使用单协程串行遍历所有活跃连接，单个连接 I/O 阻塞会导致所有后续连接回包处理停滞。
-- **风险**: 中
-- **修复难度**: 高
+- **风险**: 中。单个连接阻塞影响所有连接的回包处理
+- **修复难度**: 高。需要重构为多协程并发模型或引入异步I/O
 - **关联问题**: ISSUES.md N57, TECH_DEBT.md C78
