@@ -38,7 +38,6 @@
 - 现在 Kotlin 标准库 `Result` 已成熟，自定义类型成为技术债务
 
 **当前状态**:
-- 原 ISSUE L12 已删除，不再作为阻塞项跟踪
 - `AppResult` 已提供 `toResult()` 和 `fromResult()` 方法支持迁移
 
 ---
@@ -47,7 +46,7 @@
 
 **日期**: 2024年中
 
-**状态**: 过度设计 (被 ISSUE-014 标记)
+**状态**: 过度设计 (被 ISSUES.md N4/N1 标记)
 
 ### 背景
 
@@ -81,7 +80,7 @@ interface CommunicationQueryHandler {
 }
 ```
 
-**注**: 接口名称在代码中为 `CommunicationCommandHandler` 和 `CommunicationQueryHandler`，与 TECH_DEBT.md 中 ISSUE-014 描述一致。
+**注**: 接口名称在代码中为 `CommunicationCommandHandler` 和 `CommunicationQueryHandler`，与 ISSUES.md N4 描述一致。
 
 ### 后果
 
@@ -91,10 +90,10 @@ interface CommunicationQueryHandler {
 - 理论上便于测试（可以 mock 更小的接口）
 
 **负面**:
-- ISSUE-014 指出这是接口过度设计
+- ISSUES.md N4 指出这是接口过度设计
 - 每个模块实际只有一个实现，拆分增加了不必要的复杂性
 - 接口数量翻倍，增加了维护负担
-- 与 Hilt 依赖注入结合时，形成隐式依赖网（ISSUE L17）
+- 与 Hilt 依赖注入结合时，形成隐式依赖网（ISSUES.md N1）
 
 **反思**:
 CQRS 模式更适合大规模系统或有明确读写分离需求的场景。对于当前项目规模，单一接口可能更简单实用。
@@ -116,45 +115,31 @@ VPN 服务需要为每个目标 IP 分配一个虚拟源 IP（`10.0.0.x` 网段�
 
 ### 决策
 
-使用 `ConcurrentHashMap` + `AtomicInteger` 组合方案：
+使用 `synchronized` 锁 + `MutableMap` + `AtomicInteger` 组合方案。核心实现位于 `VirtualIpAllocatorImpl`：
 
-```kotlin
-private val virtualIpPool = ConcurrentHashMap<String, String>() // realDstIp -> virtualSrcIp
-private val reverseIpMap = ConcurrentHashMap<String, String>() // virtualSrcIp -> realDstIp
-private val nextVirtualIp = AtomicInteger(1) // 从 10.0.0.1 开始分配
+- 锁保护：`synchronized(ipAllocationLock)` 保护复合操作（L65）
+- IP复用：先检查 `virtualIpPool[realDstIp]` 是否已存在映射（L67）
+- 溢出处理：`floorMod` 将超出范围的 IP 映射回有效区间（L95）
+- 循环分配：当 IP 被占用时自动尝试下一个（L90-L112）
+- 防无限循环：`maxAttempts` 限制尝试次数（L109）
 
-private fun getOrAllocateVirtualIp(realDstIp: String): String {
-    return virtualIpPool.getOrPut(realDstIp) {
-        val ipNum = nextVirtualIp.getAndIncrement()
-        if (ipNum > 254) {
-            logger.error("Virtual IP pool exhausted! Resetting pool.")
-            nextVirtualIp.set(1)
-            virtualIpPool.clear()
-            reverseIpMap.clear()
-        }
-        val ip = "10.0.0.${ipNum}"
-        reverseIpMap[ip] = realDstIp
-        logDebug("Allocated virtual IP ${redactIp(ip)} for ${redactIp(realDstIp)}")
-        ip
-    }
-}
-```
+**代码位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VirtualIpAllocator.kt` (L46-L148)
 
 ### 后果
 
 **正面**:
-- `ConcurrentHashMap.getOrPut` 保证同一目标 IP 获得相同虚拟 IP
-- `AtomicInteger` 提供线程安全的递增
+- `synchronized` 锁保护复合操作，避免竞态条件
+- `AtomicInteger` 提供原子递增，支持循环分配
+- `floorMod` 处理溢出情况，确保 IP 始终在有效范围内
 - 实现简单，无需额外同步
 
 **负面**:
-- ISSUE C3 指出存在线程安全问题：IP 耗尽时的重置逻辑在竞态条件下可能产生冲突
-- 缺少 IP 地址范围边界检查（`ipNum > 254` 检查在获取之后）
+- ISSUES.md H17（已修复）曾指出存在线程安全问题：IP 耗尽时的重置逻辑在竞态条件下可能产生冲突
 - 固定使用 `10.0.0.x` 网段，可能与用户内网冲突（KNOWN_LIMITATIONS.md L-PROD-06）
 
-**待修复**:
-- 需要添加更完善的边界检查和锁机制
-- 考虑使用 IP 池管理而非简单递增
+**已修复**:
+- 添加了 `synchronized` 锁保护复合操作
+- 使用 `floorMod` 处理溢出，添加循环分配和尝试次数限制
 
 ---
 
@@ -201,8 +186,8 @@ object MqttTlsPinning {
 - 开发环境灵活，支持自签名证书
 
 **负面**:
-- ISSUE C1 (已从 Critical 降级至 Medium): `MQTT_TRUST_ALL_CERTS` 在 debug 模式下默认为 true，但运行时检查现在可防止生产环境使用不安全配置
-- ISSUE H7: 当 `MQTT_TLS_PUBLIC_KEY_PINS` 为空时，仅记录警告，回退到默认 CA 验证
+- ISSUES.md C1 (已从 Critical 降级至 Medium): `MQTT_TRUST_ALL_CERTS` 在 debug 模式下默认为 true，但运行时检查现在可防止生产环境使用不安全配置
+- ISSUES.md H8: 当 `MQTT_TLS_PUBLIC_KEY_PINS` 为空时，仅记录警告，回退到默认 CA 验证
 - 证书固定需要定期更新配置（证书轮换时）
 
 **安全注意事项**:
@@ -259,10 +244,10 @@ private fun connectUsingLegacyConfig(ssid: String, password: String?, securityTy
 - 可以强制连接到指定网络
 
 **负面**:
-- ISSUE M7/A1: `WifiConfiguration` API 在 Android 10+ 上已被废弃
+- ISSUES.md N13: `WifiConfiguration` API 在 Android 10+ 上已被废弃
 - Android 10+ 对后台应用启动 WiFi 连接有限制，可能需要用户手动确认
-- 某些厂商 ROM（小米、华为等）可能有额外限制（ISSUE A3）
-- 随机 MAC 地址功能未处理（ISSUE M20）
+- 某些厂商 ROM（小米、华为等）可能有额外限制（KNOWN_LIMITATIONS.md L-TECH-02）
+- 随机 MAC 地址功能未处理（ISSUES.md N13）
 
 **关联限制**:
 - KNOWN_LIMITATIONS.md L-IPV6-08: WiFi连接信息仅获取IPv4地址
@@ -303,10 +288,8 @@ private fun connectUsingLegacyConfig(ssid: String, password: String?, securityTy
 | 日期 | 变更内容 | 变更人 |
 |------|----------|--------|
 | 2026-03-31 | 初始创建，从原ISSUES.md和代码注释中提取架构决策 | AI Agent |
-| 2026-03-31 | 错误引用修正：修正ADR-002中关于接口名称的描述，与TECH_DEBT.md中ISSUE-014保持一致 | AI Agent |
-| 2026-03-31 | 关联引用添加：为每个ADR添加关联的ISSUE/限制引用（如ADR-001关联L12，ADR-003关联C3等） | AI Agent |
-| 2026-03-31 | 路线图更新：新增决策演进路线图表格，明确各决策的当前状态、建议行动、优先级和时间线 | AI Agent |
-| 2026-03-31 | ADR修正：ADR-002接口名称修正为CommunicationCommandHandler/CommunicationQueryHandler；ADR-003代码示例补充reverseIpMap和IP耗尽处理；ADR-005状态更新为"已改进"，描述双路径实现 | AI Agent |
+| 2026-03-31 | 初始创建，从原ISSUES.md和代码注释中提取架构决策 | AI Agent |
+| 2026-05-03 | 修正ISSUE引用：ADR-002的ISSUE-014改为ISSUES.md N4/N1；ADR-003的ISSUE C3改为ISSUES.md H17；ADR-004的ISSUE H7改为ISSUES.md H8；ADR-005的ISSUE M7/A1改为ISSUES.md N13，ISSUE M20改为ISSUES.md N13；删除不存在的ISSUE L12/L17引用；更新ADR-003代码示例与实际实现一致 | AI Agent (Kimi-K2.6) |
 
 ---
 
