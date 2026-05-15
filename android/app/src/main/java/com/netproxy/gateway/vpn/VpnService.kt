@@ -208,16 +208,17 @@ class GatewayVpnService : AndroidVpnService() {
             builder.setConfigureIntent(configureIntent)
 
             vpnInterface = builder.establish()
-            
+
             if (vpnInterface != null) {
-                _status.value = VpnStatus(state = VpnState.RUNNING)
-                
                 // 初始化SOCKS5连接池
                 initializeConnectionPool()
-                
+
                 // 初始化TUN输出流用于回包注入
                 vpnOutputStream = FileOutputStream(vpnInterface!!.fileDescriptor)
-                
+
+                // 所有资源就绪后再更新状态为 RUNNING
+                _status.value = VpnStatus(state = VpnState.RUNNING)
+
                 // 启动TUN读取协程
                 serviceScope?.launch {
                     processVpnTraffic()
@@ -227,7 +228,7 @@ class GatewayVpnService : AndroidVpnService() {
                 serviceScope?.launch {
                     processReturnTraffic()
                 }
-                
+
                 startProxyService()
             } else {
                 _status.value = VpnStatus(
@@ -610,7 +611,12 @@ class GatewayVpnService : AndroidVpnService() {
                         return false
                     }
                     // 注入TUN
-                    injectPacket(buffer, packetLen)
+                    if (!injectPacket(buffer, packetLen)) {
+                        logger.warn("Failed to inject TCP return packet for ${redactConnectionKey(sessionKey)}, closing session")
+                        socks5ConnectionPool?.returnConnection(pooledConn)
+                        activeConnections.remove(sessionKey)
+                        return false
+                    }
                     session.updateActivity()
                     return true
                 }
@@ -789,12 +795,20 @@ class GatewayVpnService : AndroidVpnService() {
     /**
      * 注入包到TUN接口
      */
-    private fun injectPacket(packet: ByteArray, length: Int) {
-        try {
-            vpnOutputStream?.write(packet, 0, length)
-            vpnOutputStream?.flush()
+    private fun injectPacket(packet: ByteArray, length: Int): Boolean {
+        return try {
+            val stream = vpnOutputStream
+            if (stream == null) {
+                logger.warn("vpnOutputStream is null, cannot inject packet")
+                false
+            } else {
+                stream.write(packet, 0, length)
+                stream.flush()
+                true
+            }
         } catch (e: Exception) {
             logger.error("Failed to inject packet to TUN", e)
+            false
         }
     }
     
