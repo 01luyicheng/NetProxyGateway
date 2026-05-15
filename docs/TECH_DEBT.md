@@ -292,12 +292,11 @@
 
 ## 新增问题（待分类）
 
-### C28: VpnService processVpnTraffic FileInputStream未关闭
-- **提交哈希**: 1f9acee
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L243-L264)
-- **问题描述**: `FileInputStream` 在 `processVpnTraffic()` 中打开，但在 catch 块或正常退出时均未被关闭，存在资源泄漏风险
-- **风险**: 中。VPN 停止后文件描述符可能未释放
-- **修复难度**: 低。使用 `use` 块或在 finally 中关闭
+### C28: VpnService processVpnTraffic FileInputStream未关闭 [已修复]
+- **状态**: 已修复
+- **修复提交**: 8398c13 (Agent: SOLO, 2026-05-15)
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt`
+- **修复方式**: 使用 `FileInputStream.use` 块确保流在退出时被正确关闭
 
 ### C29: VpnService forwardViaWifi TCP无响应读取
 - **提交哈希**: 1f9acee
@@ -313,19 +312,17 @@
 - **风险**: 中。影响 `activeConnections` 的并发访问性能
 - **修复难度**: 中。将过期连接收集到列表后移出锁范围再清理
 
-### C31: VpnService startVpn状态与资源初始化顺序不一致
-- **提交哈希**: 1f9acee
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L207-L216)
-- **问题描述**: `vpnInterface` 建立成功后先设状态为 `RUNNING`，然后才创建 `vpnOutputStream`。若 `FileOutputStream` 构造失败，状态已是 RUNNING 但输出流为 null
-- **风险**: 中。状态与实际资源不一致，后续 `injectPacket` 静默失败
-- **修复难度**: 低。先初始化所有资源再更新状态
+### C31: VpnService startVpn状态与资源初始化顺序不一致 [已修复]
+- **状态**: 已修复
+- **修复提交**: bd36914 (Agent: SOLO, 2026-05-15)
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt`
+- **修复方式**: `startVpn()` 中先初始化所有资源（`initializeConnectionPool()`、`vpnOutputStream`）再更新状态为 `RUNNING`
 
-### C32: VpnService injectPacket静默丢弃注入失败
-- **提交哈希**: 1f9acee
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L797-L804)
-- **问题描述**: `vpnOutputStream` 为 null 时静默捕获异常，调用方无法感知注入失败。TCP 回包丢失但连接会话仍保持活跃，上层应用超时等待响应
-- **风险**: 中。TCP 连接异常但无错误反馈
-- **修复难度**: 中。返回注入结果，调用方根据结果清理无效会话
+### C32: VpnService injectPacket静默丢弃注入失败 [已修复]
+- **状态**: 已修复
+- **修复提交**: bd36914 (Agent: SOLO, 2026-05-15)
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt`
+- **修复方式**: `injectPacket()` 返回 `Boolean`，调用方在注入失败时清理无效会话
 
 ### C33: VpnService processReturnTraffic遍历视图不一致
 - **提交哈希**: 1f9acee
