@@ -246,23 +246,24 @@ class GatewayVpnService : AndroidVpnService() {
 
     private suspend fun processVpnTraffic() {
         val vpnFd = vpnInterface ?: return
-        val inputStream = FileInputStream(vpnFd.fileDescriptor)
 
-        try {
-            while (_status.value.state == VpnState.RUNNING) {
-                val length = inputStream.read(packetBuffer)
-                if (length > 0) {
-                    processPacket(packetBuffer, length)
-                    cleanupStaleConnections()
+        FileInputStream(vpnFd.fileDescriptor).use { inputStream ->
+            try {
+                while (_status.value.state == VpnState.RUNNING) {
+                    val length = inputStream.read(packetBuffer)
+                    if (length > 0) {
+                        processPacket(packetBuffer, length)
+                        cleanupStaleConnections()
+                    }
                 }
-            }
-        } catch (e: Exception) {
-            if (_status.value.state == VpnState.RUNNING) {
-                logger.error("VPN traffic loop failed", e)
-                _status.value = VpnStatus(
-                    state = VpnState.ERROR,
-                    errorMessage = e.message
-                )
+            } catch (e: Exception) {
+                if (_status.value.state == VpnState.RUNNING) {
+                    logger.error("VPN traffic loop failed", e)
+                    _status.value = VpnStatus(
+                        state = VpnState.ERROR,
+                        errorMessage = e.message
+                    )
+                }
             }
         }
     }
