@@ -153,7 +153,7 @@ class Socks5ConnectionPool(
             poolLock.write {
                 invalidConnections.forEach { conn ->
                     // Re-check in use state under write lock to avoid racing with a concurrent borrow.
-                    if (!conn.inUse.get() && allConnections.remove(conn) != null) {
+                    if (!conn.inUse.get() && !conn.isValid() && allConnections.remove(conn) != null) {
                         totalConnections.decrementAndGet()
                         conn.close()
                     }
@@ -227,6 +227,7 @@ class Socks5ConnectionPool(
         protectSocket: ((Socket) -> Unit)?
     ): PooledSocks5Connection? {
         // 使用 try-finally 确保连接计数一致性
+        var slotReserved = false
         var connectionEstablished = false
         var trackedConnection: PooledSocks5Connection? = null
 
@@ -235,6 +236,7 @@ class Socks5ConnectionPool(
                 logger.warn("Connection pool exhausted, max=$config.maxConnections")
                 return null
             }
+            slotReserved = true
 
             val credentials = credentialProvider()
             if (credentials == null) {
@@ -262,7 +264,7 @@ class Socks5ConnectionPool(
             return null
         } finally {
             // 统一在 finally 块中管理连接计数，确保一致性
-            if (!connectionEstablished) {
+            if (slotReserved && !connectionEstablished) {
                 totalConnections.decrementAndGet()
             }
         }

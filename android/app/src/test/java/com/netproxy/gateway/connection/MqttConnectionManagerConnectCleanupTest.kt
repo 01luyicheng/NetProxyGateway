@@ -68,8 +68,8 @@ class MqttConnectionManagerConnectCleanupTest {
         // 1. 本测试模拟的是 connect() 调用时抛出异常，此时客户端已创建成功，localClient 不为 null
         // 2. 异常处理逻辑会在 localClient != null 时调用 disconnect() 和 close()
         // 3. mqttClient 引用会被清除（如果 mqttClient === clientToClose）
-        verify { anyConstructed<MqttClient>().disconnect() }
-        verify { anyConstructed<MqttClient>().close() }
+        verify(timeout = 1_000) { anyConstructed<MqttClient>().disconnect() }
+        verify(timeout = 1_000) { anyConstructed<MqttClient>().close() }
         assertNull(manager.getPrivateMqttClient())
     }
 

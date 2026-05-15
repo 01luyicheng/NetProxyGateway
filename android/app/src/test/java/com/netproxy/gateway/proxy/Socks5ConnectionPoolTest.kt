@@ -4,6 +4,7 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.InputStream
@@ -13,9 +14,93 @@ import java.net.Socket
 import java.net.SocketTimeoutException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.locks.ReentrantReadWriteLock
 
 class Socks5ConnectionPoolTest {
+
+    @Test
+    fun borrowConnection_cleanupInvalidConnections_doesNotCloseValidConnectionWhenInUseFlips() {
+        val socket = mockValidSocket()
+        val pool = Socks5ConnectionPool(
+            config = Socks5ConnectionPoolConfig(
+                maxConnections = 0,
+                cleanupIntervalMs = 60_000
+            ),
+            credentialProvider = { null }
+        )
+
+        try {
+            val destinationIp = "10.0.0.9"
+            val destinationPort = 443
+            val destKey = "$destinationIp:$destinationPort"
+
+            val connection = PooledSocks5Connection(
+                socket = socket,
+                destinationIp = destinationIp,
+                destinationPort = destinationPort
+            ).also {
+                it.inUse.set(true)
+            }
+
+            val poolLock = getPrivateField<ReentrantReadWriteLock>(pool, "poolLock")
+            val allConnections = getPrivateField<ConcurrentHashMap<PooledSocks5Connection, String>>(
+                pool,
+                "allConnections"
+            )
+            val availableConnections =
+                getPrivateField<ConcurrentHashMap<String, LinkedBlockingQueue<PooledSocks5Connection>>>(
+                    pool,
+                    "availableConnections"
+                )
+            val totalConnections = getPrivateField<AtomicInteger>(pool, "totalConnections")
+
+            poolLock.writeLock().lock()
+            try {
+                totalConnections.set(1)
+                allConnections[connection] = destKey
+                availableConnections[destKey] = LinkedBlockingQueue<PooledSocks5Connection>().apply {
+                    offer(connection)
+                }
+            } finally {
+                poolLock.writeLock().unlock()
+            }
+
+            // Hold a read lock so the borrow path can complete its read phase but is forced
+            // to wait before acquiring the write lock for cleanup.
+            poolLock.readLock().lock()
+            val borrowThread = Thread {
+                pool.borrowConnection(destinationIp, destinationPort)
+            }
+            try {
+                borrowThread.start()
+
+                val queue = availableConnections[destKey]
+                    ?: throw AssertionError("Expected destination queue to exist")
+
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+                while (queue.isNotEmpty() && System.nanoTime() < deadline) {
+                    Thread.yield()
+                }
+                assertTrue("Expected borrow thread to poll the connection", queue.isEmpty())
+
+                // Simulate the connection becoming available again before cleanup runs.
+                connection.inUse.set(false)
+            } finally {
+                poolLock.readLock().unlock()
+            }
+
+            borrowThread.join(2_000)
+            if (borrowThread.isAlive) {
+                borrowThread.interrupt()
+            }
+            assertFalse("Expected borrow thread to finish", borrowThread.isAlive)
+            verify(exactly = 0) { socket.close() }
+        } finally {
+            pool.shutdown()
+        }
+    }
 
     @Test
     fun cleanupIdleConnections_removesOnlyIdleConnections() {
@@ -188,6 +273,27 @@ class Socks5ConnectionPoolTest {
             val shouldReserve = method.invoke(pool) as Boolean
             assertTrue(shouldReserve)
             assertEquals(1, totalConnections.get())
+        } finally {
+            pool.shutdown()
+        }
+    }
+
+    @Test
+    fun borrowConnection_whenPoolExhausted_doesNotDecrementTotalConnections() {
+        val pool = Socks5ConnectionPool(
+            config = Socks5ConnectionPoolConfig(
+                maxConnections = 0,
+                cleanupIntervalMs = 60_000
+            ),
+            credentialProvider = { null }
+        )
+
+        try {
+            val result = pool.borrowConnection("10.0.0.1", 443)
+            assertEquals(null, result)
+
+            val totalConnections = getPrivateField<AtomicInteger>(pool, "totalConnections")
+            assertEquals(0, totalConnections.get())
         } finally {
             pool.shutdown()
         }
