@@ -279,60 +279,15 @@
   ```
 
 ### H10: VpnService stopVpn() 竞态条件
-- **状态**: 待修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L930-972)
-- **问题验证**:
-  - `isStopping` 原子标志与 `_status` StateFlow 是两个独立的状态源
-  - 线程A通过CAS设置`isStopping=true`后，线程B可能修改`_status`状态
-  - 在L933读取isStopping和L939读取_status之间存在时间窗口
-  - `finally`块中重置`isStopping`，但状态可能已被其他线程改变
-- **竞态场景**:
-  ```
-  T1: 线程A CAS成功 isStopping=true, _status=RUNNING
-  T2: 线程B CAS失败返回
-  T3: 线程A在L939前被挂起
-  T4: 其他代码修改 _status=STOPPING
-  T5: 线程A读取 currentState=STOPPING，重置isStopping=false并返回
-  T6: 线程B现在可以CAS成功，重复执行停止逻辑
-  ```
-- **风险**: 中。可能导致重复执行停止逻辑，状态不一致
-- **触发条件**: 快速连续调用stopVpn()、onRevoke()和手动停止并发、系统回收与手动停止并发
-- **代码分析**:
-  ```kotlin
-  // L930-972: 问题代码
-  private fun stopVpn() {
-      if (!isStopping.compareAndSet(false, true)) return  // L933: 获取标志
-      
-      val currentState = _status.value.state  // L939: 读取状态 - 可能已被其他线程修改
-      if (currentState == VpnState.STOPPED || currentState == VpnState.STOPPING) {
-          isStopping.set(false)
-          return
-      }
-      // ... 清理操作
-  }
-  ```
-- **建议修复**:
-  ```kotlin
-  private fun stopVpn() {
-      // 先读取当前状态
-      val currentState = _status.value.state
-      if (currentState == VpnState.STOPPED || currentState == VpnState.STOPPING) {
-          return
-      }
-      
-      // 再尝试设置停止标志
-      if (!isStopping.compareAndSet(false, true)) {
-          return
-      }
-      
-      // 双重检查
-      if (_status.value.state == VpnState.STOPPED) {
-          isStopping.set(false)
-          return
-      }
-      // ...
-  }
-  ```
+- **状态**: 已修复
+- **修复提交**: (Agent: SOLO, 2026-05-15)
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt`
+- **问题**: `isStopping` 原子标志与 `_status` StateFlow 是两个独立的状态源，存在竞态窗口
+- **修复方式**:
+  1. `stopVpn()` 中采用"先读状态再CAS再双重检查"模式：先检查 `_status` 是否为 STOPPED/STOPPING，再通过 `isStopping.compareAndSet` 确保互斥，CAS 成功后再次确认状态
+  2. `onDestroy()` 中不再使用 `isStopping.compareAndSet` 判断 stopVpn 是否被调用，改为直接读取 `_status.value.state`
+  3. `startVpn()` 中增加 `isStopping.get()` 检查，防止停止过程中启动
+- **验证**: `make android-test` 通过
 
 ### H11: writeBufferPool 线程安全问题
 - **状态**: 已修复

@@ -168,7 +168,13 @@ class GatewayVpnService : AndroidVpnService() {
         if (_status.value.state == VpnState.RUNNING) {
             return
         }
-        
+
+        // 如果正在停止，等待停止完成后再启动
+        if (isStopping.get()) {
+            logger.warn("Cannot start VPN while stopping")
+            return
+        }
+
         // 重置停止标志，允许新的停止流程
         isStopping.set(false)
         // 重置清理标志，允许新的清理流程
@@ -982,52 +988,46 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     private fun stopVpn() {
-        // 使用单一原子操作：先尝试设置停止标志，只有成功才继续
-        // 这确保了"检查是否正在停止"和"标记为正在停止"是原子性的
-        if (!isStopping.compareAndSet(false, true)) {
-            // 已经在停止过程中，直接返回
+        // 先读取当前状态，避免在已经停止的状态下继续执行
+        val currentState = _status.value.state
+        if (currentState == VpnState.STOPPED || currentState == VpnState.STOPPING) {
             return
         }
 
-        // 获取当前状态并检查
-        val currentState = _status.value.state
-        if (currentState == VpnState.STOPPED || currentState == VpnState.STOPPING) {
-            // 已经停止或正在停止，重置标志并返回
+        // 使用 CAS 确保只有一个线程能执行停止逻辑
+        if (!isStopping.compareAndSet(false, true)) {
+            return
+        }
+
+        // 双重检查：CAS 成功后再次确认状态，防止 CAS 前状态被其他线程改变
+        if (_status.value.state == VpnState.STOPPED) {
             isStopping.set(false)
             return
         }
 
         try {
             // 立即更新状态为 STOPPING，通知其他观察者服务正在停止
-            // 这可以防止其他线程误判服务状态，避免在停止过程中发起新操作
             _status.value = VpnStatus(state = VpnState.STOPPING)
 
             // 先取消协程作用域，停止所有后台任务
-            // 这会导致阻塞在 inputStream.read() 的协程抛出 CancellationException
             serviceScope?.cancel()
             serviceScope = null
 
-            // 清理资源
+            // 清理资源（内部有 isCleaningUp 保护，确保只执行一次）
             cleanupVpnResources()
 
             stopProxyService()
 
             // stopForeground() 让服务脱离前台状态，但不停止服务本身
-            // STOP_FOREGROUND_REMOVE: 移除通知并从 FOREGROUND 状态移除（服务变为普通后台服务）
-            // STOP_FOREGROUND_DETACH: 保留通知但从 FOREGROUND 状态移除（Android 12+ 行为）
             stopForeground(STOP_FOREGROUND_REMOVE)
 
             // 所有资源清理完成后，更新状态为 STOPPED
             _status.value = VpnStatus(state = VpnState.STOPPED)
         } finally {
-            // 无论成功与否，重置停止标志，允许下次停止操作
-            // 注意：这里重置标志，配合 startVpn() 中的重置，确保状态一致性
+            // 重置停止标志，允许下次停止操作
+            // startVpn() 中也会重置，双重保险确保状态一致性
             isStopping.set(false)
         }
-
-        // 注意：不调用 stopSelf()，让系统自动管理服务生命周期
-        // 调用 stopSelf() 会触发 onDestroy()，而 onDestroy() 中也包含清理逻辑
-        // 虽然 isStopping 标志可以防止重复执行，但移除 stopSelf() 可以完全避免潜在的循环调用风险
     }
 
     /**
@@ -1101,11 +1101,11 @@ class GatewayVpnService : AndroidVpnService() {
 
     override fun onDestroy() {
         // onDestroy() 由系统在服务停止时调用
-        // 注意：不要在这里调用 stopVpn()，因为 stopVpn() 会调用 stopSelf() 再次触发 onDestroy() 造成循环
-        // 因此直接执行资源清理，避免重复停止逻辑
+        // 不要在这里调用 stopVpn()，避免循环调用
 
-        // 检查 stopVpn() 是否已被调用过
-        val stopVpnNotCalled = isStopping.compareAndSet(false, true)
+        // 使用 _status 判断 stopVpn() 是否已被调用过
+        val currentState = _status.value.state
+        val stopVpnNotCalled = currentState != VpnState.STOPPED && currentState != VpnState.STOPPING
 
         if (stopVpnNotCalled) {
             // stopVpn() 没有被调用过（如系统强制回收服务），需要兜底清理资源
@@ -1126,11 +1126,6 @@ class GatewayVpnService : AndroidVpnService() {
 
         // H27: 注销语言变更监听
         unregisterLanguageChangeListener()
-
-        // 重置 isStopping 标志，避免影响后续服务重启
-        if (stopVpnNotCalled) {
-            isStopping.set(false)
-        }
 
         super.onDestroy()
     }
