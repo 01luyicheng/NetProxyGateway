@@ -19,6 +19,7 @@ import java.util.concurrent.TimeUnit
 object EmulatorDetector {
 
     private const val TAG = "EmulatorDetector"
+    private const val PROCESS_TIMEOUT_SECONDS = 3L
 
     private val EMULATOR_PHONE_NUMBERS = setOf(
         "15555215554",
@@ -294,7 +295,7 @@ object EmulatorDetector {
                 val process = Runtime.getRuntime().exec(arrayOf("getprop", prop))
                 BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
                     val value = reader.readLine()
-                    val finished = process.waitFor(3, TimeUnit.SECONDS)
+                    val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                     if (!finished) {
                         process.destroy()
                         return@use

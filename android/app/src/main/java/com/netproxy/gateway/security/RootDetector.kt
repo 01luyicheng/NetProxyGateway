@@ -15,6 +15,7 @@ import java.util.concurrent.TimeUnit
 object RootDetector {
 
     private const val TAG = "RootDetector"
+    private const val PROCESS_TIMEOUT_SECONDS = 3L
 
     // 已知的 Root 管理应用包名
     private val ROOT_PACKAGES = arrayOf(
@@ -206,7 +207,7 @@ object RootDetector {
             val process = Runtime.getRuntime().exec(arrayOf("which", "busybox"))
             BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
                 val result = reader.readLine()
-                val finished = process.waitFor(3, TimeUnit.SECONDS)
+                val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                 if (!finished) {
                     process.destroy()
                 }
@@ -246,7 +247,7 @@ object RootDetector {
                 val process = Runtime.getRuntime().exec(arrayOf("getprop", prop))
                 BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
                     val value = reader.readLine()
-                    val finished = process.waitFor(3, TimeUnit.SECONDS)
+                    val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                     if (!finished) {
                         process.destroy()
                         return@use
@@ -320,7 +321,7 @@ object RootDetector {
                 val process = Runtime.getRuntime().exec(arrayOf("getprop", key))
                 BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
                     val value = reader.readLine()
-                    val finished = process.waitFor(3, TimeUnit.SECONDS)
+                    val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                     if (!finished) {
                         process.destroy()
                         return@use
@@ -367,7 +368,7 @@ object RootDetector {
             val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
             BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
                 val output = reader.readLine()
-                val finished = process.waitFor(3, TimeUnit.SECONDS)
+                val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                 if (!finished) {
                     process.destroy()
                 }
