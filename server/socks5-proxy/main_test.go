@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -859,5 +860,75 @@ func TestConnectThroughTunnel_ReturnsErrorWhenStreamIDGenerationFails(t *testing
 	defer tc.mu.RUnlock()
 	if len(tc.streams) != 0 {
 		t.Fatalf("expected no streams to be created on stream id generation failure, got %d", len(tc.streams))
+	}
+}
+
+func TestStreamConn_ReadConcurrent(t *testing.T) {
+	conn := &StreamConn{
+		DataChan:      make(chan []byte, 10),
+		CloseChan:     make(chan struct{}),
+		Connected:     make(chan bool, 1),
+		tunnelWriteMu: &sync.Mutex{},
+	}
+
+	chunks := []string{"chunk0", "chunk1", "chunk2", "chunk3", "chunk4"}
+	for _, c := range chunks {
+		conn.DataChan <- []byte(c)
+	}
+
+	const numReaders = 5
+	const bufSize = 10
+
+	var wg sync.WaitGroup
+	results := make([][]byte, numReaders)
+	errCh := make(chan error, numReaders)
+
+	for i := 0; i < numReaders; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			var buf bytes.Buffer
+			readBuf := make([]byte, bufSize)
+			for {
+				n, err := conn.Read(readBuf)
+				if err != nil {
+					if err == io.EOF {
+						break
+					}
+					errCh <- err
+					return
+				}
+				if n > 0 {
+					buf.Write(readBuf[:n])
+				}
+			}
+			results[idx] = buf.Bytes()
+		}(i)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	close(conn.CloseChan)
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(errCh)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for readers")
+	}
+
+	for err := range errCh {
+		t.Fatalf("unexpected read error: %v", err)
+	}
+
+	select {
+	case remaining := <-conn.DataChan:
+		t.Fatalf("expected all data to be consumed, got: %q", remaining)
+	default:
 	}
 }
