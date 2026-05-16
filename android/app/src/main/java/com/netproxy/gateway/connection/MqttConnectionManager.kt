@@ -63,6 +63,8 @@ class MqttConnectionManager @Inject constructor(
         private const val MAX_RECONNECT_DELAY = 60000L
         private const val RECONNECT_BACKOFF_MULTIPLIER = 2
         private const val MAX_HEARTBEAT_FAILURES = 3
+
+        private val secureRandom by lazy { SecureRandom() }
     }
 
     @Volatile private var mqttClient: MqttClient? = null
@@ -190,6 +192,15 @@ class MqttConnectionManager @Inject constructor(
     }
 
     /**
+     * 统一创建 TLS 1.2 SSLContext
+     */
+    private fun createSSLContext(trustManagers: Array<TrustManager>?): SSLContext {
+        val sslContext = SSLContext.getInstance("TLSv1.2")
+        sslContext.init(null, trustManagers, SecureRandom())
+        return sslContext
+    }
+
+    /**
      * release 构建：使用系统默认 CA 证书验证
      * 安全特性：
      * - 使用 TLS 1.2（兼容 Android 5.0+）
@@ -226,10 +237,7 @@ class MqttConnectionManager @Inject constructor(
             rawPins = BuildConfig.MQTT_TLS_PUBLIC_KEY_PINS
         )
 
-        // 显式指定 TLS 1.2（Android 5.0+ 支持）
-        val sslContext = SSLContext.getInstance("TLSv1.2")
-        sslContext.init(null, arrayOf<TrustManager>(pinningTrustManager), SecureRandom())
-        return sslContext.socketFactory
+        return createSSLContext(arrayOf<TrustManager>(pinningTrustManager)).socketFactory
     }
 
     /**
@@ -248,10 +256,7 @@ class MqttConnectionManager @Inject constructor(
             }
             override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
         })
-        // 显式指定 TLS 1.2
-        val sslContext = SSLContext.getInstance("TLSv1.2")
-        sslContext.init(null, trustAllCerts, SecureRandom())
-        return sslContext.socketFactory
+        return createSSLContext(trustAllCerts).socketFactory
     }
 
     fun connect(deviceId: String, authToken: String) {
