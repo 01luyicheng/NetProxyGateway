@@ -292,7 +292,7 @@
 ### H11: writeBufferPool 线程安全问题
 - **状态**: 已修复
 - **修复提交**: d01ddd1
-- **修复方式**: 使用ThreadLocal替代共享缓冲区池，每个线程拥有独立缓冲区
+- **修复方式**: 使用局部变量替代共享缓冲区池，彻底消除线程安全问题
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L120-122, L619-622)
 - **问题验证**:
   - `getAndIncrement() % writeBufferPool.size` 不是原子操作
@@ -317,30 +317,7 @@
       return writeBufferPool[index]  // 可能抛出负数索引异常
   }
   ```
-- **建议修复**:
-  ```kotlin
-  // 方案1: 使用ThreadLocal（推荐）
-  private val writeBuffer = ThreadLocal<ByteArray>()
-  
-  private fun getWriteBuffer(): ByteArray {
-      return writeBuffer.get() ?: ByteArray(PACKET_BUFFER_SIZE).also {
-          writeBuffer.set(it)
-      }
-  }
-  
-  // 方案2: 使用同步块
-  @Synchronized
-  private fun getWriteBuffer(): ByteArray {
-      val index = writeBufferIndex.getAndIncrement() % writeBufferPool.size
-      return writeBufferPool[index]
-  }
-  
-  // 方案3: 修复整数溢出（如果保留原方案）
-  private fun getWriteBuffer(): ByteArray {
-      val index = (writeBufferIndex.getAndIncrement().toLong() and 0xFFFFFFFFL % writeBufferPool.size).toInt()
-      return writeBufferPool[index]
-  }
-  ```
+- **最终方案**: 见 [N54](#n54-vpnservice-threadlocal-writebufferremove-抵消缓冲区复用价值)。`processReturnTraffic` 是单协程顺序执行，同一时刻只有一个 `processTcpReturn` 在执行，直接使用局部变量 `val buffer = ByteArray(PACKET_BUFFER_SIZE)` 更简单安全，无需缓冲区复用或 ThreadLocal。
 
 ### H12: activeConnections 复合操作非原子
 - **状态**: 待修复
@@ -617,13 +594,11 @@
 - **修复状态**: 已修复
 
 ### N52: VpnService ThreadLocal writeBuffer 在 IO 线程池上长期滞留
-- **状态**: 已修复（通过N54替代方案）
+- **状态**: 中间发现（最终方案见 N54）
 - **提交哈希**: d01ddd1
 - **位置**: `VpnService.kt processTcpReturn() 方法内`
-- **问题描述**: H11 修复将共享缓冲区池替换为 `ThreadLocal<ByteArray>`，但初始实现未清理当前线程中的缓冲区引用。`Dispatchers.IO` 使用进程级线程池，工作线程可能在服务停止后继续驻留该缓冲区引用。
-- **风险**: 中。会形成线程池工作线程上的缓冲区驻留/滞留
-- **修复**: 将 ThreadLocal 替换为局部变量 `val buffer = ByteArray(PACKET_BUFFER_SIZE)`，彻底消除线程池滞留风险
-- **修复状态**: 已修复
+- **问题描述**: H11 修复的中间方案将共享缓冲区池替换为 `ThreadLocal<ByteArray>`，但发现 `Dispatchers.IO` 线程池会导致缓冲区长期滞留。此条目仅记录中间分析过程，最终未采用 ThreadLocal 方案。
+- **最终方案**: 见 [N54](#n54-vpnservice-threadlocal-writebufferremove-抵消缓冲区复用价值) —— 直接使用局部变量 `val buffer = ByteArray(PACKET_BUFFER_SIZE)`，彻底消除线程安全和线程池滞留问题。
 
 ### N54: VpnService ThreadLocal writeBuffer.remove() 抵消缓冲区复用价值
 - **状态**: 已修复
