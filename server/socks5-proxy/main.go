@@ -41,6 +41,13 @@ func generateRandomStreamID() (string, error) {
 	return hex.EncodeToString(randomBytes), nil
 }
 
+// createSecureTLSConfig 创建基础安全TLS配置，设置最低TLS版本为1.2
+func createSecureTLSConfig() *tls.Config {
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+}
+
 // Config 服务配置
 type Config struct {
 	Addr           string
@@ -74,9 +81,7 @@ func NewAPISessionStore(apiEndpoint string, internalAPIKey string) *APISessionSt
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					MinVersion: tls.VersionTLS12,
-				},
+				TLSClientConfig: createSecureTLSConfig(),
 			},
 		},
 	}
@@ -522,18 +527,14 @@ func NewTunnelClient(tunnelEndpoint string) *TunnelClient {
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					MinVersion: tls.VersionTLS12,
-				},
+				TLSClientConfig: createSecureTLSConfig(),
 			},
 		},
 		wsDialer: &websocket.Dialer{
 			HandshakeTimeout: 10 * time.Second,
-			TLSClientConfig: &tls.Config{
-				MinVersion: tls.VersionTLS12,
-			},
-			ReadBufferSize:  64 * 1024,
-			WriteBufferSize: 64 * 1024,
+			TLSClientConfig:  createSecureTLSConfig(),
+			ReadBufferSize:   64 * 1024,
+			WriteBufferSize:  64 * 1024,
 		},
 		connections: make(map[string]*websocket.Conn),
 		dialing:     make(map[string]chan struct{}),
@@ -993,10 +994,8 @@ func (s *SOCKS5Server) Start() error {
 			return fmt.Errorf("failed to load TLS certificates: %v", err)
 		}
 
-		tlsConfig := &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS12,
-		}
+		tlsConfig := createSecureTLSConfig()
+		tlsConfig.Certificates = []tls.Certificate{cert}
 
 		s.listener = tls.NewListener(listener, tlsConfig)
 		log.Printf("SOCKS5 server with TLS starting on %s", s.config.Addr)
