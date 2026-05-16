@@ -15,6 +15,7 @@ import java.util.concurrent.TimeUnit
 object DebugDetector {
 
     private const val TAG = "DebugDetector"
+    private const val PROCESS_TIMEOUT_SECONDS = 3L
 
     // 常见调试器进程名
     private val DEBUGGER_PROCESS_NAMES = arrayOf(
@@ -185,24 +186,26 @@ object DebugDetector {
     fun checkDebuggerProcess(): Boolean {
         return try {
             val process = Runtime.getRuntime().exec(arrayOf("ps"))
-            BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
-                var line: String?
-
-                while (reader.readLine().also { line = it } != null) {
-                    val lowerLine = line?.lowercase() ?: continue
-                    for (debugger in DEBUGGER_PROCESS_NAMES) {
-                        if (lowerLine.contains(debugger)) {
-                            process.waitFor(3, TimeUnit.SECONDS).let { finished ->
-                                if (!finished) process.destroy()
+            try {
+                BufferedReader(InputStreamReader(process.errorStream)).use { errorReader ->
+                    while (errorReader.readLine() != null) {
+                        // 消费错误输出，避免阻塞
+                    }
+                }
+                BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
+                    var line: String?
+                    while (reader.readLine().also { line = it } != null) {
+                        val lowerLine = line?.lowercase() ?: continue
+                        for (debugger in DEBUGGER_PROCESS_NAMES) {
+                            if (lowerLine.contains(debugger)) {
+                                return true
                             }
-                            return true
                         }
                     }
                 }
-                val finished = process.waitFor(3, TimeUnit.SECONDS)
-                if (!finished) process.destroy()
-                // 未检测到调试器进程
                 false
+            } finally {
+                process.destroy()
             }
         } catch (e: Exception) {
             false
@@ -259,19 +262,27 @@ object DebugDetector {
         for (prop in debugProps) {
             try {
                 val process = Runtime.getRuntime().exec(arrayOf("getprop", prop))
-                BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
-                    val value = reader.readLine()
-                    val finished = process.waitFor(3, TimeUnit.SECONDS)
-                    if (!finished) {
-                        process.destroy()
-                        return@use
+                try {
+                    BufferedReader(InputStreamReader(process.errorStream)).use { errorReader ->
+                        while (errorReader.readLine() != null) {
+                            // 消费错误输出，避免阻塞
+                        }
                     }
+                    BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
+                        val value = reader.readLine()
+                        val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                        if (!finished) {
+                            return@use
+                        }
 
-                    when (prop) {
-                        "ro.debuggable" -> if (value == "1") return true
-                        "ro.secure" -> if (value == "0") return true
-                        "persist.sys.usb.config" -> if (value?.contains("adb") == true) return true
+                        when (prop) {
+                            "ro.debuggable" -> if (value == "1") return true
+                            "ro.secure" -> if (value == "0") return true
+                            "persist.sys.usb.config" -> if (value?.contains("adb") == true) return true
+                        }
                     }
+                } finally {
+                    process.destroy()
                 }
             } catch (e: Exception) {
                 // 忽略异常
@@ -286,21 +297,23 @@ object DebugDetector {
     fun checkJDWP(): Boolean {
         return try {
             val jdwpProcess = Runtime.getRuntime().exec(arrayOf("ps", "-A"))
-            BufferedReader(InputStreamReader(jdwpProcess.inputStream)).use { reader ->
-                var line: String?
-
-                while (reader.readLine().also { line = it } != null) {
-                    if (line?.contains("jdwp") == true) {
-                        jdwpProcess.waitFor(3, TimeUnit.SECONDS).let { finished ->
-                            if (!finished) jdwpProcess.destroy()
-                        }
-                        return true
+            try {
+                BufferedReader(InputStreamReader(jdwpProcess.errorStream)).use { errorReader ->
+                    while (errorReader.readLine() != null) {
+                        // 消费错误输出，避免阻塞
                     }
                 }
-                val finished = jdwpProcess.waitFor(3, TimeUnit.SECONDS)
-                if (!finished) jdwpProcess.destroy()
-                // 未检测到 JDWP 进程
+                BufferedReader(InputStreamReader(jdwpProcess.inputStream)).use { reader ->
+                    var line: String?
+                    while (reader.readLine().also { line = it } != null) {
+                        if (line?.contains("jdwp") == true) {
+                            return true
+                        }
+                    }
+                }
                 false
+            } finally {
+                jdwpProcess.destroy()
             }
         } catch (e: Exception) {
             false
@@ -332,22 +345,24 @@ object DebugDetector {
         // 检查 Frida 进程
         return try {
             val process = Runtime.getRuntime().exec(arrayOf("ps", "-A"))
-            BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
-                var line: String?
-
-                while (reader.readLine().also { line = it } != null) {
-                    val lowerLine = line?.lowercase() ?: continue
-                    if (lowerLine.contains("frida") || lowerLine.contains("gadget")) {
-                        process.waitFor(3, TimeUnit.SECONDS).let { finished ->
-                            if (!finished) process.destroy()
-                        }
-                        return true
+            try {
+                BufferedReader(InputStreamReader(process.errorStream)).use { errorReader ->
+                    while (errorReader.readLine() != null) {
+                        // 消费错误输出，避免阻塞
                     }
                 }
-                val finished = process.waitFor(3, TimeUnit.SECONDS)
-                if (!finished) process.destroy()
-                // 未检测到 Frida 进程
+                BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
+                    var line: String?
+                    while (reader.readLine().also { line = it } != null) {
+                        val lowerLine = line?.lowercase() ?: continue
+                        if (lowerLine.contains("frida") || lowerLine.contains("gadget")) {
+                            return true
+                        }
+                    }
+                }
                 false
+            } finally {
+                process.destroy()
             }
         } catch (e: Exception) {
             false
