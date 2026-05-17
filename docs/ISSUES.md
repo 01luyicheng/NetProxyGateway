@@ -590,4 +590,30 @@
 - **修复难度**: 中。需要引入非阻塞 I/O 或 select/poll 机制替代 available() 估计值判断
 - **关联问题**: N57
 
+---
+
+## 交叉审查发现（5 轮修复批次，提交 8129c4c..0708644）
+
+> 以下问题由批次结束后的交叉审查记录；**本轮不修复**，留待后续处理。
+
+### N59: M13 修复后首次连接失败的首轮重连延迟变为 10 秒
+- **提交哈希**: 4e965e2
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (`connect()` 的 `catch` 路径、`onReconnectAttemptFailed`)
+- **问题描述**: `onReconnectAttemptFailed()` 在**用户首次** `connect()` 失败时也会执行，将 `reconnectDelay` 从 5s 倍增为 10s 后再 `scheduleReconnect`。旧逻辑在 `scheduleReconnect` 内先 `delay(5s)` 再倍增，首次重连仍为 5s。行为回归：首次连接失败后的第一次自动重连由 5s 变为 10s。
+- **风险**: 低。仅影响首次连接失败场景的重连等待时间
+- **建议修复**: 仅在「已由 `scheduleReconnect` 触发过的重连尝试失败」时递增；或把递增移到 `scheduleReconnect` 内 `connect()` 返回失败之后
+
+### N60: N47 测试修复中 `runTest` 未共享 `testScope` 的调度器
+- **提交哈希**: 8129c4c
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/connection/MqttConnectionManagerConnectCleanupTest.kt`
+- **问题描述**: `MqttConnectionManager` 注入的是 `@Before` 中的 `TestScope(testDispatcher)`，但测试体使用无参 `runTest { advanceUntilIdle() }`，默认可能使用与 `testDispatcher` 不同的 `StandardTestDispatcher`。在部分 kotlinx-coroutines-test 版本/负载下，`advanceUntilIdle()` 可能无法排空 manager 协程，flaky 风险未完全消除。
+- **风险**: 中。测试套件仍可能偶发失败
+- **建议修复**: 改为 `runTest(testDispatcher) { testScope.advanceUntilIdle() }` 或让 manager 使用 `runTest` 提供的 scope
+
+### N61: ISSUES.md 与代码不同步（文档债务）
+- **提交哈希**: 0708644（审查锚点）
+- **问题描述**: 下列条目在代码中已修复/已实现，但 ISSUES.md 仍标记为待修复：`L10`（tunnel `notifyDeviceStatus` 已有退避重试）、`N39`（`validateJWTSecret` 最小 32 字符）、`N55`（`DebugDetector` 已 `try-finally` + stderr drain）。易误导后续 Agent/人工审查。
+- **风险**: 低。重复劳动、优先级误判
+- **建议修复**: 删除或标为已修复并注明修复提交
+
 
