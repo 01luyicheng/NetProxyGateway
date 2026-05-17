@@ -60,6 +60,7 @@ class MqttConnectionManager @Inject constructor(
         private const val CLIENT_ID = "NetProxyGateway"
         private const val HEARTBEAT_INTERVAL = 30000L
         private const val CONNECTION_TIMEOUT_SECONDS = 10
+        private const val INITIAL_RECONNECT_DELAY = 5000L
         private const val MAX_RECONNECT_DELAY = 60000L
         private const val RECONNECT_BACKOFF_MULTIPLIER = 2
         private const val MAX_HEARTBEAT_FAILURES = 3
@@ -68,7 +69,7 @@ class MqttConnectionManager @Inject constructor(
     }
 
     @Volatile private var mqttClient: MqttClient? = null
-    private var reconnectDelay = 5000L
+    private var reconnectDelay = INITIAL_RECONNECT_DELAY
     private var reconnectJob: Job? = null
     private var heartbeatJob: Job? = null
     private var connectJob: Job? = null
@@ -385,7 +386,7 @@ class MqttConnectionManager @Inject constructor(
                     } else {
                         // 确认是当前有效连接，可以设置为 Connected
                         if (mqttClient === createdClient) {
-                            reconnectDelay = 5000L
+                            reconnectDelay = INITIAL_RECONNECT_DELAY
                             true
                         } else {
                             // mqttClient 已被其他线程替换，不设置状态
@@ -464,6 +465,7 @@ class MqttConnectionManager @Inject constructor(
                     }
                     _connectionState.value = MqttConnectionState.Error(e.message ?: "Connection failed")
                     if (shouldStayConnected) {
+                        onReconnectAttemptFailed()
                         scheduleReconnect(deviceId, authToken, generation)
                     }
                 }
@@ -475,6 +477,15 @@ class MqttConnectionManager @Inject constructor(
         jobToStart.start()
     }
 
+    private fun onReconnectAttemptFailed() {
+        synchronized(this) {
+            reconnectDelay = minOf(
+                reconnectDelay * RECONNECT_BACKOFF_MULTIPLIER,
+                MAX_RECONNECT_DELAY
+            )
+        }
+    }
+
     private fun scheduleReconnect(deviceId: String, authToken: String, generation: Long) {
         lateinit var jobToStart: Job
         synchronized(this@MqttConnectionManager) {
@@ -484,9 +495,6 @@ class MqttConnectionManager @Inject constructor(
                 delay(delayMs)
                 if (!shouldStayConnected || generation != connectionGeneration.get()) {
                     return@launch
-                }
-                synchronized(this@MqttConnectionManager) {
-                    reconnectDelay = minOf(reconnectDelay * RECONNECT_BACKOFF_MULTIPLIER, MAX_RECONNECT_DELAY)
                 }
                 connect(deviceId, authToken)
             }
@@ -538,6 +546,7 @@ class MqttConnectionManager @Inject constructor(
                     AppAuditLogStore.warn("MQTT", "Max heartbeat failures reached; reconnecting")
                     if (shouldStayConnected && generation == connectionGeneration.get()) {
                         _connectionState.value = MqttConnectionState.Error("Max heartbeat failures reached")
+                        onReconnectAttemptFailed()
                         scheduleReconnect(deviceId, authToken, generation)
                     }
                     break
@@ -626,7 +635,7 @@ class MqttConnectionManager @Inject constructor(
             heartbeatJob = null
             connectJob?.cancel()
             connectJob = null
-            reconnectDelay = 5000L
+            reconnectDelay = INITIAL_RECONNECT_DELAY
 
             val c = mqttClient
             mqttClient = null

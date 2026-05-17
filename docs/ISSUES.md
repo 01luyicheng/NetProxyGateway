@@ -239,37 +239,6 @@
 
 ## Medium Severity
 
-### M13: MQTT 重连延迟递增逻辑问题
-- **状态**: 待修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L311-L321)
-- **问题**: `scheduleReconnect` 方法在**重连前**就增加延迟（`reconnectDelay = minOf(reconnectDelay * 2, MAX_RECONNECT_DELAY)`），导致第一次重连的延迟是 10 秒而不是 5 秒。正确的逻辑应该是在重连**失败后**再增加延迟
-- **风险**: 低。会导致重连时间比预期更长，影响用户体验
-- **建议修复**:
-  1. 将延迟递增逻辑移到重连尝试之后
-  2. 或者在重连成功后重置延迟为初始值
-  3. 考虑使用指数退避算法的标准实现
-- **代码示例**:
-  ```kotlin
-  private fun scheduleReconnect(deviceId: String, authToken: String, generation: Long) {
-      reconnectJob?.cancel()
-      reconnectJob = scope.launch {
-          delay(reconnectDelay)
-          if (!shouldStayConnected || generation != connectionGeneration.get()) {
-              return@launch
-          }
-          
-          // 先重连
-          connect(deviceId, authToken)
-          
-          // 如果重连失败，再增加延迟（在 connect 方法中处理）
-          // 或者在重连成功后重置延迟
-          if (_connectionState.value == MqttConnectionState.Connected) {
-              reconnectDelay = INITIAL_RECONNECT_DELAY
-          }
-      }
-  }
-  ```
-
 ### H10: VpnService stopVpn() 竞态条件
 - **状态**: 已修复
 - **修复提交**: (Agent: SOLO, 2026-05-15)
