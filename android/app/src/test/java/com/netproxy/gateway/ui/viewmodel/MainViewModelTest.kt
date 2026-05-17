@@ -7,6 +7,7 @@ import com.netproxy.gateway.connection.MqttConnectionManager
 import com.netproxy.gateway.connection.MqttConnectionState
 import com.netproxy.gateway.connection.NetworkStateManager
 import com.netproxy.gateway.wifi.GatewayWifiManager
+import com.netproxy.gateway.wifi.WifiNetwork
 import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
@@ -14,8 +15,10 @@ import io.mockk.runs
 import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
@@ -122,5 +125,59 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         assertEquals("persisted-device-id", viewModel.uiState.value.deviceId)
+    }
+
+    @Test
+    fun scanWifi_updatesWifiNetworksFromScanResultsFlow() = runTest {
+        val cached = listOf(sampleWifiNetwork("cached"))
+        val fresh = listOf(sampleWifiNetwork("fresh"))
+        val scanFlow = MutableSharedFlow<List<WifiNetwork>>(replay = 1)
+        scanFlow.tryEmit(cached)
+
+        every { wifiManager.wifiScanResults } returns scanFlow
+        every { wifiManager.startScan() } answers {
+            backgroundScope.launch { scanFlow.emit(fresh) }
+            true
+        }
+
+        val viewModel = MainViewModel(context, networkStateManager, mqttConnectionManager, wifiManager, authSessionStore)
+
+        viewModel.scanWifi()
+        advanceUntilIdle()
+
+        assertEquals(fresh, viewModel.uiState.value.wifiNetworks)
+        verify(exactly = 1) { wifiManager.startScan() }
+    }
+
+    @Test
+    fun scanWifi_onTimeout_fallsBackToGetScanResults() = runTest {
+        val cached = listOf(sampleWifiNetwork("cached"))
+        val fallback = listOf(sampleWifiNetwork("fallback"))
+        val scanFlow = MutableSharedFlow<List<WifiNetwork>>(replay = 1)
+        scanFlow.tryEmit(cached)
+
+        every { wifiManager.wifiScanResults } returns scanFlow
+        every { wifiManager.startScan() } returns true
+        every { wifiManager.getScanResults() } returns fallback
+
+        val viewModel = MainViewModel(context, networkStateManager, mqttConnectionManager, wifiManager, authSessionStore)
+
+        viewModel.scanWifi()
+        testScheduler.advanceTimeBy(10_001)
+        advanceUntilIdle()
+
+        assertEquals(fallback, viewModel.uiState.value.wifiNetworks)
+        verify(exactly = 1) { wifiManager.getScanResults() }
+    }
+
+    private fun sampleWifiNetwork(ssid: String): WifiNetwork {
+        return WifiNetwork(
+            ssid = ssid,
+            bssid = "00:11:22:33:44:55",
+            signalStrength = -50,
+            frequency = 2437,
+            capabilities = "[WPA2-PSK-CCMP]",
+            isSecure = true
+        )
     }
 }

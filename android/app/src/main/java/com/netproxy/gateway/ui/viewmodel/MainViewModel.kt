@@ -17,11 +17,17 @@ import com.netproxy.gateway.wifi.WifiNetwork
 import com.netproxy.gateway.vpn.GatewayVpnService
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import java.security.SecureRandom
 import javax.inject.Inject
 
@@ -162,12 +168,21 @@ class MainViewModel @Inject constructor(
 
     fun scanWifi() {
         viewModelScope.launch {
-            wifiManager.startScan()
-            
-            kotlinx.coroutines.delay(2000)
-            
-            val results = wifiManager.getScanResults()
-            _uiState.update { it.copy(wifiNetworks = results) }
+            try {
+                val results = withTimeout(10_000) {
+                    coroutineScope {
+                        val deferred = async {
+                            wifiManager.wifiScanResults.drop(1).first()
+                        }
+                        wifiManager.startScan()
+                        deferred.await()
+                    }
+                }
+                _uiState.update { it.copy(wifiNetworks = results) }
+            } catch (_: TimeoutCancellationException) {
+                val fallback = wifiManager.getScanResults()
+                _uiState.update { it.copy(wifiNetworks = fallback) }
+            }
         }
     }
 
