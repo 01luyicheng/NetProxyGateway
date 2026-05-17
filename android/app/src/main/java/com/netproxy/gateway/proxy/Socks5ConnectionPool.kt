@@ -92,6 +92,15 @@ class Socks5ConnectionPool(
         private val SOCKS5_AUTH_VERSION = byteArrayOf(0x01)
         private val SOCKS5_CONNECT_HEADER = byteArrayOf(0x05, 0x01, 0x00, 0x01)
     }
+
+    init {
+        require(config.socketSoTimeoutMs > 0) {
+            "socketSoTimeoutMs must be positive (SOCKS5 handshake reads use Socket.soTimeout)"
+        }
+        require(config.connectionTimeoutMs > 0) {
+            "connectionTimeoutMs must be positive"
+        }
+    }
     
     private val totalConnections = AtomicInteger(0)
     private val poolLock = ReentrantReadWriteLock()

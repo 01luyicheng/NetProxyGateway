@@ -73,15 +73,6 @@
 - **修复**: 使用`Math.floorMod(nextVirtualIp.getAndIncrement(), MAX_IP - START_IP + 1) + START_IP`替代直接递增，与VpnService.kt中H11修复方式一致
 - **修复状态**: 已修复
 
-### H7: SOCKS5连接池读取未设置超时
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (L327-341)
-- **问题**: `readFully`方法没有设置超时，可能永久阻塞
-- **风险**: 线程被永久阻塞，连接池资源耗尽
-- **建议修复**:
-  1. 为socket读取操作设置超时
-  2. 使用带超时的读取方法
-  3. 添加心跳检测机制
-
 ### H8: MQTT TLS证书固定配置可能为空
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L131-138)
 - **问题**: 当`MQTT_TLS_PUBLIC_KEY_PINS`为空时，仅记录警告，仍使用默认CA验证

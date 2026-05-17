@@ -336,4 +336,12 @@ class Socks5ConnectionPoolTest {
         field.isAccessible = true
         return field.get(target) as T
     }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun init_rejectsZeroSocketSoTimeout() {
+        Socks5ConnectionPool(
+            config = Socks5ConnectionPoolConfig(socketSoTimeoutMs = 0),
+            credentialProvider = { null }
+        )
+    }
 }
