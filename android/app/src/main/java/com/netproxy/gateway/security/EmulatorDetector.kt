@@ -205,17 +205,7 @@ object EmulatorDetector {
             detectedMethods.add("cpuinfo")
         }
 
-        if (checkPhoneNumber(context)) {
-            detectedMethods.add("phone-number")
-        }
-
-        if (checkDeviceId(context)) {
-            detectedMethods.add("device-id")
-        }
-
-        if (checkImei(context)) {
-            detectedMethods.add("imei")
-        }
+        // Telephony-based checks omitted: unreliable on Android 10+ (restricted identifiers).
 
         if (checkQemuDrivers()) {
             detectedMethods.add("qemu-drivers")
@@ -368,7 +358,8 @@ object EmulatorDetector {
     }
 
     /**
-     * 检查电话号码（仅匹配已知模拟器默认号码）
+     * 检查电话号码（仅匹配已知模拟器默认号码）。
+     * 未纳入 [check]：Android 10+ 上 line1Number 常为空或不可信。
      */
     fun checkPhoneNumber(context: Context): Boolean {
         // 检查 READ_PHONE_STATE 权限
@@ -393,7 +384,8 @@ object EmulatorDetector {
     }
 
     /**
-     * 检查设备 ID
+     * 检查设备 ID。
+     * 未纳入 [check]：Android 10+ 上 getDeviceId 受限，真机亦可能为空/占位值。
      */
     @Suppress("DEPRECATION")
     fun checkDeviceId(context: Context): Boolean {
@@ -415,7 +407,8 @@ object EmulatorDetector {
     }
 
     /**
-     * 检查 IMEI
+     * 检查 IMEI。
+     * 未纳入 [check]：Android 10+ 上 IMEI 访问受限，易产生真机误报。
      */
     fun checkImei(context: Context): Boolean {
         // 检查 READ_PHONE_STATE 权限

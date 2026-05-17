@@ -80,4 +80,21 @@ class EmulatorDetectorTest {
 
         assertTrue(EmulatorDetector.checkPhoneNumber(context))
     }
+
+    @Test
+    fun check_excludesTelephonySignals_fromDetectedBy() {
+        every {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE)
+        } returns PackageManager.PERMISSION_GRANTED
+        every { context.getSystemService(Context.TELEPHONY_SERVICE) } returns telephonyManager
+        every { telephonyManager.line1Number } returns "15555215554"
+        every { telephonyManager.deviceId } returns "000000000000000"
+        every { telephonyManager.imei } returns "000000000000000"
+
+        val result = EmulatorDetector.check(context)
+
+        assertFalse(result.detectedBy.contains("phone-number"))
+        assertFalse(result.detectedBy.contains("device-id"))
+        assertFalse(result.detectedBy.contains("imei"))
+    }
 }
