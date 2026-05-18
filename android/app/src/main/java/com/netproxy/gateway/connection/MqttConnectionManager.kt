@@ -17,6 +17,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken
@@ -49,6 +50,14 @@ sealed class MqttConnectionState {
     data class Error(val message: String) : MqttConnectionState()
 }
 
+data class MqttDiagnostics(
+    val connectionGeneration: Long = 0,
+    val reconnectDelay: Long = 5000L,
+    val reconnectCount: Int = 0,
+    val lastHeartbeatTime: Long = 0,
+    val consecutiveHeartbeatFailures: Int = 0
+)
+
 @Singleton
 class MqttConnectionManager @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -78,6 +87,9 @@ class MqttConnectionManager @Inject constructor(
 
     private val _connectionState = MutableStateFlow<MqttConnectionState>(MqttConnectionState.Disconnected)
     val connectionState: StateFlow<MqttConnectionState> = _connectionState.asStateFlow()
+
+    private val _diagnostics = MutableStateFlow(MqttDiagnostics())
+    val diagnostics: StateFlow<MqttDiagnostics> = _diagnostics.asStateFlow()
 
     private val _messages = MutableStateFlow<String?>(null)
     val messages: StateFlow<String?> = _messages.asStateFlow()
@@ -273,6 +285,12 @@ class MqttConnectionManager @Inject constructor(
             connectJob = null
 
             generation = connectionGeneration.incrementAndGet()
+            _diagnostics.update {
+                MqttDiagnostics(
+                    connectionGeneration = generation,
+                    reconnectDelay = reconnectDelay
+                )
+            }
             jobToStart = scope.launch(start = CoroutineStart.LAZY) {
                 var localClient: MqttClient? = null
                 try {
@@ -301,6 +319,7 @@ class MqttConnectionManager @Inject constructor(
 
                 // 在 generation 校验通过后更新状态，避免竞态条件
                 _connectionState.value = MqttConnectionState.Connecting
+                _diagnostics.update { it.copy(connectionGeneration = generation) }
 
                 localClient = createdClient
 
@@ -387,6 +406,7 @@ class MqttConnectionManager @Inject constructor(
                         // 确认是当前有效连接，可以设置为 Connected
                         if (mqttClient === createdClient) {
                             reconnectDelay = INITIAL_RECONNECT_DELAY
+                            _diagnostics.update { it.copy(reconnectDelay = INITIAL_RECONNECT_DELAY) }
                             true
                         } else {
                             // mqttClient 已被其他线程替换，不设置状态
@@ -434,6 +454,7 @@ class MqttConnectionManager @Inject constructor(
                     return@launch
                 }
                 _connectionState.value = MqttConnectionState.Connected
+                _diagnostics.update { it.copy(lastHeartbeatTime = System.currentTimeMillis()) }
                 AppAuditLogStore.info("MQTT", "Connection established")
 
                 subscribe("device/$deviceId/control")
@@ -483,6 +504,7 @@ class MqttConnectionManager @Inject constructor(
                 reconnectDelay * RECONNECT_BACKOFF_MULTIPLIER,
                 MAX_RECONNECT_DELAY
             )
+            _diagnostics.update { it.copy(reconnectDelay = reconnectDelay) }
         }
     }
 
@@ -495,6 +517,14 @@ class MqttConnectionManager @Inject constructor(
                 delay(delayMs)
                 if (!shouldStayConnected || generation != connectionGeneration.get()) {
                     return@launch
+                }
+                synchronized(this@MqttConnectionManager) {
+                    _diagnostics.update {
+                        it.copy(
+                            reconnectDelay = reconnectDelay,
+                            reconnectCount = it.reconnectCount + 1
+                        )
+                    }
                 }
                 connect(deviceId, authToken)
             }
@@ -527,6 +557,12 @@ class MqttConnectionManager @Inject constructor(
                 )
                 if (result.isSuccess()) {
                     consecutiveFailures = 0
+                    _diagnostics.update {
+                        it.copy(
+                            lastHeartbeatTime = System.currentTimeMillis(),
+                            consecutiveHeartbeatFailures = 0
+                        )
+                    }
                     continue
                 }
 
@@ -541,6 +577,9 @@ class MqttConnectionManager @Inject constructor(
                     logger.error("Heartbeat publish error: $summary")
                 }
                 consecutiveFailures++
+                _diagnostics.update {
+                    it.copy(consecutiveHeartbeatFailures = consecutiveFailures)
+                }
                 if (consecutiveFailures >= MAX_HEARTBEAT_FAILURES) {
                     logger.warn("Max heartbeat failures reached, triggering reconnect")
                     AppAuditLogStore.warn("MQTT", "Max heartbeat failures reached; reconnecting")
@@ -643,6 +682,7 @@ class MqttConnectionManager @Inject constructor(
         }
         topicCallbacks.clear()
         _connectionState.value = MqttConnectionState.Disconnected
+        _diagnostics.update { MqttDiagnostics() }
 
         if (client == null) {
             return

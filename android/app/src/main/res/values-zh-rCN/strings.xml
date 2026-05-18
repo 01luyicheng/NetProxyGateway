@@ -8,6 +8,7 @@
     <string name="pairing_code_format">识别码: %1$s</string>
     <string name="generate_code">生成识别码</string>
     <string name="pair">配对</string>
+    <string name="pairing_in_progress">配对中...</string>
     <string name="disconnect">断开连接</string>
 
     <string name="remote_control">远程控制</string>
@@ -32,6 +33,12 @@
     <string name="disconnected">未连接</string>
     <string name="vpn_running">VPN运行中</string>
     <string name="vpn_stopped">VPN已停止</string>
+
+    <string name="status_connected">已连接</string>
+    <string name="status_connecting">连接中</string>
+    <string name="status_disconnected">未连接</string>
+    <string name="status_error">连接错误</string>
+    <string name="retry">重试</string>
 
     <string name="error_permission">需要相关权限</string>
     <string name="error_network">网络连接错误</string>
@@ -63,4 +70,13 @@
     <string name="audit_logs_title">审计日志</string>
     <string name="audit_logs_empty">暂无近期日志。</string>
     <string name="clear_logs">清空日志</string>
+
+    <string name="diagnostics_title">诊断信息</string>
+    <string name="diagnostics_connection_duration">连接时长</string>
+    <string name="diagnostics_last_heartbeat">上次心跳</string>
+    <string name="diagnostics_time_ago_seconds">%1$d 秒前</string>
+    <string name="diagnostics_heartbeat_failures">心跳失败次数</string>
+    <string name="diagnostics_reconnect_count">重连次数</string>
+    <string name="diagnostics_vpn_state">VPN 状态</string>
+    <string name="diagnostics_network_validated">网络已验证</string>
 </resources>

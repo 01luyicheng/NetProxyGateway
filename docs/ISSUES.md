@@ -1,6 +1,8 @@
 # NetProxyGateway 缺陷清单（待修复）
 不要在此文档记录日期；用 7 位提交哈希作为“时间锚点”识别问题存在的版本。
 
+**编号约定**：本文档 **C\*** 编号仅用于 ISSUES 内 **C1**（如 C1: SSL 信任所有证书）；与 `docs/TECH_DEBT.md` 的 C2+ 编号无关。
+
 字段约定：
 - **提交哈希**：该问题在此提交存在（若仅存在于未提交工作区变更，记录当前 HEAD 的 7 位哈希并标注 `(worktree)`）
 - **修复提交**：修复该问题的提交（若已修复）
@@ -56,14 +58,13 @@
   }
   ```
 
-### H5: 连接池清理竞争条件
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (L355-378)
-- **问题**: read锁和write锁之间连接状态可能变化
-- **风险**: 清理过期连接时可能误删有效连接，或漏删无效连接
-- **建议修复**:
-  1. 在write锁内重新验证连接状态
-  2. 或使用CopyOnWriteArrayList简化并发控制
-  3. 添加单元测试验证竞争条件处理
+### H5: 连接池清理竞争条件 [已缓解]
+- **状态**: 已缓解（非完全消除；见 N27 写锁内阻塞 IO）
+- **修复提交**: b1e18bd
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (`cleanupIdleConnections`, `borrowConnection` 无效连接清理)
+- **问题**: read 锁收集、write 锁清理之间连接状态可能变化
+- **缓解**: `cleanupIdleConnections` 在单次 `write` 锁内完成筛选与移除；`borrowConnection` 在读锁外收集无效连接后，于 `write` 锁内二次校验 `inUse`/`isValid` 再关闭
+- **残余风险**: 写锁内 `removeConnection`/`close()` 仍可能阻塞（N27）
 
 ### H17: VirtualIpAllocator AtomicInteger溢出 [已修复]
 - **提交哈希**: e89e00d
@@ -112,11 +113,12 @@
 - **风险**: 与某些TCP实现不兼容，可能导致连接异常
 - **建议修复**: 正确管理TCP序列号和确认号
 
-### M11: 连接池状态检查与清理的竞态条件
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (L119-L148)
-- **问题**: 代码在 read 锁内收集无效连接列表，然后在 write 锁外执行清理操作。在 read 锁释放后到 write 锁获取前的时间窗口内，连接状态可能已发生变化，导致清理操作基于过期的状态信息
-- **风险**: 可能清理有效连接或保留无效连接
-- **建议修复**: 在write锁内重新验证连接状态
+### M11: 连接池状态检查与清理的竞态条件 [已缓解]
+- **状态**: 已缓解（与 H5 同一修复）
+- **修复提交**: b1e18bd
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (`borrowConnection` 无效连接清理路径)
+- **问题**: read 锁内收集无效连接、write 锁外清理时状态可能已变
+- **缓解**: 于 `write` 锁内对 `!conn.inUse.get() && !conn.isValid()` 二次校验后再 `remove`/`close`
 
 ### L2: TODO注释未处理
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L458)
@@ -348,12 +350,12 @@
 
 ## Low Severity
 
-### L10: Tunnel服务设备状态通知无重试 [待修复]
-- **状态**: 待修复
-- **位置**: `server/tunnel/main.go` (L146-181)
-- **问题描述**: `notifyDeviceStatus` 通知失败只是记录日志，没有重试机制。如果API服务暂时不可用，设备状态可能不一致
-- **风险**: 低。状态不一致，但可接受
-- **建议修复**: 添加指数退避重试机制
+### L10: Tunnel服务设备状态通知无重试 [已修复]
+- **状态**: 已修复
+- **修复提交**: d06f584（退避重试）；5eae7f4（C23–C27 加固）
+- **位置**: `server/tunnel/main.go` (`notifyDeviceStatus`, `notifyStatusBackoff`)
+- **问题描述**: `notifyDeviceStatus` 通知失败仅记日志、无重试
+- **修复**: 指数退避重试、复用 `http.Client`、`TunnelManager` 上下文可取消；见 `server/tunnel/main_test.go` 重试用例
 
 ---
 
@@ -471,12 +473,12 @@
 - **风险**: 高。安全设计意图失效，token 无法被主动擦除
 - **修复难度**: 中。将 `ProxyAuthSession.authToken` 类型改为 `CharArray`，在业务层传递时保持 `CharArray` 形式
 
-### N39: server/api JWT Secret长度未验证
-- **提交哈希**: 1f9acee
-- **位置**: `server/api/main.go` (L121-L124, L190)
-- **问题描述**: JWT Secret 仅检查非空，未验证长度。HS256 密钥应至少 256 位（32 字节），弱密钥（1-2 字符）可被暴力破解
-- **风险**: 高。使用弱 JWT 密钥可能导致令牌被伪造，造成未授权访问
-- **修复难度**: 低。添加最小长度检查（如 32 字符），不足时拒绝启动
+### N39: server/api JWT Secret长度未验证 [已修复]
+- **状态**: 已修复
+- **修复提交**: 202bb95（同提交含其他修复；JWT 校验见 `validateJWTSecret`）
+- **位置**: `server/api/main.go` (`MinJWTSecretLength`, `validateJWTSecret`, 启动校验)
+- **问题描述**: JWT Secret 仅检查非空，未验证长度
+- **修复**: `MinJWTSecretLength = 32`，`validateJWTSecret` 不足 32 字符时拒绝启动
 
 ### N40: server/socks5-proxy GetOrConnectTunnel连接存活检查竞态 [已修复]
 - **提交哈希**: 1f9acee
@@ -554,13 +556,12 @@
 - **修复状态**: 已修复
 - **关联问题**: 原N48（接口契约角度）已合并至本条目
 
-### N55: DebugDetector 4个方法正常完成路径未调用 process.destroy()
-- **状态**: 待修复
-- **提交哈希**: 4de9b42
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt` (L202-L205, L260-L275, L300-L303, L347-L350)
-- **问题描述**: `checkDebuggerProcess()`、`checkJDWP()`、`checkFrida()`、`checkDebugProperties()` 4个方法仅在超时路径（`!finished`）调用 `process.destroy()`，正常完成路径未显式释放 process 资源（依赖 `Process` 对象生命周期/GC）。同时这些方法只读取 stdout，未读取/处理 stderr，极端情况下可能导致外部命令阻塞或资源释放不及时。
-- **风险**: 中。频繁调用时可能造成短期句柄/FD 压力或阻塞风险，进而影响安全检测的稳定性与性能
-- **修复难度**: 低。使用 `try-finally` 确保 `process.destroy()` 在所有路径被调用
+### N55: DebugDetector 4个方法正常完成路径未调用 process.destroy() [已修复]
+- **状态**: 已修复
+- **修复提交**: 1ba8a50
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt` (`checkDebuggerProcess`, `checkJDWP`, `checkFrida`, `checkDebugProperties`)
+- **问题描述**: 正常完成路径未 `process.destroy()`；部分路径未 drain stderr
+- **修复**: `try-finally` 保证 `process.destroy()`；相关路径 drain stderr
 - **关联问题**: M3
 
 ### N56: server/socks5-proxy StreamConn.SetReadDeadline 空实现导致 goroutine 泄漏
@@ -610,10 +611,5 @@
 - **风险**: 中。测试套件仍可能偶发失败
 - **建议修复**: 改为 `runTest(testDispatcher) { testScope.advanceUntilIdle() }` 或让 manager 使用 `runTest` 提供的 scope
 
-### N61: ISSUES.md 与代码不同步（文档债务）
-- **提交哈希**: 0708644（审查锚点）
-- **问题描述**: 下列条目在代码中已修复/已实现，但 ISSUES.md 仍标记为待修复：`L10`（tunnel `notifyDeviceStatus` 已有退避重试）、`N39`（`validateJWTSecret` 最小 32 字符）、`N55`（`DebugDetector` 已 `try-finally` + stderr drain）。易误导后续 Agent/人工审查。
-- **风险**: 低。重复劳动、优先级误判
-- **建议修复**: 删除或标为已修复并注明修复提交
 
 

@@ -3,6 +3,7 @@ package com.netproxy.gateway.ui.viewmodel
 import android.content.Context
 import android.content.Intent
 import android.net.VpnService as AndroidVpnService
+import android.os.SystemClock
 import com.netproxy.gateway.connection.AuthSessionStore
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -15,8 +16,10 @@ import com.netproxy.gateway.i18n.AppLocale
 import com.netproxy.gateway.wifi.GatewayWifiManager
 import com.netproxy.gateway.wifi.WifiNetwork
 import com.netproxy.gateway.vpn.GatewayVpnService
+import com.netproxy.gateway.vpn.VpnStatus
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -26,14 +29,23 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import java.security.SecureRandom
 import javax.inject.Inject
 
+enum class MqttUiState {
+    Disconnected,
+    Connecting,
+    Connected,
+    Error
+}
+
 data class UiState(
     val isConnected: Boolean = false,
     val isPaired: Boolean = false,
+    val isPairingInProgress: Boolean = false,
     val peerId: String = "",
     val deviceId: String = "",
     val authToken: String = "",
@@ -42,7 +54,15 @@ data class UiState(
     val cellularConnected: Boolean = false,
     val currentWifiSsid: String = "",
     val wifiNetworks: List<WifiNetwork> = emptyList(),
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val mqttState: MqttUiState = MqttUiState.Disconnected,
+    val mqttErrorMessage: String? = null,
+    val connectionDurationMs: Long = 0,
+    val lastHeartbeatTimeMs: Long = 0,
+    val heartbeatFailures: Int = 0,
+    val reconnectCount: Int = 0,
+    val vpnDetailedStatus: VpnStatus = VpnStatus(),
+    val networkIsValidated: Boolean = false
 )
 
 @HiltViewModel
@@ -59,12 +79,50 @@ class MainViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
+    private var connectionStartTime: Long = 0
+    private var durationUpdateJob: kotlinx.coroutines.Job? = null
+
     init {
         val deviceId = authSessionStore.getOrCreateDeviceId()
         _uiState.update { it.copy(deviceId = deviceId) }
-        
+
         observeNetworkState()
         observeMqttState()
+        observeMqttDiagnostics()
+        observeVpnStatus()
+    }
+
+    /**
+     * 安全地获取 elapsedRealtime，在单元测试环境（未 mock）回退到 currentTimeMillis
+     */
+    private fun safeElapsedRealtime(): Long {
+        return try {
+            SystemClock.elapsedRealtime()
+        } catch (e: RuntimeException) {
+            System.currentTimeMillis()
+        }
+    }
+
+    private fun startDurationTimer() {
+        durationUpdateJob?.cancel()
+        durationUpdateJob = viewModelScope.launch(Dispatchers.Default) {
+            while (isActive) {
+                kotlinx.coroutines.delay(1000)
+                if (connectionStartTime > 0) {
+                    val duration = safeElapsedRealtime() - connectionStartTime
+                    _uiState.update { current ->
+                        if (current.connectionDurationMs != duration) {
+                            current.copy(connectionDurationMs = duration)
+                        } else current
+                    }
+                }
+            }
+        }
+    }
+
+    private fun stopDurationTimer() {
+        durationUpdateJob?.cancel()
+        durationUpdateJob = null
     }
 
     private fun observeNetworkState() {
@@ -75,7 +133,8 @@ class MainViewModel @Inject constructor(
                     current.copy(
                         wifiConnected = networkState.networkType == NetworkType.Wifi,
                         cellularConnected = networkState.networkType == NetworkType.Cellular,
-                        currentWifiSsid = wifiInfo?.ssid ?: ""
+                        currentWifiSsid = wifiInfo?.ssid ?: "",
+                        networkIsValidated = networkState.isValidated
                     )
                 }
             }
@@ -87,17 +146,81 @@ class MainViewModel @Inject constructor(
             mqttConnectionManager.connectionState.collect { state ->
                 when (state) {
                     is MqttConnectionState.Connected -> {
-                        _uiState.update { it.copy(isConnected = true, isPaired = true) }
-                    }
-                    is MqttConnectionState.Disconnected -> {
-                        _uiState.update { it.copy(isConnected = false, isPaired = false) }
-                    }
-                    is MqttConnectionState.Error -> {
+                        connectionStartTime = safeElapsedRealtime()
+                        startDurationTimer()
                         _uiState.update {
-                            it.copy(isConnected = false, isPaired = false, errorMessage = state.message)
+                            it.copy(
+                                isConnected = true,
+                                isPaired = true,
+                                isPairingInProgress = false,
+                                mqttState = MqttUiState.Connected,
+                                mqttErrorMessage = null,
+                                connectionDurationMs = 0
+                            )
                         }
                     }
-                    else -> {}
+                    is MqttConnectionState.Connecting -> {
+                        _uiState.update {
+                            it.copy(
+                                isPairingInProgress = true,
+                                mqttState = MqttUiState.Connecting,
+                                mqttErrorMessage = null
+                            )
+                        }
+                    }
+                    is MqttConnectionState.Disconnected -> {
+                        connectionStartTime = 0
+                        stopDurationTimer()
+                        _uiState.update {
+                            it.copy(
+                                isConnected = false,
+                                isPaired = false,
+                                isPairingInProgress = false,
+                                mqttState = MqttUiState.Disconnected,
+                                mqttErrorMessage = null,
+                                connectionDurationMs = 0
+                            )
+                        }
+                    }
+                    is MqttConnectionState.Error -> {
+                        connectionStartTime = 0
+                        stopDurationTimer()
+                        _uiState.update {
+                            it.copy(
+                                isConnected = false,
+                                isPaired = false,
+                                isPairingInProgress = false,
+                                errorMessage = state.message,
+                                mqttState = MqttUiState.Error,
+                                mqttErrorMessage = state.message,
+                                connectionDurationMs = 0
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun observeMqttDiagnostics() {
+        viewModelScope.launch {
+            mqttConnectionManager.diagnostics.collect { diagnostics ->
+                _uiState.update { current ->
+                    current.copy(
+                        lastHeartbeatTimeMs = diagnostics.lastHeartbeatTime,
+                        heartbeatFailures = diagnostics.consecutiveHeartbeatFailures,
+                        reconnectCount = diagnostics.reconnectCount
+                    )
+                }
+            }
+        }
+    }
+
+    private fun observeVpnStatus() {
+        viewModelScope.launch {
+            GatewayVpnService.status.collect { status ->
+                _uiState.update {
+                    it.copy(vpnDetailedStatus = status)
                 }
             }
         }
@@ -112,8 +235,8 @@ class MainViewModel @Inject constructor(
 
     fun pairWithCode(code: String) {
         viewModelScope.launch {
-            _uiState.update { it.copy(peerId = code) }
-            
+            _uiState.update { it.copy(peerId = code, isPairingInProgress = true, errorMessage = null) }
+
             if (networkStateManager.isCellularConnected()) {
                 val deviceIdSnapshot = _uiState.value.deviceId
                 authSessionStore.update(
@@ -126,10 +249,14 @@ class MainViewModel @Inject constructor(
                 )
             } else {
                 _uiState.update {
-                    it.copy(errorMessage = AppLocale.getString(context, R.string.error_cellular_required))
+                    it.copy(isPairingInProgress = false, errorMessage = AppLocale.getString(context, R.string.error_cellular_required))
                 }
             }
         }
+    }
+
+    fun clearErrorMessage() {
+        _uiState.update { it.copy(errorMessage = null, mqttErrorMessage = null) }
     }
 
     fun toggleVpn(enable: Boolean) {

@@ -54,6 +54,7 @@ class MainViewModelTest {
 
         every { networkStateManager.networkState } returns emptyFlow()
         every { mqttConnectionManager.connectionState } returns MutableStateFlow(MqttConnectionState.Disconnected)
+        every { mqttConnectionManager.diagnostics } returns MutableStateFlow(com.netproxy.gateway.connection.MqttDiagnostics())
         every { wifiManager.getCurrentConnection() } returns null
         every { authSessionStore.getOrCreateDeviceId() } returns "device-stable"
         every { mqttConnectionManager.connect(any(), any()) } just runs

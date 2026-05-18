@@ -71,11 +71,12 @@
 - **风险**: 低。当前部署方式简单直接，但扩展时需考虑服务注册与发现方案
 - **建议**: 引入服务注册与发现方案（如Consul、etcd或Kubernetes DNS）
 
-### C11: 缺少 Makefile 统一构建流程
-- **位置**: `server/`
-- **问题描述**: 项目没有 Makefile，Go 服务构建需要通过手动执行 `go build` 或使用 Docker，没有统一的测试、构建、发布流程
-- **风险**: 低。开发效率受影响，新成员上手困难
-- **建议**: 添加 Makefile，提供统一的 build、test、lint、docker-build 等命令
+### C11: Makefile 统一构建流程 [已解决]
+- **状态**: 已解决（基础目标已具备）
+- **修复提交**: a8ab465
+- **位置**: 仓库根目录 `Makefile`
+- **现状**: 已提供 `android-build`/`android-test`/`go-build`/`go-test`/`docker-*`/`all`/`clean` 等目标；`make android-test` 为项目验证门禁
+- **可选后续**: 补充统一 `lint`、`release` 打包目标（非阻塞）
 
 ### C12: VpnServiceTest 未验证关键生命周期场景 [已验证确认]
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt`
@@ -263,12 +264,13 @@
 - **问题描述**: `notifyDeviceStatus`立即启动goroutine执行HTTP请求，重试过程中使用`time.Sleep`阻塞。如果`TunnelManager`被销毁或服务器关闭，这些goroutine会持续阻塞在sleep中直到重试完成，无法被提前取消
 - **修复方式**: 为`TunnelManager`添加`ctx context.Context`和`cancel context.CancelFunc`字段，重试循环中使用`select`监听`ctx.Done()`，添加`Stop()`方法用于取消
 
-### C26: notifyDeviceStatus测试存在flaky风险 [已修复]
-- **状态**: 已修复
-- **提交哈希**: d06f584（修复提交）
+### C26: notifyDeviceStatus测试存在flaky风险 [部分缓解]
+- **状态**: 部分缓解（见 C60）
+- **提交哈希**: d06f584（首次修复）
 - **位置**: `server/tunnel/main_test.go`
-- **问题描述**: `TestNotifyDeviceStatusRetriesAndEventuallySucceeds`和`TestNotifyDeviceStatusDoesNotRetryOnBadRequest`使用固定`time.Sleep(300ms)`验证无额外请求。在慢速CI环境或高负载下可能失败，是flaky test的典型来源
-- **修复方式**: 移除`time.Sleep`，改用`select`+`time.After`验证没有额外请求到达
+- **问题描述**: 重试成功路径曾用固定 `time.Sleep` 等待，慢 CI 下易 flaky
+- **缓解**: 重试用例改为 `select` + `requestSignal` 同步等待各次请求
+- **残余**: “成功后无额外请求”断言仍用 `time.After(300ms)`（`main_test.go` L94–97），慢 CI 下仍可能误报；详见 **C60**
 
 ### C27: notifyDeviceStatus测试覆盖不足 [已修复]
 - **状态**: 已修复
@@ -515,10 +517,11 @@
 
 ### C60: server/tunnel notify测试仍有flaky风险
 - **提交哈希**: 1f9acee
-- **位置**: `server/tunnel/main_test.go` (L86-L88)
-- **问题描述**: 虽 C26 声称已修复，但代码仍使用 `time.After(300ms)` 验证无额外请求，慢 CI 下仍可能失败
+- **关联**: C26（重试路径已同步化；“无额外请求”分支未完全消除固定超时）
+- **位置**: `server/tunnel/main_test.go`（如 `TestNotifyDeviceStatusRetriesAndEventuallySucceeds` 中 L94–97）
+- **问题描述**: 成功重试后仍用 `time.After(300ms)` 断言无第三次请求，慢 CI 下可能 flaky
 - **风险**: 低。测试可靠性
-- **修复难度**: 低。使用同步原语替代固定超时
+- **修复难度**: 低。用 channel/计数器或 `httptest` 钩子替代固定 300ms 窗口
 
 ### C61: server/socks5-proxy IPFilter IPv6处理不完整
 - **提交哈希**: 1f9acee

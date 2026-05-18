@@ -74,11 +74,18 @@ class GatewayVpnService : AndroidVpnService() {
         private const val SESSION_MISSING_LOG_INTERVAL_MS = 5_000L
         private const val GATEWAY_CONFIG_PREFS = "gateway_config"
         private const val DNS_SERVERS_PREF_KEY = "dns_servers"
-        
+
         const val VPN_ADDRESS = "10.0.0.2"
         const val VPN_ROUTE = "0.0.0.0"
         const val VPN_MTU = 1500
-        
+
+        private val _status = MutableStateFlow(VpnStatus())
+        val status: StateFlow<VpnStatus> = _status.asStateFlow()
+
+        fun resetStatus() {
+            _status.value = VpnStatus()
+        }
+
         // SOCKS5 代理本地端口
         const val SOCKS5_PROXY_HOST = "127.0.0.1"
         const val SOCKS5_PROXY_PORT = 1080
@@ -130,9 +137,7 @@ class GatewayVpnService : AndroidVpnService() {
     private val reverseIpMap = ConcurrentHashMap<String, String>() // virtualSrcIp -> realDstIp
     private val nextVirtualIp = AtomicInteger(1) // 10.0.0.x
     private val lastMissingSessionLogAt = AtomicLong(0L)
-    
-    private val _status = MutableStateFlow(VpnStatus())
-    val status: StateFlow<VpnStatus> = _status.asStateFlow()
+
     private var resolvedDnsServers: Set<String> = DNS_SERVERS.toSet()
     
     // TUN输出流（用于回包注入）
@@ -149,7 +154,10 @@ class GatewayVpnService : AndroidVpnService() {
         createNotificationChannel()
         // 创建协程作用域
         serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        
+
+        // 重置状态，确保服务重启后状态干净
+        resetStatus()
+
         // H27: 注册语言变更监听，运行中的通知会自动刷新
         // I1: 防御性注销，防止系统强制杀死后残留监听器
         unregisterLanguageChangeListener()
