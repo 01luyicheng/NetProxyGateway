@@ -209,7 +209,7 @@ class MqttConnectionManager @Inject constructor(
      */
     private fun createSSLContext(trustManagers: Array<TrustManager>?): SSLContext {
         val sslContext = SSLContext.getInstance("TLSv1.2")
-        sslContext.init(null, trustManagers, SecureRandom())
+        sslContext.init(null, trustManagers, secureRandom)
         return sslContext
     }
 
@@ -678,11 +678,12 @@ class MqttConnectionManager @Inject constructor(
 
             val c = mqttClient
             mqttClient = null
+            topicCallbacks.clear()
+            _connectionState.value = MqttConnectionState.Disconnected
+            _diagnostics.update { MqttDiagnostics() }
+
             c
         }
-        topicCallbacks.clear()
-        _connectionState.value = MqttConnectionState.Disconnected
-        _diagnostics.update { MqttDiagnostics() }
 
         if (client == null) {
             return
