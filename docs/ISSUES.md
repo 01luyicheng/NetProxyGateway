@@ -615,7 +615,7 @@
 
 ## 交叉审查发现（工作区未提交批次，2026-05-20）
 
-> Agent: Composer；`make android-test` 与 `go test`（socks5-proxy、tunnel）通过。Subagent 审查因计划限制未启动，由主 Agent 完成同等审查。
+> Agent: Composer；`make android-test` 与 `go test`（socks5-proxy、tunnel）通过。Subagent 因 Cursor 免费计划无法指定命名模型，由主 Agent 完成同等审查（后续应使用 Auto 子 agent）。
 
 ### N61: 工作区 CLAUDE.md 含无关空白符改动且误写 MQTT 环境变量名
 - **位置**: `CLAUDE.md`（未提交，已 `git restore`）
@@ -623,11 +623,11 @@
 - **风险**: 低（误导后续 Agent/开发者）
 - **处置**: 不提交；保持仓库内正确名称 `MQTT_TLS_PUBLIC_KEY_PINS`
 
-### N62: 本地 Gradle `-Xmx6g` 不适合纳入共享 gradle.properties
-- **位置**: `android/gradle.properties`（工作区曾改为 6g）
-- **问题描述**: GitHub Actions `ubuntu-latest` 约 7GB RAM，6GB Gradle 堆易导致 CI OOM；属开发者机器调优。
-- **风险**: 高（若提交会破坏 CI）
-- **处置**: 提交批次保留 `-Xmx2048m`；开发者可在 `~/.gradle/gradle.properties` 本地覆盖
+### N62: [已撤回误判] Gradle `-Xmx6g` 与 CI 失败无关
+- **位置**: `android/gradle.properties`；提交 `b9a9f97` 曾临时改回 `-Xmx2048m`
+- **原误判**: 以为 `ubuntu-latest` 仅 7GB RAM，6GB Gradle 堆会导致 CI OOM。
+- **事实**: 当前标准 `ubuntu-latest` 为 **16GB RAM**（4 vCPU）；`-Xmx6g` 在 CI 与本地 16GB 环境均可接受。推送后 CI 失败（run `26148207822`）原因为 **GitHub 账户 Billing/消费上限**，作业未启动，与堆大小无关。
+- **处置**: 已恢复 `-Xmx6g` 并保留 `MaxMetaspaceSize`/HeapDump 配置；内存不足的开发机可在 `~/.gradle/gradle.properties` 本地下调 `-Xmx`
 
 ### N63: socks5-proxy `cleanupStream` 在持有 `tc.mu` 时调用 `streamConn.Close()`
 - **位置**: `server/socks5-proxy/main.go` (`cleanupStream`)
