@@ -611,5 +611,32 @@
 - **风险**: 中。测试套件仍可能偶发失败
 - **建议修复**: 改为 `runTest(testDispatcher) { testScope.advanceUntilIdle() }` 或让 manager 使用 `runTest` 提供的 scope
 
+---
+
+## 交叉审查发现（工作区未提交批次，2026-05-20）
+
+> Agent: Composer；`make android-test` 与 `go test`（socks5-proxy、tunnel）通过。Subagent 审查因计划限制未启动，由主 Agent 完成同等审查。
+
+### N61: 工作区 CLAUDE.md 含无关空白符改动且误写 MQTT 环境变量名
+- **位置**: `CLAUDE.md`（未提交，已 `git restore`）
+- **问题描述**: diff 主要为列表前空行等格式噪音；并将文档中的 `MQTT_TLS_PUBLIC_KEY_PINS` 误改为 `MQTTTLSPUBLICKEYPINS`，与 `BuildConfig`/gradle 属性名不一致。
+- **风险**: 低（误导后续 Agent/开发者）
+- **处置**: 不提交；保持仓库内正确名称 `MQTT_TLS_PUBLIC_KEY_PINS`
+
+### N62: 本地 Gradle `-Xmx6g` 不适合纳入共享 gradle.properties
+- **位置**: `android/gradle.properties`（工作区曾改为 6g）
+- **问题描述**: GitHub Actions `ubuntu-latest` 约 7GB RAM，6GB Gradle 堆易导致 CI OOM；属开发者机器调优。
+- **风险**: 高（若提交会破坏 CI）
+- **处置**: 提交批次保留 `-Xmx2048m`；开发者可在 `~/.gradle/gradle.properties` 本地覆盖
+
+### N63: socks5-proxy `cleanupStream` 在持有 `tc.mu` 时调用 `streamConn.Close()`
+- **位置**: `server/socks5-proxy/main.go` (`cleanupStream`)
+- **问题描述**: `Close()` 可能触发 WebSocket I/O，持锁期间阻塞其他隧道操作。
+- **风险**: 中。高并发下延迟连接建立/清理
+- **建议修复**: 锁内仅从 map 删除并 `detachTunnel`，锁外 `Close()`（与 `getExistingConn` 模式一致）
+
+### N60 状态
+- **处置**: 工作区 `MqttConnectionManagerConnectCleanupTest` 已改为 `testScope.runTest` + `testScope.advanceUntilIdle()`，拟随测试提交关闭 N60
+
 
 
