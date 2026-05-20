@@ -30,7 +30,9 @@ help:
 # ---------------------------------------------------------------------------
 
 GRADLEW := android\gradlew.bat
-GRADLE_FLAGS := --stacktrace --no-daemon
+# 移除 --no-daemon，启用 Daemon 大幅提升增量构建速度
+# 添加 --build-cache 和 --parallel 确保缓存和并行编译生效
+GRADLE_FLAGS := --stacktrace --build-cache --parallel
 
 android-build:
 	$(GRADLEW) -p android assembleDebug $(GRADLE_FLAGS)
