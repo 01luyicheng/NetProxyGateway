@@ -564,55 +564,53 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 	close(stopHeartbeat)
 }
 
+// doValidatedHTTPPost 发送POST请求到指定API端点，验证响应状态码并解析JSON响应
+func doValidatedHTTPPost(client *http.Client, endpoint string, apiKey string, payload interface{}, result interface{}) error {
+	reqBody, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to encode request body: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(reqBody))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("X-Internal-API-Key", apiKey)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("API returned status %d", resp.StatusCode)
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return nil
+}
+
 // validateDeviceToken 验证设备令牌
 // 通过HTTP请求调用API服务验证token的有效性
 func (s *Server) validateDeviceToken(deviceID, token string) bool {
-	// 构造验证请求
 	payload := map[string]string{
 		"device_id": deviceID,
 		"token":     token,
 	}
 
-	data, err := json.Marshal(payload)
-	if err != nil {
-		log.Printf("Failed to marshal validation request: %v", err)
-		return false
-	}
-
-	// 发送验证请求到API服务
-	req, err := http.NewRequest(
-		http.MethodPost,
-		s.config.APIEndpoint+"/api/session/validate",
-		bytes.NewReader(data),
-	)
-	if err != nil {
-		log.Printf("Failed to build validation request: %v", err)
-		return false
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if s.config.InternalAPIKey != "" {
-		req.Header.Set("X-Internal-API-Key", s.config.InternalAPIKey)
-	}
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		log.Printf("Failed to call validation API: %v", err)
-		return false
-	}
-	defer resp.Body.Close()
-
-	// 检查HTTP状态码
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("Validation API returned non-OK status: %d", resp.StatusCode)
-		return false
-	}
-
-	// 解析响应
 	var result struct {
 		Valid bool `json:"valid"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		log.Printf("Failed to decode validation response: %v", err)
+
+	if err := doValidatedHTTPPost(s.httpClient, s.config.APIEndpoint+"/api/session/validate", s.config.InternalAPIKey, payload, &result); err != nil {
+		log.Printf("Token validation failed: %v", err)
 		return false
 	}
 
