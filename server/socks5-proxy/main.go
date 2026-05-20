@@ -24,6 +24,44 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// SOCKS5 protocol constants
+const (
+	socks5Version = 0x05
+
+	// Authentication methods
+	authNone     = 0x00 // No authentication required
+	authGSSAPI   = 0x01 // GSSAPI
+	authPassword = 0x02 // Username/password
+	authNoAccept = 0xFF // No acceptable methods
+
+	// Command types
+	cmdConnect      = 0x01 // CONNECT
+	cmdBind         = 0x02 // BIND
+	cmdUDPAssociate = 0x03 // UDP ASSOCIATE
+
+	// Address types
+	atypIPv4   = 0x01 // IPv4
+	atypDomain = 0x03 // Domain name
+	atypIPv6   = 0x04 // IPv6
+
+	// Reply codes
+	repSucceeded           = 0x00 // Succeeded
+	repGeneralFailure      = 0x01 // General SOCKS server failure
+	repNotAllowed          = 0x02 // Connection not allowed by ruleset
+	repNetworkUnreachable  = 0x03 // Network unreachable
+	repHostUnreachable     = 0x04 // Host unreachable
+	repConnectionRefused   = 0x05 // Connection refused
+	repTTLExpired          = 0x06 // TTL expired
+	repCommandNotSupported = 0x07 // Command not supported
+	repAddressNotSupported = 0x08 // Address type not supported
+
+	// Auth sub-negotiation version
+	authSubVersion = 0x01 // Username/password auth version
+
+	// Reserved field
+	rsvReserved = 0x00 // Reserved field in SOCKS5 reply
+)
+
 const (
 	tunnelReadTimeout     = 60 * time.Second
 	streamCloseWriteLimit = 2 * time.Second
@@ -59,6 +97,11 @@ type Config struct {
 	EnableTLS      bool
 	MaxConnections int
 	IdleTimeout    time.Duration
+}
+
+// StreamIDProvider 提供 StreamID 的接口
+type StreamIDProvider interface {
+	StreamID() string
 }
 
 // SessionStore 会话存储接口
@@ -99,6 +142,39 @@ func (s *APISessionStore) ValidateToken(deviceID, token string) (bool, error) {
 	return valid, nil
 }
 
+// doValidatedHTTPPost 发送POST请求到指定API端点，验证响应状态码并解析JSON响应
+func doValidatedHTTPPost(client *http.Client, endpoint string, apiKey string, payload interface{}, result interface{}) error {
+	reqBody, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to encode request body: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(reqBody))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("X-Internal-API-Key", apiKey)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("API returned status %d", resp.StatusCode)
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return nil
+}
+
 // validateWithAPI 调用API验证
 func (s *APISessionStore) validateWithAPI(deviceID, token string) (bool, error) {
 	u, err := url.Parse(s.apiEndpoint + "/api/session/validate")
@@ -106,43 +182,20 @@ func (s *APISessionStore) validateWithAPI(deviceID, token string) (bool, error) 
 		return false, fmt.Errorf("failed to parse validate API endpoint: %w", err)
 	}
 
-	type validateRequestBody struct {
+	payload := struct {
 		DeviceID string `json:"device_id"`
 		Token    string `json:"token"`
-	}
-
-	reqBody, err := json.Marshal(validateRequestBody{
+	}{
 		DeviceID: deviceID,
 		Token:    token,
-	})
-	if err != nil {
-		return false, fmt.Errorf("failed to encode validate API request body: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", u.String(), bytes.NewReader(reqBody))
-	if err != nil {
-		return false, fmt.Errorf("failed to create validate API request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if s.internalAPIKey != "" {
-		req.Header.Set("X-Internal-API-Key", s.internalAPIKey)
-	}
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return false, fmt.Errorf("failed to send validate API request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("API returned status %d", resp.StatusCode)
 	}
 
 	var result struct {
 		Valid bool `json:"valid"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return false, fmt.Errorf("failed to decode validate API response: %w", err)
+
+	if err := doValidatedHTTPPost(s.httpClient, u.String(), s.internalAPIKey, payload, &result); err != nil {
+		return false, err
 	}
 
 	return result.Valid, nil
@@ -213,24 +266,33 @@ func (rl *RateLimiter) Allow(key string) bool {
 // Success 登录成功，重置计数
 func (rl *RateLimiter) Success(key string) {
 	rl.mu.Lock()
+	defer rl.mu.Unlock()
 	delete(rl.attempts, key)
-	rl.mu.Unlock()
 }
 
 // cleanupLoop 定期清理旧的尝试记录
 func (rl *RateLimiter) cleanupLoop() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Panic in RateLimiter.cleanupLoop, restarting: %v", r)
+			go rl.cleanupLoop()
+		}
+	}()
+
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		rl.mu.Lock()
-		now := time.Now()
-		for key, attempt := range rl.attempts {
-			if now.Sub(attempt.LastTry) > 30*time.Minute {
-				delete(rl.attempts, key)
+		func() {
+			rl.mu.Lock()
+			defer rl.mu.Unlock()
+			now := time.Now()
+			for key, attempt := range rl.attempts {
+				if now.Sub(attempt.LastTry) > 30*time.Minute {
+					delete(rl.attempts, key)
+				}
 			}
-		}
-		rl.mu.Unlock()
+		}()
 	}
 }
 
@@ -290,6 +352,7 @@ type StreamConn struct {
 	Connected      chan bool
 	Closed         int32
 	readRemainder  []byte
+	readDeadline   atomic.Value // *time.Time
 	readMu         sync.Mutex
 	mu             sync.Mutex
 }
@@ -309,6 +372,14 @@ func NewStreamConn(streamID, deviceID string, tunnelConn *websocket.Conn, tunnel
 
 // Read 实现 net.Conn 的 Read 方法
 func (s *StreamConn) Read(p []byte) (n int, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Panic in StreamConn.Read for stream %s: %v", s.StreamID, r)
+			n = 0
+			err = fmt.Errorf("read panic: %v", r)
+		}
+	}()
+
 	s.readMu.Lock()
 	defer s.readMu.Unlock()
 
@@ -316,14 +387,18 @@ func (s *StreamConn) Read(p []byte) (n int, err error) {
 		return 0, nil
 	}
 
-	s.mu.Lock()
-	if len(s.readRemainder) > 0 {
-		n = copy(p, s.readRemainder)
-		s.readRemainder = s.readRemainder[n:]
-		s.mu.Unlock()
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if len(s.readRemainder) > 0 {
+			n = copy(p, s.readRemainder)
+			s.readRemainder = s.readRemainder[n:]
+			return
+		}
+	}()
+	if n > 0 {
 		return n, nil
 	}
-	s.mu.Unlock()
 
 	select {
 	case data := <-s.DataChan:
@@ -331,23 +406,28 @@ func (s *StreamConn) Read(p []byte) (n int, err error) {
 	default:
 	}
 
+	deadline := s.readDeadline.Load()
+	if deadline != nil {
+		if t := deadline.(*time.Time); t != nil && !t.IsZero() {
+			timer := time.NewTimer(time.Until(*t))
+			defer timer.Stop()
+
+			select {
+			case data := <-s.DataChan:
+				return s.consumeReadChunk(p, data), nil
+			case <-s.CloseChan:
+				return s.drainAndEOF(p)
+			case <-timer.C:
+				return 0, os.ErrDeadlineExceeded
+			}
+		}
+	}
+
 	select {
 	case data := <-s.DataChan:
 		return s.consumeReadChunk(p, data), nil
 	case <-s.CloseChan:
-		for drainCount := 0; drainCount < cap(s.DataChan); drainCount++ {
-			select {
-			case data := <-s.DataChan:
-				if len(data) > 0 {
-					return s.consumeReadChunk(p, data), nil
-				}
-				// 零长度数据包，继续检查下一块
-				continue
-			default:
-				return 0, io.EOF
-			}
-		}
-		return 0, io.EOF
+		return s.drainAndEOF(p)
 	}
 }
 
@@ -361,8 +441,31 @@ func (s *StreamConn) consumeReadChunk(p []byte, data []byte) int {
 	return n
 }
 
+// drainAndEOF 在 CloseChan 关闭后非阻塞排空 DataChan，然后返回 io.EOF
+func (s *StreamConn) drainAndEOF(p []byte) (n int, err error) {
+	for {
+		select {
+		case data := <-s.DataChan:
+			if len(data) > 0 {
+				return s.consumeReadChunk(p, data), nil
+			}
+			continue
+		default:
+			return 0, io.EOF
+		}
+	}
+}
+
 // Write 实现 net.Conn 的 Write 方法
 func (s *StreamConn) Write(p []byte) (n int, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Panic in StreamConn.Write for stream %s: %v", s.StreamID, r)
+			n = 0
+			err = fmt.Errorf("write panic: %v", r)
+		}
+	}()
+
 	if atomic.LoadInt32(&s.Closed) == 1 {
 		return 0, fmt.Errorf("stream closed")
 	}
@@ -389,10 +492,14 @@ func (s *StreamConn) Write(p []byte) (n int, err error) {
 		return 0, err
 	}
 
-	s.mu.Lock()
-	tunnelConn := s.TunnelConn
-	writeMu := s.tunnelWriteMu
-	s.mu.Unlock()
+	var tunnelConn *websocket.Conn
+	var writeMu *sync.Mutex
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		tunnelConn = s.TunnelConn
+		writeMu = s.tunnelWriteMu
+	}()
 
 	if tunnelConn == nil {
 		return 0, fmt.Errorf("tunnel connection not available")
@@ -435,6 +542,12 @@ func (s *StreamConn) WriteToDataChan(data []byte) error {
 
 // sendDisconnect 异步发送 disconnect 消息
 func (s *StreamConn) sendDisconnect() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Panic in sendDisconnect for stream %s: %v", s.StreamID, r)
+		}
+	}()
+
 	msg := struct {
 		Type string `json:"type"`
 		Data struct {
@@ -449,7 +562,11 @@ func (s *StreamConn) sendDisconnect() {
 		},
 	}
 
-	data, _ := json.Marshal(msg)
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Printf("Failed to marshal disconnect message for stream %s: %v", s.StreamID, err)
+		return
+	}
 
 	s.mu.Lock()
 	tunnelConn := s.TunnelConn
@@ -477,38 +594,80 @@ func (s *StreamConn) Close() error {
 	return nil
 }
 
+// closeLocal 本地关闭 stream，不发送 disconnect 消息。
+// 用于对端已主动断开或连接已失效的场景，避免发送不必要的 disconnect 回声。
+func (s *StreamConn) closeLocal() {
+	if atomic.CompareAndSwapInt32(&s.Closed, 0, 1) {
+		close(s.CloseChan)
+	}
+}
+
+// detachTunnel 在 stream.mu 保护下清空 tunnelConn 和 tunnelWriteMu 引用，
+// 防止后续异步操作使用失效连接。
+func (s *StreamConn) detachTunnel() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.TunnelConn = nil
+	s.tunnelWriteMu = nil
+}
+
 // LocalAddr 实现 net.Conn 的 LocalAddr 方法
 func (s *StreamConn) LocalAddr() net.Addr {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.TunnelConn != nil {
 		return s.TunnelConn.LocalAddr()
 	}
-	return nil
+	// net.Conn 接口通常不期望返回 nil，返回空地址避免调用方 panic
+	return &net.TCPAddr{IP: net.IPv4zero, Port: 0}
 }
 
 // RemoteAddr 实现 net.Conn 的 RemoteAddr 方法
 func (s *StreamConn) RemoteAddr() net.Addr {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.TunnelConn != nil {
 		return s.TunnelConn.RemoteAddr()
 	}
-	return nil
+	// net.Conn 接口通常不期望返回 nil，返回空地址避免调用方 panic
+	return &net.TCPAddr{IP: net.IPv4zero, Port: 0}
 }
 
 // SetDeadline 实现 net.Conn 的 SetDeadline 方法
 func (s *StreamConn) SetDeadline(t time.Time) error {
-	return nil
+	if err := s.SetReadDeadline(t); err != nil {
+		return err
+	}
+	return s.SetWriteDeadline(t)
 }
 
 // SetReadDeadline 实现 net.Conn 的 SetReadDeadline 方法
 func (s *StreamConn) SetReadDeadline(t time.Time) error {
+	s.readDeadline.Store(&t)
 	return nil
 }
 
-// SetWriteDeadline 实现 net.Conn 的 SetWriteDeadline 方法
+// SetWriteDeadline 实现 net.Conn 的 SetWriteDeadline 方法。
+// 当前为空实现：WebSocket 写入已通过 writeMu + streamWriteLimit 保护，
+// 且 StreamConn 的 Write 操作不涉及阻塞 I/O，无需额外 deadline 控制。
 func (s *StreamConn) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
 // TunnelClient 隧道客户端
+//
+// 锁层次: tc.mu -> tc.writeMu
+// - tc.mu 保护 connections、dialing、streams 映射
+// - tc.writeMu 保护 WebSocket 连接的写入操作（WriteMessage、WriteControl）
+// 允许 tc.mu -> tc.writeMu 的嵌套，但反之不可，否则会死锁
+//
+// 附加层次: tc.mu -> stream.mu
+// - 在 removeConnectionAndCollectStreams -> detachTunnel 路径中，
+//   持有 tc.mu 时会获取 stream.mu 以清空 tunnelConn 引用。
+// - 禁止 stream.mu -> tc.mu 的反向嵌套，否则会死锁。
+//
+// 连接存活检测（isConnAlive）在持有 tc.mu 期间获取 writeMu 发送 Ping，
+// 这是已知的设计权衡，Ping 超时 5 秒会阻塞对 tc.mu 的竞争者。
 type TunnelClient struct {
 	tunnelEndpoint string
 	httpClient     *http.Client
@@ -545,21 +704,11 @@ func NewTunnelClient(tunnelEndpoint string) *TunnelClient {
 // GetOrConnectTunnel 获取或建立到设备的隧道连接
 func (tc *TunnelClient) GetOrConnectTunnel(deviceID, token string) (*websocket.Conn, error) {
 	for {
-		tc.mu.RLock()
-		if conn, ok := tc.connections[deviceID]; ok {
-			tc.mu.RUnlock()
-			if tc.isConnAlive(conn) {
-				return conn, nil
-			}
-
-			tc.mu.Lock()
-			if tc.connections[deviceID] == conn {
-				delete(tc.connections, deviceID)
-			}
-			tc.mu.Unlock()
-			continue
+		if conn, ok := tc.getExistingConn(deviceID); ok {
+			return conn, nil
 		}
 
+		tc.mu.RLock()
 		waitCh, dialing := tc.dialing[deviceID]
 		tc.mu.RUnlock()
 
@@ -568,40 +717,41 @@ func (tc *TunnelClient) GetOrConnectTunnel(deviceID, token string) (*websocket.C
 			continue
 		}
 
-		tc.mu.Lock()
-		if conn, ok := tc.connections[deviceID]; ok {
-			tc.mu.Unlock()
-			if tc.isConnAlive(conn) {
-				return conn, nil
-			}
-
+		var conn *websocket.Conn
+		var err error
+		func() {
 			tc.mu.Lock()
-			if tc.connections[deviceID] == conn {
-				delete(tc.connections, deviceID)
+			defer tc.mu.Unlock()
+			if waitCh, dialing = tc.dialing[deviceID]; dialing {
+				return
 			}
-			tc.mu.Unlock()
-			continue
-		}
-
-		if waitCh, dialing = tc.dialing[deviceID]; dialing {
-			tc.mu.Unlock()
+			waitCh = make(chan struct{})
+			tc.dialing[deviceID] = waitCh
+		}()
+		if dialing {
 			<-waitCh
 			continue
 		}
 
-		waitCh = make(chan struct{})
-		tc.dialing[deviceID] = waitCh
-		tc.mu.Unlock()
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("Panic in dialTunnel for device %s: %v", deviceID, r)
+					err = fmt.Errorf("dial panic: %v", r)
+				}
+			}()
+			conn, err = tc.dialTunnel(deviceID, token)
+		}()
 
-		conn, err := tc.dialTunnel(deviceID, token)
-
-		tc.mu.Lock()
-		if err == nil {
-			tc.connections[deviceID] = conn
-		}
-		delete(tc.dialing, deviceID)
-		close(waitCh)
-		tc.mu.Unlock()
+		func() {
+			tc.mu.Lock()
+			defer tc.mu.Unlock()
+			if err == nil && conn != nil {
+				tc.connections[deviceID] = conn
+			}
+			delete(tc.dialing, deviceID)
+			close(waitCh)
+		}()
 
 		if err != nil {
 			return nil, err
@@ -610,6 +760,63 @@ func (tc *TunnelClient) GetOrConnectTunnel(deviceID, token string) (*websocket.C
 		go tc.readLoop(deviceID, conn)
 		return conn, nil
 	}
+}
+
+// getExistingConn 检查并返回存活的现有连接。
+// 为减少锁持有时间，先获取 tc.mu.RLock 复制 conn 引用，然后在锁外调用 isConnAlive。
+// 若连接失效，重新获取 tc.mu.Lock 并使用 identity check（tc.connections[deviceID] == conn）
+// 确保连接未被替换后，在锁保护下删除该连接及其关联的 streams，最后在锁外关闭 streams。
+func (tc *TunnelClient) getExistingConn(deviceID string) (conn *websocket.Conn, ok bool) {
+	// 第一阶段：只读获取 conn 引用
+	tc.mu.RLock()
+	conn, ok = tc.connections[deviceID]
+	tc.mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+
+	// 锁外检查连接存活（避免阻塞其他操作长达 5 秒）
+	if tc.isConnAlive(conn) {
+		return conn, true
+	}
+
+	// 第二阶段：连接失效，需要修改状态，获取写锁
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+
+	// 二次验证：确保连接未被替换
+	if tc.connections[deviceID] != conn {
+		return nil, false
+	}
+
+	toClose := tc.removeConnectionAndCollectStreams(deviceID, conn)
+	// 在锁外关闭 streams（避免持有锁期间执行 I/O）
+	if len(toClose) > 0 {
+		go func(streams []*StreamConn) {
+			for _, stream := range streams {
+				stream.Close()
+			}
+		}(toClose)
+	}
+	return nil, false
+}
+
+// removeConnectionAndCollectStreams 在已持有 tc.mu 锁的情况下删除连接并收集关联的 streams，返回待关闭的 stream 列表。
+// 调用方应在调用前确认连接已失效（例如通过 isConnAlive），本函数仅执行删除和收集，不做存活检查。
+// 同时清空被移除 stream 的 tunnelConn 引用，防止后续异步操作使用失效连接。
+func (tc *TunnelClient) removeConnectionAndCollectStreams(deviceID string, conn *websocket.Conn) []*StreamConn {
+	if tc.connections[deviceID] == conn {
+		delete(tc.connections, deviceID)
+	}
+	var toClose []*StreamConn
+	for streamID, stream := range tc.streams {
+		if stream.DeviceID == deviceID {
+			delete(tc.streams, streamID)
+			stream.detachTunnel()
+			toClose = append(toClose, stream)
+		}
+	}
+	return toClose
 }
 
 func (tc *TunnelClient) dialTunnel(deviceID, token string) (*websocket.Conn, error) {
@@ -645,11 +852,23 @@ func (tc *TunnelClient) isConnAlive(conn *websocket.Conn) bool {
 // readLoop 读取循环，处理来自设备的消息
 func (tc *TunnelClient) readLoop(deviceID string, conn *websocket.Conn) {
 	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Panic in readLoop for device %s: %v", deviceID, r)
+		}
+	}()
+
+	defer func() {
 		tc.mu.Lock()
+		defer tc.mu.Unlock()
 		if tc.connections[deviceID] == conn {
 			delete(tc.connections, deviceID)
 		}
-		tc.mu.Unlock()
+		for streamID, stream := range tc.streams {
+			if stream.DeviceID == deviceID {
+				delete(tc.streams, streamID)
+				stream.closeLocal()
+			}
+		}
 		conn.Close()
 	}()
 
@@ -680,7 +899,14 @@ func (tc *TunnelClient) readLoop(deviceID string, conn *websocket.Conn) {
 		}
 
 		if messageType == websocket.BinaryMessage || messageType == websocket.TextMessage {
-			tc.handleMessage(conn, data)
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("Panic in handleMessage for device %s: %v", deviceID, r)
+					}
+				}()
+				tc.handleMessage(conn, data)
+			}()
 		}
 	}
 }
@@ -709,6 +935,17 @@ func (tc *TunnelClient) handleMessage(conn *websocket.Conn, data []byte) {
 	}
 }
 
+func (tc *TunnelClient) getStreamLocked(streamID string) (*StreamConn, bool) {
+	tc.mu.RLock()
+	stream, ok := tc.streams[streamID]
+	tc.mu.RUnlock()
+	if !ok {
+		log.Printf("No stream found for ID: %s", streamID)
+		return nil, false
+	}
+	return stream, true
+}
+
 // handleConnectResponse 处理连接响应
 func (tc *TunnelClient) handleConnectResponse(data json.RawMessage) {
 	var resp struct {
@@ -722,12 +959,8 @@ func (tc *TunnelClient) handleConnectResponse(data json.RawMessage) {
 		return
 	}
 
-	tc.mu.RLock()
-	stream, ok := tc.streams[resp.StreamID]
-	tc.mu.RUnlock()
-
+	stream, ok := tc.getStreamLocked(resp.StreamID)
 	if !ok {
-		log.Printf("No stream found for ID: %s", resp.StreamID)
 		return
 	}
 
@@ -737,11 +970,7 @@ func (tc *TunnelClient) handleConnectResponse(data json.RawMessage) {
 		case stream.Connected <- false:
 		default:
 		}
-		stream.Close()
-		// 从streams映射中删除，避免内存泄漏
-		tc.mu.Lock()
-		delete(tc.streams, resp.StreamID)
-		tc.mu.Unlock()
+		tc.cleanupStream(resp.StreamID, stream)
 		return
 	}
 
@@ -764,24 +993,26 @@ func (tc *TunnelClient) handleData(data json.RawMessage) {
 		return
 	}
 
-	tc.mu.RLock()
-	stream, ok := tc.streams[resp.StreamID]
-	tc.mu.RUnlock()
-
+	stream, ok := tc.getStreamLocked(resp.StreamID)
 	if !ok {
-		log.Printf("No stream found for ID: %s", resp.StreamID)
 		return
 	}
 
 	if err := stream.WriteToDataChan(resp.Data); err != nil {
 		log.Printf("Failed to write to DataChan for stream %s: %v, closing stream", resp.StreamID, err)
-		stream.Close()
-		tc.RemoveStream(resp.StreamID)
+		tc.cleanupStream(resp.StreamID, stream)
 	}
 }
 
-// handleDisconnect 处理断开连接消息
+// handleDisconnect 处理来自设备的断开连接消息。
+// 由于是对端主动断开，不需要再发送 disconnect 回声。
 func (tc *TunnelClient) handleDisconnect(data json.RawMessage) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Panic in handleDisconnect: %v", r)
+		}
+	}()
+
 	var resp struct {
 		StreamID string `json:"stream_id"`
 	}
@@ -791,13 +1022,35 @@ func (tc *TunnelClient) handleDisconnect(data json.RawMessage) {
 		return
 	}
 
-	tc.mu.RLock()
-	stream, ok := tc.streams[resp.StreamID]
-	tc.mu.RUnlock()
+	var stream *StreamConn
+	var ok bool
+	func() {
+		tc.mu.Lock()
+		defer tc.mu.Unlock()
+		stream, ok = tc.streams[resp.StreamID]
+		if ok {
+			delete(tc.streams, resp.StreamID)
+		}
+	}()
 
 	if ok {
-		stream.Close()
+		stream.closeLocal()
 	}
+}
+
+// cleanupStream 从 streams 映射中移除流并关闭连接。
+// 锁安全：即使在 streamConn.Close() panic 时也能确保 tc.mu 被释放。
+func (tc *TunnelClient) cleanupStream(streamID string, streamConn *StreamConn) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Panic in cleanupStream for stream %s: %v", streamID, r)
+		}
+	}()
+
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	delete(tc.streams, streamID)
+	streamConn.Close()
 }
 
 // ConnectThroughTunnel 通过隧道连接到目标地址
@@ -817,9 +1070,11 @@ func (tc *TunnelClient) ConnectThroughTunnel(deviceID, token, dstAddr string, ds
 	// 创建流连接
 	streamConn := NewStreamConn(streamID, deviceID, tunnelConn, &tc.writeMu)
 
-	tc.mu.Lock()
-	tc.streams[streamID] = streamConn
-	tc.mu.Unlock()
+	func() {
+		tc.mu.Lock()
+		defer tc.mu.Unlock()
+		tc.streams[streamID] = streamConn
+	}()
 
 	// 发送连接请求
 	connectReq := struct {
@@ -844,51 +1099,42 @@ func (tc *TunnelClient) ConnectThroughTunnel(deviceID, token, dstAddr string, ds
 
 	reqData, err := json.Marshal(connectReq)
 	if err != nil {
-		tc.mu.Lock()
-		delete(tc.streams, streamID)
-		tc.mu.Unlock()
-		streamConn.Close()
+		tc.cleanupStream(streamID, streamConn)
 		return nil, fmt.Errorf("failed to marshal connect request: %w", err)
 	}
 
-	tc.writeMu.Lock()
-	defer tc.writeMu.Unlock()
-	_ = tunnelConn.SetWriteDeadline(time.Now().Add(streamWriteLimit))
-	err = tunnelConn.WriteMessage(websocket.BinaryMessage, reqData)
-	_ = tunnelConn.SetWriteDeadline(time.Time{})
+	func() {
+		tc.writeMu.Lock()
+		defer tc.writeMu.Unlock()
+		_ = tunnelConn.SetWriteDeadline(time.Now().Add(streamWriteLimit))
+		err = tunnelConn.WriteMessage(websocket.BinaryMessage, reqData)
+		_ = tunnelConn.SetWriteDeadline(time.Time{})
+	}()
 	if err != nil {
-		tc.mu.Lock()
-		delete(tc.streams, streamID)
-		tc.mu.Unlock()
-		streamConn.Close()
+		tc.cleanupStream(streamID, streamConn)
 		return nil, fmt.Errorf("failed to send connect request: %w", err)
 	}
 
 	// 等待连接响应（带超时）
 	select {
 	case <-time.After(30 * time.Second):
-		tc.mu.Lock()
-		delete(tc.streams, streamID)
-		tc.mu.Unlock()
-		streamConn.Close()
+		tc.cleanupStream(streamID, streamConn)
 		return nil, fmt.Errorf("connection timeout")
 	case success := <-streamConn.Connected:
 		if !success {
-			tc.mu.Lock()
-			delete(tc.streams, streamID)
-			tc.mu.Unlock()
-			streamConn.Close()
+			tc.cleanupStream(streamID, streamConn)
 			return nil, fmt.Errorf("connection failed")
 		}
 		return streamConn, nil
 	}
 }
 
-// RemoveStream 移除流
+// RemoveStream 从 streams 映射中移除流。
+// 不关闭底层连接，由调用方负责关闭。
 func (tc *TunnelClient) RemoveStream(streamID string) {
 	tc.mu.Lock()
+	defer tc.mu.Unlock()
 	delete(tc.streams, streamID)
-	tc.mu.Unlock()
 }
 
 // AuthSession 认证会话信息
@@ -1010,7 +1256,15 @@ func (s *SOCKS5Server) Start() error {
 			continue
 		}
 
-		go s.handleConnection(conn)
+		go func(c net.Conn) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("Panic in handleConnection: %v", r)
+					_ = c.Close()
+				}
+			}()
+			s.handleConnection(c)
+		}(conn)
 	}
 }
 
@@ -1066,7 +1320,7 @@ func (s *SOCKS5Server) handleHandshake(conn net.Conn, clientIP string) (string, 
 		return "", "", err
 	}
 
-	if buf[0] != 0x05 {
+	if buf[0] != socks5Version {
 		return "", "", fmt.Errorf("unsupported SOCKS version: %d", buf[0])
 	}
 
@@ -1076,10 +1330,10 @@ func (s *SOCKS5Server) handleHandshake(conn net.Conn, clientIP string) (string, 
 		return "", "", err
 	}
 
-	// 检查是否支持用户名/密码认证(0x02)
+	// 检查是否支持用户名/密码认证
 	supportsAuth := false
 	for _, m := range methods {
-		if m == 0x02 {
+		if m == authPassword {
 			supportsAuth = true
 			break
 		}
@@ -1087,12 +1341,17 @@ func (s *SOCKS5Server) handleHandshake(conn net.Conn, clientIP string) (string, 
 
 	if !supportsAuth {
 		// 不支持认证，返回无认证方法
-		conn.Write([]byte{0x05, 0x00})
+		if _, err := conn.Write([]byte{socks5Version, authNone}); err != nil {
+			log.Printf("Failed to write no-auth method response: %v", err)
+		}
 		return "", "", fmt.Errorf("no supported authentication method")
 	}
 
 	// 选择用户名/密码认证
-	conn.Write([]byte{0x05, 0x02})
+	if _, err := conn.Write([]byte{socks5Version, authPassword}); err != nil {
+		log.Printf("Failed to write auth method response: %v", err)
+		return "", "", fmt.Errorf("failed to write auth method response: %w", err)
+	}
 
 	// 处理用户名/密码认证
 	return s.handleAuth(conn, reader, clientIP)
@@ -1139,12 +1398,17 @@ func (s *SOCKS5Server) handleAuth(conn net.Conn, reader *bufio.Reader, clientIP 
 	// 验证令牌
 	valid, err := s.sessionStore.ValidateToken(deviceID, token)
 	if err != nil || !valid {
-		conn.Write([]byte{0x01, 0x01}) // 认证失败
+		if _, werr := conn.Write([]byte{0x01, repGeneralFailure}); werr != nil { // 认证失败
+			log.Printf("Failed to write auth failure response: %v", werr)
+		}
 		return "", "", fmt.Errorf("authentication failed")
 	}
 
 	// 认证成功
-	conn.Write([]byte{0x01, 0x00})
+	if _, err := conn.Write([]byte{0x01, repSucceeded}); err != nil {
+		log.Printf("Failed to write auth success response: %v", err)
+		return "", "", fmt.Errorf("failed to write auth success response: %w", err)
+	}
 	s.rateLimiter.Success(clientIP)
 	log.Printf("Authentication successful for device: %s", deviceID)
 
@@ -1161,7 +1425,7 @@ func (s *SOCKS5Server) handleRequest(conn net.Conn, deviceID string, token strin
 		return err
 	}
 
-	if buf[0] != 0x05 {
+	if buf[0] != socks5Version {
 		return fmt.Errorf("unsupported SOCKS version: %d", buf[0])
 	}
 
@@ -1173,14 +1437,14 @@ func (s *SOCKS5Server) handleRequest(conn net.Conn, deviceID string, token strin
 	var dstPort int
 
 	switch atyp {
-	case 0x01: // IPv4
+	case atypIPv4: // IPv4
 		ipBuf := make([]byte, 4)
 		if _, err := io.ReadFull(reader, ipBuf); err != nil {
 			return err
 		}
 		dstAddr = net.IP(ipBuf).String()
 
-	case 0x03: // Domain name
+	case atypDomain: // Domain name
 		lenBuf, err := reader.ReadByte()
 		if err != nil {
 			return err
@@ -1194,22 +1458,28 @@ func (s *SOCKS5Server) handleRequest(conn net.Conn, deviceID string, token strin
 		// 解析域名
 		ips, err := net.LookupIP(dstAddr)
 		if err != nil {
-			s.sendReply(conn, 0x04) // Host unreachable
+			s.sendReply(conn, repHostUnreachable)
 			return err
 		}
+		resolved := false
 		for _, ip := range ips {
 			if ip.To4() != nil {
 				dstAddr = ip.String()
+				resolved = true
 				break
 			}
 		}
+		if !resolved {
+			s.sendReply(conn, repHostUnreachable)
+			return fmt.Errorf("no IPv4 address found for %s", dstAddr)
+		}
 
-	case 0x04: // IPv6
-		s.sendReply(conn, 0x08) // Address type not supported
+	case atypIPv6: // IPv6
+		s.sendReply(conn, repAddressNotSupported)
 		return fmt.Errorf("IPv6 not supported")
 
 	default:
-		s.sendReply(conn, 0x08) // Address type not supported
+		s.sendReply(conn, repAddressNotSupported)
 		return fmt.Errorf("unsupported address type: %d", atyp)
 	}
 
@@ -1223,29 +1493,31 @@ func (s *SOCKS5Server) handleRequest(conn net.Conn, deviceID string, token strin
 	// 检查IP是否允许
 	if !s.ipFilter.IsAllowed(dstAddr) {
 		log.Printf("Blocked connection to %s:%d", dstAddr, dstPort)
-		s.sendReply(conn, 0x02) // Connection not allowed
+		s.sendReply(conn, repNotAllowed)
 		return fmt.Errorf("target IP not allowed: %s", dstAddr)
 	}
 
 	switch cmd {
-	case 0x01: // CONNECT
+	case cmdConnect: // CONNECT
 		return s.handleConnect(conn, AuthSession{DeviceID: deviceID, Token: token}, dstAddr, dstPort)
-	case 0x02: // BIND
-		s.sendReply(conn, 0x07) // Command not supported
+	case cmdBind: // BIND
+		s.sendReply(conn, repCommandNotSupported)
 		return fmt.Errorf("BIND not supported")
-	case 0x03: // UDP ASSOCIATE
-		s.sendReply(conn, 0x07) // Command not supported
+	case cmdUDPAssociate: // UDP ASSOCIATE
+		s.sendReply(conn, repCommandNotSupported)
 		return fmt.Errorf("UDP ASSOCIATE not supported")
 	default:
-		s.sendReply(conn, 0x07) // Command not supported
+		s.sendReply(conn, repCommandNotSupported)
 		return fmt.Errorf("unsupported command: %d", cmd)
 	}
 }
 
 // sendReply 发送SOCKS5响应
 func (s *SOCKS5Server) sendReply(conn net.Conn, rep byte) {
-	reply := []byte{0x05, rep, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
-	conn.Write(reply)
+	reply := []byte{socks5Version, rep, rsvReserved, atypIPv4, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	if _, err := conn.Write(reply); err != nil {
+		log.Printf("Failed to send SOCKS5 reply 0x%02x: %v", rep, err)
+	}
 }
 
 // handleConnect 处理 CONNECT 请求
@@ -1260,19 +1532,19 @@ func (s *SOCKS5Server) handleConnect(conn net.Conn, session AuthSession, dstAddr
 	targetConn, err := s.tunnelClient.ConnectThroughTunnel(session.DeviceID, session.Token, dstAddr, dstPort)
 	if err != nil {
 		log.Printf("Failed to connect through tunnel: %v", err)
-		s.sendReply(conn, 0x05) // Connection refused
+		s.sendReply(conn, repConnectionRefused)
 		return err
 	}
 	defer func() {
 		targetConn.Close()
 		// 清理流记录
-		if streamConn, ok := targetConn.(*StreamConn); ok {
-			s.tunnelClient.RemoveStream(streamConn.StreamID)
+		if sip, ok := targetConn.(StreamIDProvider); ok {
+			s.tunnelClient.RemoveStream(sip.StreamID())
 		}
 	}()
 
 	// 发送成功响应
-	s.sendReply(conn, 0x00)
+	s.sendReply(conn, repSucceeded)
 
 	// 双向转发
 	return s.relay(conn, targetConn)
@@ -1289,6 +1561,13 @@ func (s *SOCKS5Server) relay(clientConn, targetConn net.Conn) error {
 	}
 
 	copyStream := func(dst, src net.Conn) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("Panic in relay copyStream: %v", r)
+				closeOnce.Do(closeConnections)
+				errChan <- fmt.Errorf("copyStream panic: %v", r)
+			}
+		}()
 		_, err := io.Copy(dst, src)
 		closeOnce.Do(closeConnections)
 		errChan <- err
