@@ -205,13 +205,22 @@ object RootDetector {
         // 尝试执行 which busybox
         return try {
             val process = Runtime.getRuntime().exec(arrayOf("which", "busybox"))
-            BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
-                val result = reader.readLine()
-                val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                if (!finished) {
-                    process.destroy()
+            try {
+                BufferedReader(InputStreamReader(process.errorStream)).use { errorReader ->
+                    while (errorReader.readLine() != null) {
+                        // 消费错误输出，避免阻塞
+                    }
                 }
-                finished && result != null && result.isNotEmpty()
+                BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
+                    val result = reader.readLine()
+                    val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                    if (!finished) {
+                        return@use false
+                    }
+                    result != null && result.isNotEmpty()
+                }
+            } finally {
+                process.destroy()
             }
         } catch (e: Exception) {
             false
@@ -245,16 +254,24 @@ object RootDetector {
         for (prop in magiskProps) {
             try {
                 val process = Runtime.getRuntime().exec(arrayOf("getprop", prop))
-                BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
-                    val value = reader.readLine()
-                    val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                    if (!finished) {
-                        process.destroy()
-                        return@use
+                try {
+                    BufferedReader(InputStreamReader(process.errorStream)).use { errorReader ->
+                        while (errorReader.readLine() != null) {
+                            // 消费错误输出，避免阻塞
+                        }
                     }
-                    if (!value.isNullOrEmpty() && value != "0" && value != "") {
-                        return true
+                    BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
+                        val value = reader.readLine()
+                        val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                        if (!finished) {
+                            return@use
+                        }
+                        if (!value.isNullOrEmpty() && value != "0" && value != "") {
+                            return true
+                        }
                     }
+                } finally {
+                    process.destroy()
                 }
             } catch (e: Exception) {
                 // 忽略异常
@@ -319,16 +336,24 @@ object RootDetector {
         for ((key, badValue) in dangerousProps) {
             try {
                 val process = Runtime.getRuntime().exec(arrayOf("getprop", key))
-                BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
-                    val value = reader.readLine()
-                    val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                    if (!finished) {
-                        process.destroy()
-                        return@use
+                try {
+                    BufferedReader(InputStreamReader(process.errorStream)).use { errorReader ->
+                        while (errorReader.readLine() != null) {
+                            // 消费错误输出，避免阻塞
+                        }
                     }
-                    if (value == badValue) {
-                        return true
+                    BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
+                        val value = reader.readLine()
+                        val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                        if (!finished) {
+                            return@use
+                        }
+                        if (value == badValue) {
+                            return true
+                        }
                     }
+                } finally {
+                    process.destroy()
                 }
             } catch (e: Exception) {
                 // 忽略异常
@@ -366,13 +391,22 @@ object RootDetector {
     fun checkSuExecution(): Boolean {
         return try {
             val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
-            BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
-                val output = reader.readLine()
-                val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                if (!finished) {
-                    process.destroy()
+            try {
+                BufferedReader(InputStreamReader(process.errorStream)).use { errorReader ->
+                    while (errorReader.readLine() != null) {
+                        // 消费错误输出，避免阻塞
+                    }
                 }
-                finished && (output?.contains("uid=0") ?: false)
+                BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
+                    val output = reader.readLine()
+                    val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                    if (!finished) {
+                        return@use false
+                    }
+                    output?.contains("uid=0") ?: false
+                }
+            } finally {
+                process.destroy()
             }
         } catch (e: Exception) {
             false

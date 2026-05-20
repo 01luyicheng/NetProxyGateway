@@ -283,25 +283,33 @@ object EmulatorDetector {
         for ((prop, expectedValue) in EMULATOR_PROPS) {
             try {
                 val process = Runtime.getRuntime().exec(arrayOf("getprop", prop))
-                BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
-                    val value = reader.readLine()
-                    val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                    if (!finished) {
-                        process.destroy()
-                        return@use
+                try {
+                    BufferedReader(InputStreamReader(process.errorStream)).use { errorReader ->
+                        while (errorReader.readLine() != null) {
+                            // 消费错误输出，避免阻塞
+                        }
                     }
+                    BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
+                        val value = reader.readLine()
+                        val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                        if (!finished) {
+                            return@use
+                        }
 
-                    if (expectedValue == null) {
-                        // 只要属性存在就算检测到
-                        if (!value.isNullOrEmpty()) {
-                            return true
-                        }
-                    } else {
-                        // 检查属性值是否匹配
-                        if (value?.lowercase() == expectedValue.lowercase()) {
-                            return true
+                        if (expectedValue == null) {
+                            // 只要属性存在就算检测到
+                            if (!value.isNullOrEmpty()) {
+                                return true
+                            }
+                        } else {
+                            // 检查属性值是否匹配
+                            if (value?.lowercase() == expectedValue.lowercase()) {
+                                return true
+                            }
                         }
                     }
+                } finally {
+                    process.destroy()
                 }
             } catch (e: Exception) {
                 // 忽略异常
