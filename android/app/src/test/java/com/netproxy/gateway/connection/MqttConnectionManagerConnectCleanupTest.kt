@@ -58,15 +58,15 @@ class MqttConnectionManagerConnectCleanupTest {
     }
 
     @Test
-    fun connect_whenConnectThrowsAndGenerationChanges_shouldClearClientReferenceAndCloseClient() = runTest {
+    fun connect_whenConnectThrowsAndGenerationChanges_shouldClearClientReferenceAndCloseClient() = testScope.runTest {
         every { anyConstructed<MqttClient>().connect(any<MqttConnectOptions>()) } answers {
             manager.incrementPrivateConnectionGeneration()
             throw RuntimeException("boom")
         }
 
         manager.connect(deviceId = "device-1", authToken = "token-1")
-        advanceUntilIdle()
-        advanceUntilIdle()
+        testScope.advanceUntilIdle()
+        testScope.advanceUntilIdle()
 
         // 当 connect() 抛出异常时：
         // 1. 本测试模拟的是 connect() 调用时抛出异常，此时客户端已创建成功，localClient 不为 null
