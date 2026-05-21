@@ -220,7 +220,7 @@ object RootDetector {
                     result != null && result.isNotEmpty()
                 }
             } finally {
-                process.destroy()
+                process.destroyForcibly()
             }
         } catch (e: Exception) {
             false
@@ -271,18 +271,18 @@ object RootDetector {
                         }
                     }
                 } finally {
-                    process.destroy()
-                }
-            } catch (e: Exception) {
-                // 忽略异常
+                process.destroyForcibly()
             }
+        } catch (e: Exception) {
+            // 忽略异常
         }
-        return false
     }
+    return false
+}
 
-    /**
-     * 检查已安装的 Root 管理应用
-     */
+/**
+ * 检查已安装的 Root 管理应用
+ */
     fun checkRootPackages(context: Context): Boolean {
         val pm = context.packageManager
         for (packageName in ROOT_PACKAGES) {
@@ -353,18 +353,18 @@ object RootDetector {
                         }
                     }
                 } finally {
-                    process.destroy()
-                }
-            } catch (e: Exception) {
-                // 忽略异常
+                process.destroyForcibly()
             }
+        } catch (e: Exception) {
+            // 忽略异常
         }
-        return false
     }
+    return false
+}
 
-    /**
-     * 检查可写系统路径
-     */
+/**
+ * 检查可写系统路径
+ */
     fun checkRWPaths(): Boolean {
         val paths = arrayOf(
             "/system",
@@ -406,7 +406,7 @@ object RootDetector {
                     output?.contains("uid=0") ?: false
                 }
             } finally {
-                process.destroy()
+                process.destroyForcibly()
             }
         } catch (e: Exception) {
             false

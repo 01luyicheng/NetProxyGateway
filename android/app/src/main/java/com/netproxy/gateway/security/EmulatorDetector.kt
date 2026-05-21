@@ -309,7 +309,7 @@ object EmulatorDetector {
                         }
                     }
                 } finally {
-                    process.destroy()
+                    process.destroyForcibly()
                 }
             } catch (e: Exception) {
                 // 忽略异常
