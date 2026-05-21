@@ -14,12 +14,23 @@ val mqttBrokerUrlTlsDebug = providers.gradleProperty("MQTT_BROKER_URL_TLS_DEBUG"
 val mqttBrokerUrlPlainDebug = providers.gradleProperty("MQTT_BROKER_URL_PLAIN_DEBUG")
     .orElse("tcp://localhost:1883")
     .get()
+val isReleaseTaskRequested = gradle.startParameter.taskNames.any {
+    it.contains("release", ignoreCase = true)
+}
 val mqttBrokerUrlTlsRelease = providers.gradleProperty("MQTT_BROKER_URL_TLS_RELEASE")
-    .orElse("ssl://localhost:8883")
-    .get()
+    .orNull
+    ?: if (isReleaseTaskRequested) {
+        throw GradleException("MQTT_BROKER_URL_TLS_RELEASE must be configured for release builds")
+    } else {
+        mqttBrokerUrlTlsDebug
+    }
 val mqttBrokerUrlPlainRelease = providers.gradleProperty("MQTT_BROKER_URL_PLAIN_RELEASE")
-    .orElse("")
-    .get()
+    .orNull
+    ?: if (isReleaseTaskRequested) {
+        throw GradleException("MQTT_BROKER_URL_PLAIN_RELEASE must be configured for release builds")
+    } else {
+        mqttBrokerUrlPlainDebug
+    }
 val mqttTlsPublicKeyPinsDebug = providers.gradleProperty("MQTT_TLS_PUBLIC_KEY_PINS_DEBUG")
     .orElse("")
     .get()

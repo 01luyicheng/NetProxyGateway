@@ -198,11 +198,13 @@
 - **风险**: 中。难以发现和诊断线上问题
 - **建议修复**: 添加关键指标收集和上报机制
 
-### N11: 硬编码默认值不安全
+### N11: 硬编码默认值不安全 [已修复]
+- **状态**: 已修复（release 构建改为 fail-fast，debug 保留 localhost 默认值用于本地开发）
+- **修复策略**: `MQTT_BROKER_URL_TLS_RELEASE` / `MQTT_BROKER_URL_PLAIN_RELEASE` 未配置时在 Gradle 配置阶段直接失败，避免 release 使用默认地址
+- **修复提交**: f6dfb3c
 - **位置**: `android/app/build.gradle.kts`
-- **问题**: `mqttBrokerUrlTlsDebug` 等配置使用 `localhost` 作为默认值，可能意外连接到错误服务器
-- **风险**: 低。仅影响 debug 构建
-- **建议修复**: 移除默认值，强制在构建时配置
+- **问题**: 过去 release 也可能因默认值回退而误用本地地址；现已改为必须显式配置 release MQTT 地址
+- **风险**: 低（修复前为配置失误风险）
 
 ### N12: 运行时配置缺失
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L96-99)
