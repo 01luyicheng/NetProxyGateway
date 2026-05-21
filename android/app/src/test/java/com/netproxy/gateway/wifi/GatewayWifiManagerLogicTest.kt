@@ -1,5 +1,6 @@
 package com.netproxy.gateway.wifi
 
+import com.netproxy.gateway.result.AppResult
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -149,5 +150,21 @@ class GatewayWifiManagerLogicTest {
                 securityType = GatewayWifiManager.SecurityType.WPA3_SAE
             )
         )
+    }
+
+    @Test
+    fun toLegacyStartScanReturn_returnsFalseOnError() {
+        val fallback = GatewayWifiManager.toLegacyStartScanReturn(
+            AppResult.error(IllegalStateException("scan failed"))
+        )
+        assertFalse(fallback)
+    }
+
+    @Test
+    fun toLegacyScanResultsReturn_returnsEmptyOnError() {
+        val fallback = GatewayWifiManager.toLegacyScanResultsReturn(
+            AppResult.error(IllegalStateException("read failed"))
+        )
+        assertTrue(fallback.isEmpty())
     }
 }

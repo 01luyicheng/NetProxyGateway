@@ -18,6 +18,7 @@ import androidx.core.content.ContextCompat
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.netproxy.gateway.result.AppResult
+import com.netproxy.gateway.result.getOrDefault
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -205,17 +206,19 @@ class GatewayWifiManager @Inject constructor(
         ): Boolean {
             return isEncryptedStorageAvailable || !securityType.requiresPassword
         }
+
+        internal fun toLegacyStartScanReturn(result: AppResult<Boolean>): Boolean {
+            return result.getOrDefault(false)
+        }
+
+        internal fun toLegacyScanResultsReturn(result: AppResult<List<WifiNetwork>>): List<WifiNetwork> {
+            return result.getOrDefault(emptyList())
+        }
     }
 
     @Suppress("DEPRECATION")
     fun startScan(): Boolean {
-        if (!hasWifiScanPermission(context)) {
-            logger.warn("Cannot start scan: permission not granted")
-            return false
-        }
-        // Note: startScan() is deprecated in API 28+ with stricter throttling.
-        // Consider using WifiManager#registerScanResultsCallback for API 29+.
-        return wifiManager.startScan()
+        return toLegacyStartScanReturn(startScanWithResult())
     }
 
     fun startScanWithResult(): AppResult<Boolean> {
@@ -227,31 +230,7 @@ class GatewayWifiManager @Inject constructor(
 
     @Suppress("DEPRECATION")
     fun getScanResults(): List<WifiNetwork> {
-        if (!hasWifiScanPermission(context)) {
-            logger.warn("Cannot get scan results: permission not granted")
-            return emptyList()
-        }
-
-        // Note: getScanResults() requires ACCESS_FINE_LOCATION or NEARBY_WIFI_DEVICES permission.
-        // For API 29+, consider using WifiManager#registerScanResultsCallback.
-        return try {
-            wifiManager.scanResults
-                .filter { !it.SSID.isNullOrEmpty() }
-                .map { result ->
-                    WifiNetwork(
-                        ssid = result.SSID,
-                        bssid = result.BSSID,
-                        signalStrength = result.level,
-                        frequency = result.frequency,
-                        capabilities = result.capabilities,
-                        isSecure = isSecureCapabilities(result.capabilities)
-                    )
-                }
-                .sortedByDescending { it.signalStrength }
-        } catch (e: SecurityException) {
-            logger.error("SecurityException when getting scan results: ${e.message}")
-            emptyList()
-        }
+        return toLegacyScanResultsReturn(getScanResultsWithResult())
     }
 
     fun getScanResultsWithResult(): AppResult<List<WifiNetwork>> {
