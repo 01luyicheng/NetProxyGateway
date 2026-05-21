@@ -390,6 +390,10 @@ class GatewayVpnService : AndroidVpnService() {
      * 判断是否是私有 IP 地址
      */
     private fun isPrivateIp(ip: String): Boolean {
+        val validIpv4 = IpAddressUtils.validateIpv4WithResult(ip).getOrNull() == true
+        if (!validIpv4) {
+            return false
+        }
         return IpAddressUtils.isPrivateIpv4Rfc1918(ip)
     }
     
@@ -1158,5 +1162,4 @@ class GatewayVpnService : AndroidVpnService() {
         super.onRevoke()
     }
 }
-
 

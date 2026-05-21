@@ -123,6 +123,10 @@ class Socks5ProxyHandler(
                 return false
             }
             
+            val validIpv4 = IpAddressUtils.validateIpv4WithResult(ip).getOrNull() == true
+            if (!validIpv4) {
+                return false
+            }
             // Only allow RFC1918 private addresses
             IpAddressUtils.isPrivateIpv4Rfc1918(ip)
         } catch (e: Exception) {
@@ -301,4 +305,3 @@ private class RelayHandler(
         relayChannel.close()
     }
 }
-

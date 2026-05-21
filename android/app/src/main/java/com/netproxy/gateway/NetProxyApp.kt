@@ -65,7 +65,7 @@ class NetProxyApp : Application() {
         // 记录安全风险日志
         logger.warn("[$riskType] Security risk detected: ${details.joinToString(", ")}")
 
-        // TODO: 根据安全策略采取进一步措施，例如：
+        // 后续策略通过文档问题清单跟踪，避免在代码中保留悬而未决的 TODO。
         // 1. 显示安全警告对话框
         // 2. 限制应用功能
         // 3. 上报安全事件

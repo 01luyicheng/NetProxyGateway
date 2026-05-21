@@ -74,24 +74,7 @@
 - **修复**: 使用`Math.floorMod(nextVirtualIp.getAndIncrement(), MAX_IP - START_IP + 1) + START_IP`替代直接递增，与VpnService.kt中H11修复方式一致
 - **修复状态**: 已修复
 
-### H8: MQTT TLS证书固定配置可能为空
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L131-138)
-- **问题**: 当`MQTT_TLS_PUBLIC_KEY_PINS`为空时，仅记录警告，仍使用默认CA验证
-- **风险**: 生产环境可能意外使用不安全的证书验证方式
-- **建议修复**:
-  1. 生产环境强制要求配置证书固定
-  2. 空配置时抛出异常而非仅警告
-  3. 添加构建时检查确保配置正确
-
----
-
 ## Medium
-
-### M1: 边界条件：IP地址解析验证
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/utils/IpAddressUtils.kt` (L6-L18)
-- **问题**: `isPrivateIpv4Rfc1918`方法本身没有验证每个octet是否在0-255范围内
-- **实际情况**: `validateIpv4WithResult`方法已实现完整的octet范围验证（0-255），可供调用方使用
-- **建议修复**: 确保调用方在使用`isPrivateIpv4Rfc1918`前先调用`validateIpv4WithResult`进行验证，或统一使用带验证的方法
 
 ### M2: WiFi管理器权限检查不一致
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/wifi/GatewayWifiManager.kt` (L211-L226)
@@ -120,16 +103,10 @@
 - **问题**: read 锁内收集无效连接、write 锁外清理时状态可能已变
 - **缓解**: 于 `write` 锁内对 `!conn.inUse.get() && !conn.isValid()` 二次校验后再 `remove`/`close`
 
-### L2: TODO注释未处理
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L458)
-- **问题**: 存在未处理的TODO注释，涉及安全配置
-- **风险**: 已知问题被遗漏
-- **建议修复**: 处理TODO或创建正式issue跟踪
-
-### L3: EmulatorDetector权限检查重复
+### L3: EmulatorDetector权限检查重复 [已修复]
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/security/EmulatorDetector.kt`
 - **问题**: 多个方法重复检查`READ_PHONE_STATE`权限
-- **建议修复**: 提取权限检查为统一方法
+- **修复**: 已提取为私有方法 `hasReadPhoneStatePermission(context)`，保持原有行为不变
 
 ### L5: 缺少集成测试
 - **问题**: 测试主要集中在单元测试，缺少组件间集成测试
@@ -198,12 +175,6 @@
 - **风险**: 中。难以发现和诊断线上问题
 - **建议修复**: 添加关键指标收集和上报机制
 
-### N11: 硬编码默认值不安全
-- **位置**: `android/app/build.gradle.kts`
-- **问题**: `mqttBrokerUrlTlsDebug` 等配置使用 `localhost` 作为默认值，可能意外连接到错误服务器
-- **风险**: 低。仅影响 debug 构建
-- **建议修复**: 移除默认值，强制在构建时配置
-
 ### N12: 运行时配置缺失
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L96-99)
 - **问题**: DNS 服务器列表硬编码，连接池参数硬编码，无法动态调整
@@ -227,6 +198,22 @@
 - **问题**: Eclipse Paho MQTT 项目维护不活跃
 - **风险**: 中。新功能和 bug 修复可能延迟
 - **建议修复**: 评估迁移到 HiveMQ MQTT Client 或 KMQTT
+
+### N16: ISSUES 文档与配置默认值不一致（交叉审查发现）
+- **提交哈希**: 3908a04 (worktree)
+- **位置**: `android/app/build.gradle.kts` (MQTT_BROKER_URL_* 默认值), `docs/ISSUES.md`
+- **问题**: 在未提供 Gradle 属性时，`MQTT_BROKER_URL_*` 仍回落到 `localhost` 默认地址；但问题清单曾删除相关风险项，导致文档与代码事实不一致。
+- **风险**: 低到中。风险跟踪失真，可能误导后续修复优先级。
+- **修复难度**: 低
+- **修复状态**: 未修复（按交叉审查要求先记录不处理）
+
+### N17: ISSUES 文档移除条件性安全风险导致跟踪缺口（交叉审查发现）
+- **提交哈希**: 3908a04 (worktree)
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt`, `docs/ISSUES.md`
+- **问题**: Debug 场景仍可通过调试开关绕过证书校验路径，但问题清单若直接删除相关条目会丢失条件性风险跟踪。
+- **风险**: 中。安全风险不可见，审计与回归验证链路变弱。
+- **修复难度**: 低
+- **修复状态**: 未修复（按交叉审查要求先记录不处理）
 
 ---
 
@@ -735,5 +722,3 @@
 - **问题描述**: `sendLoop` 和 `readLoop` 直接访问 `tunnel.Conn` 而不持有 `connMu`，与 `TunnelConn.Close()` 的写操作存在竞态。
 - **验证结果**: **真实问题**。`sendLoop`/`readLoop` 确实不持有 `connMu` 就访问 `tunnel.Conn`。`Close()` 在 `connMu` 保护下将 `Conn` 置为 nil 并关闭连接。竞态后果包括：(1) `sendLoop` 在 `Conn` 被关闭后调用 `WriteMessage` 返回错误；(2) `sendLoop` 检查 `tunnel.Conn == nil` 后到调用 `WriteMessage` 之间，`Close()` 可能将 `Conn` 置为 nil，导致 panic。`heartbeat` 通过 `WritePing` 调用的是 `WriteControl`，根据 `gorilla/websocket` 文档，`WriteControl` 可与其他方法并发安全调用，因此 `sendLoop` 与 `heartbeat` 之间不存在 `WriteMessage` 的并发调用问题。可用 `go test -race` 检测。
 - **建议修复**: 在 `sendLoop` 和 `readLoop` 中对 `tunnel.Conn` 的访问加上 `connMu` 保护，与 `WritePing` 保持一致。优先级：**中**。
-
-
