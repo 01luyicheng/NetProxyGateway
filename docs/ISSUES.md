@@ -662,16 +662,16 @@
 ### N67: 子进程 `errorStream` 消费引入新的管道阻塞死锁
 - **提交哈希**: f31bcd1
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/security/EmulatorDetector.kt`、`RootDetector.kt`
-- **问题描述**: 先完整消费 `errorStream` 再消费 `inputStream`。若 `errorStream` 产生大量输出，`readLine()` 循环会阻塞；同时子进程向 `inputStream` 写入导致管道填满，子进程阻塞在 `write()`，形成死锁。
-- **验证结果**: **潜在风险（建议修复）**。`getprop`/`which`/`ps` 的 stderr 几乎总是空的，但 `su` 命令在 verbose 模式下可能输出大量 stderr。Android/Linux 管道缓冲区约 64KB，极端场景下理论死锁存在。
+- **问题描述**: 先完整消费 `errorStream` 再消费 `inputStream`。若子进程向 `inputStream`（stdout）写入的数据超过管道缓冲区（约 64KB），而父进程仍在 `errorStream`（stderr）上阻塞等待 `readLine()`，子进程将因 stdout 管道满而阻塞在 `write()`，无法继续执行以产生更多 stderr 输出；父进程因此永远等待，形成管道缓冲区填满导致的进程间死锁。
+- **验证结果**: **潜在风险（建议修复）**。`getprop`/`which`/`ps` 的 stderr 几乎总是空的，但 `su` 命令在 verbose 模式下可能输出大量 stderr。极端场景下理论死锁存在。
 - **建议修复**: 统一改为 `ProcessBuilder.redirectErrorStream(true)` 合并 stdout 与 stderr，或并发消费两个流。优先级：**中**。
 
-### N68: 子进程超时后仅 `destroy()` 可能残留挂起进程
+### N68: 子进程超时后仅 `destroy()` 可能残留持续运行进程
 - **提交哈希**: f31bcd1
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/security/EmulatorDetector.kt`、`RootDetector.kt`
 - **问题描述**: 超时后仅调用 `process.destroy()`，未使用 `destroyForcibly()`。`su` 等命令等待用户授权时不响应 `destroy()`。
-- **验证结果**: **潜在风险（建议修复）**。`destroy()` 发送 SIGTERM，`su` 在等待授权时可能忽略。超时后 finally 中确实会调用 `destroy()`，但不保证进程立即结束。多次调用可能积累挂起的 `su` 进程。
-- **建议修复**: 超时后使用 `destroyForcibly()`（需 API 26+；若 minSdk < 26 需条件调用或反射降级）。优先级：**中**。
+- **验证结果**: **潜在风险（建议修复）**。`destroy()` 发送 SIGTERM，`su` 在等待授权时可能忽略。超时后 finally 中确实会调用 `destroy()`，但不保证进程立即结束。多次安全检测命令超时后可能积累残留的 `su` 进程。
+- **建议修复**: 超时后使用 `destroyForcibly()`（项目 minSdk = 26，完全支持）。优先级：**中**。
 
 ### N69: `StreamConn.Read` 中 `readMu` 锁持有时间过长阻塞并发读取
 - **提交哈希**: 15414b05
@@ -732,8 +732,8 @@
 ### N77: `tunnel/main.go` `sendLoop`/`readLoop` 存在数据竞争风险
 - **提交哈希**: 既有问题（非本次引入）
 - **位置**: `server/tunnel/main.go` (`sendLoop`, `readLoop`)
-- **问题描述**: `sendLoop` 和 `readLoop` 直接访问 `tunnel.Conn` 和 `tunnel.closeChan` 而不持有 `connMu`，与 `TunnelConn.Close()` 的写操作存在竞态。
-- **验证结果**: **真实问题**。`sendLoop`/`readLoop` 确实不持有 `connMu` 就访问 `tunnel.Conn`。`Close()` 在 `connMu` 保护下修改状态。竞态后果包括：(1) `WriteMessage` 对已关闭的 `websocket.Conn` 返回错误；(2) 更严重的是，`sendLoop` 与 `heartbeat`（通过 `WritePing`，已持有 `connMu`）可能并发调用 `WriteMessage`，`gorilla/websocket` 的 `WriteMessage` 非线程安全，可能导致 WebSocket 帧交错或内部状态损坏。可用 `go test -race` 检测。
+- **问题描述**: `sendLoop` 和 `readLoop` 直接访问 `tunnel.Conn` 而不持有 `connMu`，与 `TunnelConn.Close()` 的写操作存在竞态。
+- **验证结果**: **真实问题**。`sendLoop`/`readLoop` 确实不持有 `connMu` 就访问 `tunnel.Conn`。`Close()` 在 `connMu` 保护下将 `Conn` 置为 nil 并关闭连接。竞态后果包括：(1) `sendLoop` 在 `Conn` 被关闭后调用 `WriteMessage` 返回错误；(2) `sendLoop` 检查 `tunnel.Conn == nil` 后到调用 `WriteMessage` 之间，`Close()` 可能将 `Conn` 置为 nil，导致 panic。`heartbeat` 通过 `WritePing` 调用的是 `WriteControl`，根据 `gorilla/websocket` 文档，`WriteControl` 可与其他方法并发安全调用，因此 `sendLoop` 与 `heartbeat` 之间不存在 `WriteMessage` 的并发调用问题。可用 `go test -race` 检测。
 - **建议修复**: 在 `sendLoop` 和 `readLoop` 中对 `tunnel.Conn` 的访问加上 `connMu` 保护，与 `WritePing` 保持一致。优先级：**中**。
 
 
