@@ -610,6 +610,7 @@
 - **问题描述**: `MqttConnectionManager` 注入的是 `@Before` 中的 `TestScope(testDispatcher)`，但测试体使用无参 `runTest { advanceUntilIdle() }`，默认可能使用与 `testDispatcher` 不同的 `StandardTestDispatcher`。在部分 kotlinx-coroutines-test 版本/负载下，`advanceUntilIdle()` 可能无法排空 manager 协程，flaky 风险未完全消除。
 - **风险**: 中。测试套件仍可能偶发失败
 - **建议修复**: 改为 `runTest(testDispatcher) { testScope.advanceUntilIdle() }` 或让 manager 使用 `runTest` 提供的 scope
+- **修复状态**: 已修复。提交 `299d6da` 将测试改为 `testScope.runTest` + `testScope.advanceUntilIdle()`。
 
 ---
 
@@ -633,8 +634,106 @@
 - **风险**: 中。高并发下延迟连接建立/清理
 - **建议修复**: 锁内仅从 map 删除并 `detachTunnel`，锁外 `Close()`（与 `getExistingConn` 模式一致）
 
-### N60 状态
-- **处置**: 工作区 `MqttConnectionManagerConnectCleanupTest` 已改为 `testScope.runTest` + `testScope.advanceUntilIdle()`，拟随测试提交关闭 N60
+---
 
+## SubAgent 交叉审查发现（2026-05-20，审查提交 690d572..2e2e297）
+
+### N64: `MqttConnectionManager.disconnect()` 在 `synchronized` 块内修改 `StateFlow`
+- **提交哈希**: 3c3784f
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (`disconnect()` 内 synchronized 块)
+- **问题描述**: `_connectionState.value = Disconnected` 和 `_diagnostics.update {}` 在 `synchronized(this@MqttConnectionManager)` 块内执行。
+- **验证结果**: **误报**。StateFlow.value setter 是线程安全的，收集器在协程中异步执行，不会同步阻塞。当前 MainViewModel 的收集器不持有 MqttConnectionManager 的锁，不存在死锁条件。模式虽不够理想，但不是当前真实 bug。
+- **建议**: 无需修复。
+
+### N65: `MqttConnectionManager.connectionLost` 在非协程线程直接修改 `StateFlow`
+- **提交哈希**: 3c3784f（既有问题，非本次引入）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (`connectionLost` 回调)
+- **问题描述**: Paho MQTT 的 `connectionLost` 回调运行在 Paho 内部线程，直接修改 `_connectionState.value`。
+- **验证结果**: **误报**。StateFlow.value setter 是线程安全的，设计目的就是允许从任意线程发布值。收集器在协程中异步消费，MainViewModel 的 collect 使用 viewModelScope（Dispatchers.Main），Compose UI 自动在主线程消费。这是标准用法。
+- **建议**: 无需修复。
+
+### N66: `VirtualIpAllocator` 分配失败时 `nextVirtualIp` 泄漏
+- **提交哈希**: 690d572
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VirtualIpAllocator.kt`
+- **问题描述**: `nextVirtualIp.getAndIncrement()` 在 `require(attempts < maxAttempts)` 之前被多次调用。若 `require` 抛出（IP 池耗尽），`nextVirtualIp` 已递增但无 IP 被分配。
+- **验证结果**: **潜在风险（建议修复）**。IP 池大小为 254（MAX_IP - START_IP + 1）。AtomicInteger 溢出后会自然回绕，且 `Math.floorMod` 能将任何整数映射回有效范围，功能上不会出问题。但 `nextVirtualIp` 值会无意义漂移，若后续代码依赖其原始值做判断可能导致意外行为。
+- **建议修复**: 将 `getAndIncrement()` 移到确认分配成功后再调用，避免漂移。优先级：**低**。
+
+### N67: 子进程 `errorStream` 消费引入新的管道阻塞死锁
+- **提交哈希**: f31bcd1
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/EmulatorDetector.kt`、`RootDetector.kt`
+- **问题描述**: 先完整消费 `errorStream` 再消费 `inputStream`。若 `errorStream` 产生大量输出，`readLine()` 循环会阻塞；同时子进程向 `inputStream` 写入导致管道填满，子进程阻塞在 `write()`，形成死锁。
+- **验证结果**: **潜在风险（建议修复）**。`getprop`/`which`/`ps` 的 stderr 几乎总是空的，但 `su` 命令在 verbose 模式下可能输出大量 stderr。Android/Linux 管道缓冲区约 64KB，极端场景下理论死锁存在。
+- **建议修复**: 统一改为 `ProcessBuilder.redirectErrorStream(true)` 合并 stdout 与 stderr，或并发消费两个流。优先级：**中**。
+
+### N68: 子进程超时后仅 `destroy()` 可能残留挂起进程
+- **提交哈希**: f31bcd1
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/EmulatorDetector.kt`、`RootDetector.kt`
+- **问题描述**: 超时后仅调用 `process.destroy()`，未使用 `destroyForcibly()`。`su` 等命令等待用户授权时不响应 `destroy()`。
+- **验证结果**: **潜在风险（建议修复）**。`destroy()` 发送 SIGTERM，`su` 在等待授权时可能忽略。超时后 finally 中确实会调用 `destroy()`，但不保证进程立即结束。多次调用可能积累挂起的 `su` 进程。
+- **建议修复**: 超时后使用 `destroyForcibly()`（需 API 26+；若 minSdk < 26 需条件调用或反射降级）。优先级：**中**。
+
+### N69: `StreamConn.Read` 中 `readMu` 锁持有时间过长阻塞并发读取
+- **提交哈希**: 15414b05
+- **位置**: `server/socks5-proxy/main.go` (`StreamConn.Read`)
+- **问题描述**: `readMu` 在 `Read` 入口获取，直到方法返回才释放。`select` 阻塞等待 `DataChan`/`CloseChan`/`timer.C` 期间锁一直被持有。
+- **验证结果**: **误报**。虽然 `readMu` 确实在阻塞等待期间被持有，但当前代码中 `StreamConn.Read` 只被 `io.Copy` 在单 goroutine 中调用（`relay` 函数启动两个方向的 `copyStream`，每个 StreamConn 只在一个 goroutine 中被读取），不存在多个 goroutine 并发读取同一个 StreamConn 的场景。该锁的主要目的是保护 `readRemainder` 的状态一致性。
+- **建议**: 无需修复。
+
+### N70: `StreamConn.SetReadDeadline` 更新无法被阻塞中的 `Read` 感知
+- **提交哈希**: 15414b05
+- **位置**: `server/socks5-proxy/main.go`
+- **问题描述**: `SetReadDeadline` 使用 `atomic.Value` 存储 deadline，但已进入 `select` 阻塞的 `Read` 不会响应新的 deadline。
+- **验证结果**: **潜在风险（建议修复）**。从纯技术角度，动态更新确实无法被已阻塞的 `Read` 感知。但当前 SOCKS5 代理场景下没有动态更新 deadline 的需求（`io.Copy` 不调用 `SetReadDeadline`）。这是接口契约层面的潜在风险，而非当前运行时的 bug。
+- **建议**: 在 `StreamConn` 文档中明确说明此限制，或考虑使用 `context.Context` 方案。优先级：**低**。
+
+### N71: `getExistingConn` 返回的连接可能在调用方使用前失效
+- **提交哈希**: 15414b05
+- **位置**: `server/socks5-proxy/main.go` (`getExistingConn`)
+- **问题描述**: RLock 获取 conn 引用后释放锁，锁外调用 `isConnAlive`。竞态窗口内另一 goroutine 可能替换连接。
+- **验证结果**: **误报**。虽然理论上存在"检查通过后立即失效"的竞态窗口，但：1) `isConnAlive` 通过发送 WebSocket Ping 验证了连接的即时状态；2) 竞态窗口极短（微秒级），在实际网络环境中可忽略；3) 即使发生，后续 Write 会失败并返回错误，不会导致未定义行为；4) 这是标准的 TOCTOU 问题，在没有原子性"获取并验证"API 的情况下属于可接受的设计权衡。
+- **建议**: 无需修复。
+
+### N72: `readLoop` defer 不调用 `detachTunnel()`
+- **提交哈希**: 15414b05
+- **位置**: `server/socks5-proxy/main.go` (`readLoop` defer)
+- **问题描述**: `readLoop` defer 调用 `closeLocal()` 关闭 streams，但不调用 `detachTunnel()`。`stream.TunnelConn` 仍指向已关闭的 WebSocket 连接。
+- **验证结果**: **代码风格建议**。`closeLocal()` 设置 `Closed=1` 后，`StreamConn.Write` 在入口原子检查（`atomic.LoadInt32(&s.Closed) == 1`）会立即返回错误，不会执行到 `tunnelConn.WriteMessage`。因此当前代码在功能上是安全的。添加 `detachTunnel()` 仅有防御性价值（彻底切断引用关系），无实际 bug 风险。
+- **建议修复**: 在 `readLoop` defer 中补充 `stream.detachTunnel()` 调用，消除 `TunnelConn` 悬空引用。优先级：**极低**。
+
+### N73: Gradle `configuration-cache` 与 `configureondemand` 存在已知冲突
+- **提交哈希**: b9a9f97
+- **位置**: `android/gradle.properties`
+- **问题描述**: 同时启用 `org.gradle.configureondemand=true` 和 `org.gradle.configuration-cache=true`。
+- **验证结果**: **真实问题**。Gradle 官方文档明确说明 Configure on Demand 与 Configuration Cache 不兼容，且前者自 Gradle 8.1 起已被弃用。即使当前构建未出现明显错误，这种配置组合属于已知的坏味道，可能在特定场景（如 clean build、CI 环境）下导致不可预期的构建行为。
+- **建议修复**: 移除 `org.gradle.configureondemand=true`。优先级：**中**。
+
+### N74: `MainViewModelTest` 使用 `mockkConstructor(Intent)` 全局静态污染
+- **提交哈希**: cc86ec21
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/ui/viewmodel/MainViewModelTest.kt`
+- **问题描述**: `mockkConstructor(Intent::class)` 是全局静态修改，若测试并行运行或与其他测试类的 `Intent` mock 冲突，会产生交叉污染。
+- **验证结果**: **误报**。`mockkConstructor` 在 `@Before setUp()` 中设置，在 `@After tearDown()` 中通过 `unmockkConstructor` 清理。JUnit 的 `@After` 保证执行（即使测试失败）。项目中只有这一个测试类 mock 了 Intent，且 Gradle 默认串行执行测试，不存在跨测试污染。
+- **建议**: 无需修复。这是代码风格偏好问题，不是真实 bug。
+
+### N75: `MainViewModel.durationUpdateJob` 使用 `Dispatchers.Default` 无测试覆盖
+- **提交哈希**: cc86ec21（既有设计问题）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt`
+- **问题描述**: `durationUpdateJob` 使用 `Dispatchers.Default`，不受 `StandardTestDispatcher` 控制，计时逻辑完全未被测试覆盖。
+- **验证结果**: **误报（已知限制）**。测试注释已明确说明这是已知限制。计时逻辑足够简单（每1秒用 `SystemClock.elapsedRealtime() - connectionStartTime` 更新一次），没有复杂的状态机或边界条件。将调度器注入需要修改构造函数签名或引入额外抽象层，复杂度远超测试收益。
+- **建议**: 无需修复。当前测试策略（验证无崩溃 + 初始值为0）已足够。
+
+### N76: `doValidatedHTTPPost` 在 socks5-proxy 与 tunnel 中重复定义
+- **提交哈希**: 83c547be
+- **位置**: `server/socks5-proxy/main.go`、`server/tunnel/main.go`
+- **问题描述**: 两个文件中 `doValidatedHTTPPost` 几乎完全相同，违反 DRY 原则。
+- **验证结果**: **潜在风险（建议修复）**。两个实现确实一致，但当前 server/ 下三个服务是独立的 Go 模块（各自有 go.mod），没有共享包。提取到共享包需要创建新模块并修改所有服务的依赖，涉及构建流程和部署流程变更。函数仅30行，逻辑简单，当前工作正常。
+- **建议修复**: 在统一 server/ 目录的 Go 模块结构时一并处理（与 TECH_DEBT.md C7 相关）。优先级：**低**。
+
+### N77: `tunnel/main.go` `sendLoop`/`readLoop` 存在数据竞争风险
+- **提交哈希**: 既有问题（非本次引入）
+- **位置**: `server/tunnel/main.go` (`sendLoop`, `readLoop`)
+- **问题描述**: `sendLoop` 和 `readLoop` 直接访问 `tunnel.Conn` 和 `tunnel.closeChan` 而不持有 `connMu`，与 `TunnelConn.Close()` 的写操作存在竞态。
+- **验证结果**: **真实问题**。`sendLoop`/`readLoop` 确实不持有 `connMu` 就访问 `tunnel.Conn`。`Close()` 在 `connMu` 保护下修改状态。竞态后果包括：(1) `WriteMessage` 对已关闭的 `websocket.Conn` 返回错误；(2) 更严重的是，`sendLoop` 与 `heartbeat`（通过 `WritePing`，已持有 `connMu`）可能并发调用 `WriteMessage`，`gorilla/websocket` 的 `WriteMessage` 非线程安全，可能导致 WebSocket 帧交错或内部状态损坏。可用 `go test -race` 检测。
+- **建议修复**: 在 `sendLoop` 和 `readLoop` 中对 `tunnel.Conn` 的访问加上 `connMu` 保护，与 `WritePing` 保持一致。优先级：**中**。
 
 
