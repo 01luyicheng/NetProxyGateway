@@ -229,7 +229,7 @@ class GatewayWifiManager @Inject constructor(
         return try {
             AppResult.success(wifiManager.startScan())
         } catch (e: SecurityException) {
-            logger.error("SecurityException when starting scan: ${e.message}")
+            logger.error("SecurityException when starting scan", e)
             AppResult.error(e)
         }
     }
@@ -261,7 +261,7 @@ class GatewayWifiManager @Inject constructor(
                 .sortedByDescending { it.signalStrength }
             AppResult.success(networks)
         } catch (e: SecurityException) {
-            logger.error("SecurityException when getting scan results: ${e.message}")
+            logger.error("SecurityException when getting scan results", e)
             AppResult.error(e)
         }
     }
