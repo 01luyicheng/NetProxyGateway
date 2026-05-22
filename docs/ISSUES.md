@@ -709,4 +709,17 @@
 - **验证结果**: **真实问题**。`sendLoop`/`readLoop` 确实不持有 `connMu` 就访问 `tunnel.Conn`。`Close()` 在 `connMu` 保护下将 `Conn` 置为 nil 并关闭连接。竞态后果包括：(1) `sendLoop` 在 `Conn` 被关闭后调用 `WriteMessage` 返回错误；(2) `sendLoop` 检查 `tunnel.Conn == nil` 后到调用 `WriteMessage` 之间，`Close()` 可能将 `Conn` 置为 nil，导致 panic。`heartbeat` 通过 `WritePing` 调用的是 `WriteControl`，根据 `gorilla/websocket` 文档，`WriteControl` 可与其他方法并发安全调用，因此 `sendLoop` 与 `heartbeat` 之间不存在 `WriteMessage` 的并发调用问题。可用 `go test -race` 检测。
 - **建议修复**: 在 `sendLoop` 和 `readLoop` 中对 `tunnel.Conn` 的访问加上 `connMu` 保护，与 `WritePing` 保持一致。优先级：**中**。
 
+---
+
+## 交叉审查发现（2026-05-21，审查提交 4c84e4e..4c62b32）
+
+> 以下问题由5轮修复批次结束后的交叉审查记录；**本轮不修复**，留待后续处理。
+
+### N78: `readLoop` defer 中 `conn.Close()` 仍在 `tc.mu` 锁内执行
+- **提交哈希**: f93054a（N63 修复未覆盖此路径）
+- **位置**: `server/socks5-proxy/main.go` (`readLoop` defer，约 L860-873)
+- **问题描述**: `readLoop` 的 `defer` 块中获取 `tc.mu.Lock()`，然后在锁内调用 `stream.closeLocal()` 和 `conn.Close()`。`conn.Close()` 是 WebSocket I/O 操作，持锁期间阻塞会卡住整个 `TunnelClient` 的流管理。N63 仅修复了 `cleanupStream` 的同类问题，但 `readLoop` 的 defer 路径存在相同的持锁 I/O 模式。
+- **风险**: 中。连接异常断开时，若 `conn.Close()` 阻塞，所有需要 `tc.mu` 的隧道操作（如新建流、清理流）都会被延迟。
+- **建议修复**: 参考 `getExistingConn` / `cleanupStream` 的模式，将 I/O 操作移到锁外执行。可在锁内收集需要关闭的连接列表，解锁后再逐个关闭。
+
 
