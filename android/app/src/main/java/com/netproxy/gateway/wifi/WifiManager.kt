@@ -223,9 +223,15 @@ class GatewayWifiManager @Inject constructor(
 
     fun startScanWithResult(): AppResult<Boolean> {
         if (!hasWifiScanPermission(context)) {
+            logger.warn("Cannot start scan: permission not granted")
             return AppResult.error(SecurityException("WiFi scan permission not granted"))
         }
-        return AppResult.success(wifiManager.startScan())
+        return try {
+            AppResult.success(wifiManager.startScan())
+        } catch (e: SecurityException) {
+            logger.error("SecurityException when starting scan: ${e.message}")
+            AppResult.error(e)
+        }
     }
 
     @Suppress("DEPRECATION")
@@ -235,6 +241,7 @@ class GatewayWifiManager @Inject constructor(
 
     fun getScanResultsWithResult(): AppResult<List<WifiNetwork>> {
         if (!hasWifiScanPermission(context)) {
+            logger.warn("Cannot get scan results: permission not granted")
             return AppResult.error(SecurityException("WiFi scan permission not granted"))
         }
 
