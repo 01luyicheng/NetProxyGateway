@@ -1048,8 +1048,8 @@ func (tc *TunnelClient) cleanupStream(streamID string, streamConn *StreamConn) {
 	}()
 
 	tc.mu.Lock()
-	defer tc.mu.Unlock()
 	delete(tc.streams, streamID)
+	tc.mu.Unlock()
 	streamConn.Close()
 }
 
