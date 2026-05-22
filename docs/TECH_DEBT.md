@@ -91,30 +91,6 @@
   2. 添加并发安全问题的压力测试
   3. 使用真实（但隔离的）依赖替代纯模拟测试
 
-### C13: 魔法数字和硬编码协议常量 [待修复]
-- **状态**: 待修复（2026-04-15 Subagents代码审查发现）
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L383, L391, L628-694)
-- **问题描述**: 代码中大量使用魔法数字（如协议号6/17、IP包头字段0x45、TTL值64等），没有提取为命名常量，降低可读性和可维护性
-- **风险**: 低。代码可读性差，容易出错
-- **代码**:
-  ```kotlin
-  when (protocol) {
-      17 -> {  // UDP - 魔法数字
-      6 -> {   // TCP - 魔法数字
-  }
-  buffer[0] = 0x45  // IPv4, IHL=5 - 魔法数字
-  buffer[8] = 64    // TTL - 魔法数字
-  ```
-- **建议**: 提取为命名常量：
-  ```kotlin
-  companion object {
-      private const val PROTOCOL_TCP = 6
-      private const val PROTOCOL_UDP = 17
-      private const val IP_VERSION_IPV4 = 0x45
-      private const val IP_DEFAULT_TTL = 64
-  }
-  ```
-
 ### C14: 函数过长且职责不单一 [待修复]
 - **状态**: 待修复（2026-04-15 Subagents代码审查发现）
 - **位置**: 
