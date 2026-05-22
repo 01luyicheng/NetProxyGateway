@@ -1,5 +1,6 @@
 package com.netproxy.gateway.wifi
 
+import com.netproxy.gateway.result.AppResult
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -149,5 +150,64 @@ class GatewayWifiManagerLogicTest {
                 securityType = GatewayWifiManager.SecurityType.WPA3_SAE
             )
         )
+    }
+
+    @Test
+    fun toLegacyStartScanReturn_returnsFalseOnError() {
+        val fallback = GatewayWifiManager.toLegacyStartScanReturn(
+            AppResult.error(IllegalStateException("scan failed"))
+        )
+        assertFalse(fallback)
+    }
+
+    @Test
+    fun toLegacyScanResultsReturn_returnsEmptyOnError() {
+        val fallback = GatewayWifiManager.toLegacyScanResultsReturn(
+            AppResult.error(IllegalStateException("read failed"))
+        )
+        assertTrue(fallback.isEmpty())
+    }
+
+    @Test
+    fun toLegacyStartScanReturn_returnsTrueOnSuccess() {
+        val result = GatewayWifiManager.toLegacyStartScanReturn(
+            AppResult.success(true)
+        )
+        assertTrue(result)
+    }
+
+    @Test
+    fun toLegacyStartScanReturn_returnsFalseOnSuccessFalse() {
+        val result = GatewayWifiManager.toLegacyStartScanReturn(
+            AppResult.success(false)
+        )
+        assertFalse(result)
+    }
+
+    @Test
+    fun toLegacyScanResultsReturn_returnsDataOnSuccess() {
+        val networks = listOf(
+            WifiNetwork(
+                ssid = "TestNetwork",
+                bssid = "00:11:22:33:44:55",
+                signalStrength = -50,
+                frequency = 2412,
+                capabilities = "[WPA2-PSK-CCMP]",
+                isSecure = true
+            )
+        )
+        val result = GatewayWifiManager.toLegacyScanResultsReturn(
+            AppResult.success(networks)
+        )
+        assertEquals(1, result.size)
+        assertEquals("TestNetwork", result[0].ssid)
+    }
+
+    @Test
+    fun toLegacyScanResultsReturn_returnsEmptyOnSuccessEmptyList() {
+        val result = GatewayWifiManager.toLegacyScanResultsReturn(
+            AppResult.success(emptyList())
+        )
+        assertTrue(result.isEmpty())
     }
 }
