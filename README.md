@@ -1,6 +1,6 @@
 # NetProxyGateway
 
-面向远程网络协助场景的 Android 客户端与 Go 服务端仓库。
+面向远程网络协助场景的 Android 客户端与 Go 服务端仓库。https://github.com/01luyicheng/NetProxyGateway
 
 ## 工作入口
 
