@@ -79,8 +79,13 @@ class GatewayWifiManager @Inject constructor(
                     val success = intent.getBooleanExtra(AndroidWifiManager.EXTRA_RESULTS_UPDATED, false)
                     logger.debug("WiFi scan completed: success=$success")
 
-                    val results = getScanResults()
-                    trySend(results)
+                    when (val result = getScanResultsWithResult()) {
+                        is AppResult.Success -> trySend(result.data)
+                        is AppResult.Error -> {
+                            logger.error("Failed to get scan results", result.exception)
+                            trySend(emptyList())
+                        }
+                    }
                 }
             }
         }
@@ -88,7 +93,13 @@ class GatewayWifiManager @Inject constructor(
         val intentFilter = IntentFilter(AndroidWifiManager.SCAN_RESULTS_AVAILABLE_ACTION)
         context.registerReceiver(receiver, intentFilter)
 
-        trySend(getScanResults())
+        when (val initial = getScanResultsWithResult()) {
+            is AppResult.Success -> trySend(initial.data)
+            is AppResult.Error -> {
+                logger.error("Failed to get initial scan results", initial.exception)
+                trySend(emptyList())
+            }
+        }
 
         awaitClose {
             context.unregisterReceiver(receiver)
