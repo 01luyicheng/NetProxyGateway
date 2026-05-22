@@ -204,13 +204,10 @@ object RootDetector {
 
         // 尝试执行 which busybox
         return try {
-            val process = Runtime.getRuntime().exec(arrayOf("which", "busybox"))
+            val process = ProcessBuilder("which", "busybox")
+                .redirectErrorStream(true)
+                .start()
             try {
-                BufferedReader(InputStreamReader(process.errorStream)).use { errorReader ->
-                    while (errorReader.readLine() != null) {
-                        // 消费错误输出，避免阻塞
-                    }
-                }
                 BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
                     val result = reader.readLine()
                     val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
@@ -253,13 +250,10 @@ object RootDetector {
 
         for (prop in magiskProps) {
             try {
-                val process = Runtime.getRuntime().exec(arrayOf("getprop", prop))
+                val process = ProcessBuilder("getprop", prop)
+                    .redirectErrorStream(true)
+                    .start()
                 try {
-                    BufferedReader(InputStreamReader(process.errorStream)).use { errorReader ->
-                        while (errorReader.readLine() != null) {
-                            // 消费错误输出，避免阻塞
-                        }
-                    }
                     BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
                         val value = reader.readLine()
                         val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
@@ -335,13 +329,10 @@ object RootDetector {
 
         for ((key, badValue) in dangerousProps) {
             try {
-                val process = Runtime.getRuntime().exec(arrayOf("getprop", key))
+                val process = ProcessBuilder("getprop", key)
+                    .redirectErrorStream(true)
+                    .start()
                 try {
-                    BufferedReader(InputStreamReader(process.errorStream)).use { errorReader ->
-                        while (errorReader.readLine() != null) {
-                            // 消费错误输出，避免阻塞
-                        }
-                    }
                     BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
                         val value = reader.readLine()
                         val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
@@ -390,13 +381,10 @@ object RootDetector {
      */
     fun checkSuExecution(): Boolean {
         return try {
-            val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
+            val process = ProcessBuilder("su", "-c", "id")
+                .redirectErrorStream(true)
+                .start()
             try {
-                BufferedReader(InputStreamReader(process.errorStream)).use { errorReader ->
-                    while (errorReader.readLine() != null) {
-                        // 消费错误输出，避免阻塞
-                    }
-                }
                 BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
                     val output = reader.readLine()
                     val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
