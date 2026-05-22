@@ -92,6 +92,22 @@ class GatewayVpnService : AndroidVpnService() {
         
         private val EMPTY_BYTE_ARRAY = ByteArray(0)
         
+        // Protocol constants
+        private const val PROTOCOL_TCP = 6
+        private const val PROTOCOL_UDP = 17
+        
+        // IP header constants
+        private const val IP_VERSION_IHL = 0x45
+        private const val IP_FLAG_DF = 0x40
+        private const val IP_DEFAULT_TTL = 64
+        private const val IP_HEADER_LEN = 20
+        
+        // TCP header constants
+        private const val TCP_HEADER_LEN = 20
+        private const val TCP_DATA_OFFSET = (5 shl 4)
+        private const val TCP_FLAGS_PSH_ACK = 0x18
+        private const val TCP_WINDOW_SIZE = 8192
+        
         // 内网 IP 段（通过 WiFi 直连）
         // 10.0.0.0/8 - 私有 A 类
         // 172.16.0.0/12 - 私有 B 类  
@@ -405,7 +421,7 @@ class GatewayVpnService : AndroidVpnService() {
             val payload = extractTransportPayload(packet, length)
 
             when (protocol) {
-                17 -> {
+                PROTOCOL_UDP -> {
                     // UDP
                     DatagramSocket().use { socket ->
                         protect(socket)
@@ -413,7 +429,7 @@ class GatewayVpnService : AndroidVpnService() {
                         socket.send(datagram)
                     }
                 }
-                6 -> {
+                PROTOCOL_TCP -> {
                     // TCP best-effort forwarding
                     Socket().use { socket ->
                         protect(socket)
@@ -554,9 +570,9 @@ class GatewayVpnService : AndroidVpnService() {
                 var hadData = false
                 // 遍历所有活跃连接，检查是否有数据可读
                 activeConnections.forEach { (key, session) ->
-                    if (session.protocol == 6) { // TCP
+                    if (session.protocol == PROTOCOL_TCP) {
                         hadData = processTcpReturn(session, key) || hadData
-                    } else if (session.protocol == 17) { // UDP
+                    } else if (session.protocol == PROTOCOL_UDP) {
                         processUdpReturn(session, key)
                     }
                 }
@@ -654,8 +670,8 @@ class GatewayVpnService : AndroidVpnService() {
      * @return 完整包长度
      */
     private fun constructReturnPacket(buffer: ByteArray, session: ConnectionSession, payloadLen: Int): Int {
-        val ipHeaderLen = 20
-        val tcpHeaderLen = 20
+        val ipHeaderLen = IP_HEADER_LEN
+        val tcpHeaderLen = TCP_HEADER_LEN
         if (payloadLen < 0) {
             return 0
         }
@@ -672,15 +688,15 @@ class GatewayVpnService : AndroidVpnService() {
         val dstIpParts = parseIpv4Parts(session.srcIp) ?: return 0
         
         // 构造IP头（从虚拟源IP到原始源IP）
-        buffer[0] = 0x45 // IPv4, IHL=5
+        buffer[0] = IP_VERSION_IHL.toByte() // IPv4, IHL=5
         buffer[1] = 0 // DSCP/ECN
         buffer[2] = (totalLen shr 8).toByte()
         buffer[3] = (totalLen and 0xFF).toByte()
         buffer[4] = 0 // Identification
         buffer[5] = 0
-        buffer[6] = 0x40 // DF标志
+        buffer[6] = IP_FLAG_DF.toByte() // DF标志
         buffer[7] = 0
-        buffer[8] = 64 // TTL
+        buffer[8] = IP_DEFAULT_TTL.toByte() // TTL
         buffer[9] = session.protocol.toByte()
         buffer[10] = 0 // Header checksum (稍后计算)
         buffer[11] = 0
@@ -715,10 +731,10 @@ class GatewayVpnService : AndroidVpnService() {
         buffer[29] = 0
         buffer[30] = 0
         buffer[31] = 0
-        buffer[32] = (5 shl 4).toByte() // Data offset = 5
-        buffer[33] = 0x18 // PSH + ACK
-        buffer[34] = (8192 shr 8).toByte() // Window size
-        buffer[35] = (8192 and 0xFF).toByte()
+        buffer[32] = TCP_DATA_OFFSET.toByte() // Data offset = 5
+        buffer[33] = TCP_FLAGS_PSH_ACK.toByte() // PSH + ACK
+        buffer[34] = (TCP_WINDOW_SIZE shr 8).toByte() // Window size
+        buffer[35] = (TCP_WINDOW_SIZE and 0xFF).toByte()
         buffer[36] = 0 // TCP checksum (稍后计算)
         buffer[37] = 0
         buffer[38] = 0 // Urgent pointer
@@ -871,11 +887,11 @@ class GatewayVpnService : AndroidVpnService() {
         val ipHeaderLength = (packet[0].toInt() and 0x0F) * 4
         val protocol = parseProtocol(packet)
         val transportHeaderLength = when (protocol) {
-            6 -> {
+            PROTOCOL_TCP -> {
                 if (length < ipHeaderLength + 13) return null
                 ((packet[ipHeaderLength + 12].toInt() shr 4) and 0x0F) * 4
             }
-            17 -> 8
+            PROTOCOL_UDP -> 8
             else -> 0
         }
         val payloadStart = ipHeaderLength + transportHeaderLength
