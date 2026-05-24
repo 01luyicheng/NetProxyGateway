@@ -14,12 +14,21 @@ val mqttBrokerUrlTlsDebug = providers.gradleProperty("MQTT_BROKER_URL_TLS_DEBUG"
 val mqttBrokerUrlPlainDebug = providers.gradleProperty("MQTT_BROKER_URL_PLAIN_DEBUG")
     .orElse("tcp://localhost:1883")
     .get()
+
+// Release配置使用Provider延迟求值，在taskGraph确定后再校验
 val mqttBrokerUrlTlsRelease = providers.gradleProperty("MQTT_BROKER_URL_TLS_RELEASE")
-    .orElse("ssl://localhost:8883")
-    .get()
 val mqttBrokerUrlPlainRelease = providers.gradleProperty("MQTT_BROKER_URL_PLAIN_RELEASE")
-    .orElse("")
-    .get()
+
+gradle.taskGraph.whenReady {
+    val hasReleaseTask = allTasks.any { it.name.contains("Release", ignoreCase = true) }
+    if (hasReleaseTask) {
+        if (!mqttBrokerUrlTlsRelease.isPresent) {
+            throw GradleException("MQTT_BROKER_URL_TLS_RELEASE must be configured for release builds")
+        }
+        // 由于release构建MQTT_USE_TLS=true，plain URL仅在debug使用，不需要强制要求
+    }
+}
+
 val mqttTlsPublicKeyPinsDebug = providers.gradleProperty("MQTT_TLS_PUBLIC_KEY_PINS_DEBUG")
     .orElse("")
     .get()
@@ -56,8 +65,8 @@ android {
             )
             buildConfigField("Boolean", "MQTT_USE_TLS", "true")
             buildConfigField("Boolean", "MQTT_TRUST_ALL_CERTS", "false")
-            buildConfigField("String", "MQTT_BROKER_URL_TLS", "\"${mqttBrokerUrlTlsRelease}\"")
-            buildConfigField("String", "MQTT_BROKER_URL_PLAIN", "\"${mqttBrokerUrlPlainRelease}\"")
+            buildConfigField("String", "MQTT_BROKER_URL_TLS", "\"${mqttBrokerUrlTlsRelease.getOrElse(mqttBrokerUrlTlsDebug)}\"")
+            buildConfigField("String", "MQTT_BROKER_URL_PLAIN", "\"${mqttBrokerUrlPlainRelease.getOrElse(mqttBrokerUrlPlainDebug)}\"")
             buildConfigField("String", "MQTT_TLS_PUBLIC_KEY_PINS", "\"${mqttTlsPublicKeyPinsRelease}\"")
         }
         debug {

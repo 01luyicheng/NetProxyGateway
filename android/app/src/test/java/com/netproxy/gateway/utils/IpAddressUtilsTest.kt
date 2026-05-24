@@ -26,5 +26,21 @@ class IpAddressUtilsTest {
         assertFalse(IpAddressUtils.isPrivateIpv4Rfc1918("192.169.0.0"))
         assertFalse(IpAddressUtils.isPrivateIpv4Rfc1918("127.0.0.1"))
         assertFalse(IpAddressUtils.isPrivateIpv4Rfc1918("abc"))
+        assertFalse(IpAddressUtils.isPrivateIpv4Rfc1918("10.256.0.1"))
+        assertFalse(IpAddressUtils.isPrivateIpv4Rfc1918("192.168.-1.1"))
+    }
+
+    @Test
+    fun isPrivateIpv4Rfc1918WithResult_rejectsInvalidOctets() {
+        val result1 = IpAddressUtils.isPrivateIpv4Rfc1918WithResult("10.256.0.1")
+        assertTrue(result1.isSuccess())
+        assertFalse(result1.getOrNull()!!)
+
+        val result2 = IpAddressUtils.isPrivateIpv4Rfc1918WithResult("192.168.-1.1")
+        assertTrue(result2.isSuccess())
+        assertFalse(result2.getOrNull()!!)
+
+        val result3 = IpAddressUtils.isPrivateIpv4Rfc1918WithResult("abc")
+        assertTrue(result3.isError())
     }
 }

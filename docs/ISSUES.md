@@ -87,11 +87,12 @@
 
 ## Medium
 
-### M1: 边界条件：IP地址解析验证
+### M1: 边界条件：IP地址解析验证 [已修复]
+- **状态**: 已修复
+- **修复提交**: a09da3c
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/utils/IpAddressUtils.kt` (L6-L18)
-- **问题**: `isPrivateIpv4Rfc1918`方法本身没有验证每个octet是否在0-255范围内
-- **实际情况**: `validateIpv4WithResult`方法已实现完整的octet范围验证（0-255），可供调用方使用
-- **建议修复**: 确保调用方在使用`isPrivateIpv4Rfc1918`前先调用`validateIpv4WithResult`进行验证，或统一使用带验证的方法
+- **问题**: `isPrivateIpv4Rfc1918`方法本身没有验证每个octet是否在0-255范围内，导致`10.256.0.1`等无效IP被误判为私有地址
+- **修复方式**: `isPrivateIpv4Rfc1918WithResult`先调用`validateIpv4WithResult`做前置验证；`isPrivateIpv4Rfc1918`直接调用`isPrivateIpv4Rfc1918WithResult(ip).getOrDefault(false)`，消除重复解析
 
 ### M2: WiFi管理器权限检查不一致
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/wifi/WifiManager.kt` (L211-L226)
@@ -198,11 +199,13 @@
 - **风险**: 中。难以发现和诊断线上问题
 - **建议修复**: 添加关键指标收集和上报机制
 
-### N11: 硬编码默认值不安全
+### N11: 硬编码默认值不安全 [已修复]
+- **状态**: 已修复（release 构建改为 fail-fast，debug 保留 localhost 默认值用于本地开发）
+- **修复策略**: 在 `buildTypes.release` 块内强制要求 `MQTT_BROKER_URL_TLS_RELEASE` 配置，未配置时在 Gradle 配置阶段抛出 `GradleException`
+- **修复提交**: a09da3c
 - **位置**: `android/app/build.gradle.kts`
-- **问题**: `mqttBrokerUrlTlsDebug` 等配置使用 `localhost` 作为默认值，可能意外连接到错误服务器
-- **风险**: 低。仅影响 debug 构建
-- **建议修复**: 移除默认值，强制在构建时配置
+- **问题**: 过去 release 也可能因默认值回退而误用本地地址；现已改为必须显式配置 release MQTT 地址
+- **风险**: 低（修复前为配置失误风险）
 
 ### N12: 运行时配置缺失
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L96-99)
