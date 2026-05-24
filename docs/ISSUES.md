@@ -89,7 +89,7 @@
 
 ### M1: 边界条件：IP地址解析验证 [已修复]
 - **状态**: 已修复
-- **修复提交**: a09da3c
+- **修复提交**: 21ffa4c
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/utils/IpAddressUtils.kt` (L6-L18)
 - **问题**: `isPrivateIpv4Rfc1918`方法本身没有验证每个octet是否在0-255范围内，导致`10.256.0.1`等无效IP被误判为私有地址
 - **修复方式**: `isPrivateIpv4Rfc1918WithResult`先调用`validateIpv4WithResult`做前置验证；`isPrivateIpv4Rfc1918`直接调用`isPrivateIpv4Rfc1918WithResult(ip).getOrDefault(false)`，消除重复解析
@@ -203,7 +203,7 @@
 ### N11: 硬编码默认值不安全 [已修复]
 - **状态**: 已修复（release 构建改为 fail-fast，debug 保留 localhost 默认值用于本地开发）
 - **修复策略**: 在 `buildTypes.release` 块内强制要求 `MQTT_BROKER_URL_TLS_RELEASE` 配置，未配置时在 Gradle 配置阶段抛出 `GradleException`
-- **修复提交**: a09da3c
+- **修复提交**: 21ffa4c
 - **位置**: `android/app/build.gradle.kts`
 - **问题**: 过去 release 也可能因默认值回退而误用本地地址；现已改为必须显式配置 release MQTT 地址
 - **风险**: 低（修复前为配置失误风险）

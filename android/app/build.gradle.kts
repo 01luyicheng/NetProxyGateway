@@ -15,18 +15,25 @@ val mqttBrokerUrlPlainDebug = providers.gradleProperty("MQTT_BROKER_URL_PLAIN_DE
     .orElse("tcp://localhost:1883")
     .get()
 
-// Release配置使用Provider延迟求值，在taskGraph确定后再校验
+// Release配置使用Provider延迟求值
 val mqttBrokerUrlTlsRelease = providers.gradleProperty("MQTT_BROKER_URL_TLS_RELEASE")
 val mqttBrokerUrlPlainRelease = providers.gradleProperty("MQTT_BROKER_URL_PLAIN_RELEASE")
 
-gradle.taskGraph.whenReady {
-    val hasReleaseTask = allTasks.any { it.name.contains("Release", ignoreCase = true) }
-    if (hasReleaseTask) {
+// 注册release构建校验任务（Configuration Cache兼容）
+val validateReleaseConfig by tasks.registering {
+    group = "verification"
+    description = "Validate release build configuration"
+
+    doFirst {
         if (!mqttBrokerUrlTlsRelease.isPresent) {
-            throw GradleException("MQTT_BROKER_URL_TLS_RELEASE must be configured for release builds")
+            throw GradleException("MQTT_BROKER_URL_TLS_RELEASE must be configured for release builds. Set it in gradle.properties or via -P flag.")
         }
-        // 由于release构建MQTT_USE_TLS=true，plain URL仅在debug使用，不需要强制要求
     }
+}
+
+// 让所有release任务依赖校验任务
+tasks.matching { it.name.contains("Release", ignoreCase = true) }.configureEach {
+    dependsOn(validateReleaseConfig)
 }
 
 val mqttTlsPublicKeyPinsDebug = providers.gradleProperty("MQTT_TLS_PUBLIC_KEY_PINS_DEBUG")
