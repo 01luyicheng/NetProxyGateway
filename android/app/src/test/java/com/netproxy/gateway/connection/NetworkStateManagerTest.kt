@@ -11,6 +11,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.util.concurrent.ConcurrentHashMap
 
 class NetworkStateManagerTest {
 
@@ -30,18 +31,9 @@ class NetworkStateManagerTest {
     }
 
     @Test
-    fun getStateAfterNetworkLost_returnsDisconnectedState() {
-        // When network is lost, getStateAfterNetworkLost should return disconnected state
-        // regardless of current active network
-        every { connectivityManager.activeNetwork } returns cellularNetwork
-        every { connectivityManager.getNetworkCapabilities(cellularNetwork) } returns capabilities(
-            transport = NetworkCapabilities.TRANSPORT_CELLULAR,
-            validated = true,
-            internet = true
-        )
-
+    fun getBestNetworkState_withNoActiveNetworks_returnsDisconnectedState() {
         val manager = NetworkStateManager(context)
-        val state = manager.getStateAfterNetworkLost()
+        val state = manager.getBestNetworkState()
 
         assertFalse(state.isConnected)
         assertFalse(state.isValidated)
@@ -50,37 +42,141 @@ class NetworkStateManagerTest {
     }
 
     @Test
-    fun getCurrentNetworkState_withoutAvailableCapabilities_returnsDisconnectedState() {
-        every { connectivityManager.activeNetwork } returns null
-
+    fun getBestNetworkState_withRemainingCellular_returnsCellularState() {
         val manager = NetworkStateManager(context)
-        val state = manager.getCurrentNetworkState(null)
-
-        assertFalse(state.isConnected)
-        assertFalse(state.isValidated)
-        assertEquals(NetworkType.None, state.networkType)
-        assertEquals(null, state.network)
-    }
-
-    @Test
-    fun getCurrentNetworkState_withExplicitNetwork_usesThatNetworkInsteadOfActiveNetwork() {
-        every { connectivityManager.activeNetwork } returns cellularNetwork
-        every { connectivityManager.getNetworkCapabilities(wifiNetwork) } returns capabilities(
-            transport = NetworkCapabilities.TRANSPORT_WIFI,
-            validated = false,
-            internet = true
-        )
-        every { connectivityManager.getNetworkCapabilities(cellularNetwork) } returns capabilities(
+        val activeNetworksField = NetworkStateManager::class.java.getDeclaredField("activeNetworks")
+        activeNetworksField.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val activeNetworks = activeNetworksField.get(manager) as ConcurrentHashMap<Network, NetworkCapabilities>
+        activeNetworks[cellularNetwork] = capabilities(
             transport = NetworkCapabilities.TRANSPORT_CELLULAR,
             validated = true,
             internet = true
         )
 
-        val manager = NetworkStateManager(context)
-        val state = manager.getCurrentNetworkState(wifiNetwork)
+        val state = manager.getBestNetworkState()
 
         assertTrue(state.isConnected)
-        assertFalse(state.isValidated)
+        assertTrue(state.isValidated)
+        assertEquals(NetworkType.Cellular, state.networkType)
+        assertEquals(cellularNetwork, state.network)
+    }
+
+    @Test
+    fun getBestNetworkState_withMultipleNetworks_returnsHighestPriority() {
+        val wifiCapabilities = capabilities(
+            transport = NetworkCapabilities.TRANSPORT_WIFI,
+            validated = true,
+            internet = true
+        )
+        val cellularCapabilities = capabilities(
+            transport = NetworkCapabilities.TRANSPORT_CELLULAR,
+            validated = true,
+            internet = true
+        )
+
+        val manager = NetworkStateManager(context)
+        val activeNetworksField = NetworkStateManager::class.java.getDeclaredField("activeNetworks")
+        activeNetworksField.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val activeNetworks = activeNetworksField.get(manager) as ConcurrentHashMap<Network, NetworkCapabilities>
+        activeNetworks[wifiNetwork] = wifiCapabilities
+        activeNetworks[cellularNetwork] = cellularCapabilities
+
+        val state = manager.getBestNetworkState()
+
+        assertTrue(state.isConnected)
+        assertTrue(state.isValidated)
+        assertEquals(NetworkType.Wifi, state.networkType)
+        assertEquals(wifiNetwork, state.network)
+    }
+
+    @Test
+    fun getBestNetworkState_afterRemovingWifi_returnsCellularState() {
+        val wifiCapabilities = capabilities(
+            transport = NetworkCapabilities.TRANSPORT_WIFI,
+            validated = true,
+            internet = true
+        )
+        val cellularCapabilities = capabilities(
+            transport = NetworkCapabilities.TRANSPORT_CELLULAR,
+            validated = true,
+            internet = true
+        )
+
+        val manager = NetworkStateManager(context)
+        val activeNetworksField = NetworkStateManager::class.java.getDeclaredField("activeNetworks")
+        activeNetworksField.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val activeNetworks = activeNetworksField.get(manager) as ConcurrentHashMap<Network, NetworkCapabilities>
+        activeNetworks[wifiNetwork] = wifiCapabilities
+        activeNetworks[cellularNetwork] = cellularCapabilities
+
+        // Remove WiFi
+        activeNetworks.remove(wifiNetwork)
+        val state = manager.getBestNetworkState()
+
+        assertTrue(state.isConnected)
+        assertTrue(state.isValidated)
+        assertEquals(NetworkType.Cellular, state.networkType)
+        assertEquals(cellularNetwork, state.network)
+    }
+
+    @Test
+    fun getBestNetworkState_withEthernet_returnsEthernetState() {
+        val ethernetNetwork = mockk<Network>(relaxed = true)
+        val manager = NetworkStateManager(context)
+        val activeNetworksField = NetworkStateManager::class.java.getDeclaredField("activeNetworks")
+        activeNetworksField.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val activeNetworks = activeNetworksField.get(manager) as ConcurrentHashMap<Network, NetworkCapabilities>
+        activeNetworks[ethernetNetwork] = capabilities(
+            transport = NetworkCapabilities.TRANSPORT_ETHERNET,
+            validated = true,
+            internet = true
+        )
+
+        val state = manager.getBestNetworkState()
+
+        assertTrue(state.isConnected)
+        assertTrue(state.isValidated)
+        assertEquals(NetworkType.Ethernet, state.networkType)
+        assertEquals(ethernetNetwork, state.network)
+    }
+
+    @Test
+    fun getBestNetworkState_priorityOrder_wifiOverCellularOverEthernet() {
+        val ethernetNetwork = mockk<Network>(relaxed = true)
+        val wifiCapabilities = capabilities(
+            transport = NetworkCapabilities.TRANSPORT_WIFI,
+            validated = true,
+            internet = true
+        )
+        val cellularCapabilities = capabilities(
+            transport = NetworkCapabilities.TRANSPORT_CELLULAR,
+            validated = true,
+            internet = true
+        )
+        val ethernetCapabilities = capabilities(
+            transport = NetworkCapabilities.TRANSPORT_ETHERNET,
+            validated = true,
+            internet = true
+        )
+
+        val manager = NetworkStateManager(context)
+        val activeNetworksField = NetworkStateManager::class.java.getDeclaredField("activeNetworks")
+        activeNetworksField.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val activeNetworks = activeNetworksField.get(manager) as ConcurrentHashMap<Network, NetworkCapabilities>
+
+        // Add all three networks
+        activeNetworks[ethernetNetwork] = ethernetCapabilities
+        activeNetworks[cellularNetwork] = cellularCapabilities
+        activeNetworks[wifiNetwork] = wifiCapabilities
+
+        val state = manager.getBestNetworkState()
+
+        // WiFi should win due to highest priority
         assertEquals(NetworkType.Wifi, state.networkType)
         assertEquals(wifiNetwork, state.network)
     }
