@@ -370,8 +370,7 @@ object EmulatorDetector {
      * 未纳入 [check]：Android 10+ 上 line1Number 常为空或不可信。
      */
     fun checkPhoneNumber(context: Context): Boolean {
-        // 检查 READ_PHONE_STATE 权限
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
+        if (!hasReadPhoneStatePermission(context)) {
             return false
         }
 
@@ -397,8 +396,7 @@ object EmulatorDetector {
      */
     @Suppress("DEPRECATION")
     fun checkDeviceId(context: Context): Boolean {
-        // 检查 READ_PHONE_STATE 权限
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
+        if (!hasReadPhoneStatePermission(context)) {
             return false
         }
 
@@ -419,8 +417,7 @@ object EmulatorDetector {
      * 未纳入 [check]：Android 10+ 上 IMEI 访问受限，易产生真机误报。
      */
     fun checkImei(context: Context): Boolean {
-        // 检查 READ_PHONE_STATE 权限
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
+        if (!hasReadPhoneStatePermission(context)) {
             return false
         }
 
@@ -440,6 +437,10 @@ object EmulatorDetector {
         } catch (e: Exception) {
             false
         }
+    }
+
+    private fun hasReadPhoneStatePermission(context: Context): Boolean {
+        return ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED
     }
 
     /**

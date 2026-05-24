@@ -130,7 +130,8 @@
 ### L3: EmulatorDetector权限检查重复
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/security/EmulatorDetector.kt`
 - **问题**: 多个方法重复检查`READ_PHONE_STATE`权限
-- **建议修复**: 提取权限检查为统一方法
+- **部分修复**: 已提取为私有方法 `hasReadPhoneStatePermission(context)`，但三个方法仍各自调用，未在更高层统一
+- **建议修复**: 在调用方统一检查权限，或确认当前模式可接受
 
 ### L5: 缺少集成测试
 - **问题**: 测试主要集中在单元测试，缺少组件间集成测试
