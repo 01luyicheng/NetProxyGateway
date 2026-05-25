@@ -286,7 +286,7 @@ object EmulatorDetector {
                     .redirectErrorStream(true)
                     .start()
                 try {
-                    BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
+                    BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8)).use { reader ->
                         val value = reader.readLine()
                         val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                         if (!finished) {
@@ -307,6 +307,7 @@ object EmulatorDetector {
                     }
                 } finally {
                     process.destroyForcibly()
+                    process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                 }
             } catch (e: Exception) {
                 // 忽略异常

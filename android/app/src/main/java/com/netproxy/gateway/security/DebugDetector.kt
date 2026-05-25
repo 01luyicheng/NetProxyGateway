@@ -86,6 +86,18 @@ object DebugDetector {
             detectedMethods.add("xposed")
         }
 
+        if (checkTimingAttack()) {
+            detectedMethods.add("timing-attack")
+        }
+
+        if (antiPtrace()) {
+            detectedMethods.add("anti-ptrace")
+        }
+
+        if (checkMemoryBreakpoints()) {
+            detectedMethods.add("memory-breakpoints")
+        }
+
         return DebugCheckResult(
             isDebugged = detectedMethods.isNotEmpty(),
             detectedBy = detectedMethods
@@ -185,14 +197,11 @@ object DebugDetector {
      */
     fun checkDebuggerProcess(): Boolean {
         return try {
-            val process = Runtime.getRuntime().exec(arrayOf("ps"))
+            val process = ProcessBuilder("ps")
+                .redirectErrorStream(true)
+                .start()
             try {
-                BufferedReader(InputStreamReader(process.errorStream)).use { errorReader ->
-                    while (errorReader.readLine() != null) {
-                        // 消费错误输出，避免阻塞
-                    }
-                }
-                BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
+                BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8)).use { reader ->
                     var line: String?
                     while (reader.readLine().also { line = it } != null) {
                         val lowerLine = line?.lowercase() ?: continue
@@ -206,6 +215,7 @@ object DebugDetector {
                 false
             } finally {
                 process.destroyForcibly()
+                process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             }
         } catch (e: Exception) {
             false
@@ -261,14 +271,11 @@ object DebugDetector {
 
         for (prop in debugProps) {
             try {
-                val process = Runtime.getRuntime().exec(arrayOf("getprop", prop))
+                val process = ProcessBuilder("getprop", prop)
+                    .redirectErrorStream(true)
+                    .start()
                 try {
-                    BufferedReader(InputStreamReader(process.errorStream)).use { errorReader ->
-                        while (errorReader.readLine() != null) {
-                            // 消费错误输出，避免阻塞
-                        }
-                    }
-                    BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
+                    BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8)).use { reader ->
                         val value = reader.readLine()
                         val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                         if (!finished) {
@@ -282,28 +289,26 @@ object DebugDetector {
                         }
                     }
                 } finally {
-                process.destroyForcibly()
+                    process.destroyForcibly()
+                    process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                }
+            } catch (e: Exception) {
+                // 忽略异常
             }
-        } catch (e: Exception) {
-            // 忽略异常
         }
+        return false
     }
-    return false
-}
 
-/**
- * 检查 JDWP（Java Debug Wire Protocol）
- */
+    /**
+     * 检查 JDWP（Java Debug Wire Protocol）
+     */
     fun checkJDWP(): Boolean {
         return try {
-            val jdwpProcess = Runtime.getRuntime().exec(arrayOf("ps", "-A"))
+            val jdwpProcess = ProcessBuilder("ps", "-A")
+                .redirectErrorStream(true)
+                .start()
             try {
-                BufferedReader(InputStreamReader(jdwpProcess.errorStream)).use { errorReader ->
-                    while (errorReader.readLine() != null) {
-                        // 消费错误输出，避免阻塞
-                    }
-                }
-                BufferedReader(InputStreamReader(jdwpProcess.inputStream)).use { reader ->
+                BufferedReader(InputStreamReader(jdwpProcess.inputStream, Charsets.UTF_8)).use { reader ->
                     var line: String?
                     while (reader.readLine().also { line = it } != null) {
                         if (line?.contains("jdwp") == true) {
@@ -314,6 +319,7 @@ object DebugDetector {
                 false
             } finally {
                 jdwpProcess.destroyForcibly()
+                jdwpProcess.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             }
         } catch (e: Exception) {
             false
@@ -344,14 +350,11 @@ object DebugDetector {
 
         // 检查 Frida 进程
         return try {
-            val process = Runtime.getRuntime().exec(arrayOf("ps", "-A"))
+            val process = ProcessBuilder("ps", "-A")
+                .redirectErrorStream(true)
+                .start()
             try {
-                BufferedReader(InputStreamReader(process.errorStream)).use { errorReader ->
-                    while (errorReader.readLine() != null) {
-                        // 消费错误输出，避免阻塞
-                    }
-                }
-                BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
+                BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8)).use { reader ->
                     var line: String?
                     while (reader.readLine().also { line = it } != null) {
                         val lowerLine = line?.lowercase() ?: continue
@@ -363,6 +366,7 @@ object DebugDetector {
                 false
             } finally {
                 process.destroyForcibly()
+                process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             }
         } catch (e: Exception) {
             false
