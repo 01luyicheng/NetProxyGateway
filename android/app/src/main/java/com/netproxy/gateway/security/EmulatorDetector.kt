@@ -282,13 +282,10 @@ object EmulatorDetector {
     fun checkEmulatorProps(): Boolean {
         for ((prop, expectedValue) in EMULATOR_PROPS) {
             try {
-                val process = Runtime.getRuntime().exec(arrayOf("getprop", prop))
+                val process = ProcessBuilder("getprop", prop)
+                    .redirectErrorStream(true)
+                    .start()
                 try {
-                    BufferedReader(InputStreamReader(process.errorStream)).use { errorReader ->
-                        while (errorReader.readLine() != null) {
-                            // 消费错误输出，避免阻塞
-                        }
-                    }
                     BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
                         val value = reader.readLine()
                         val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
@@ -309,7 +306,7 @@ object EmulatorDetector {
                         }
                     }
                 } finally {
-                    process.destroy()
+                    process.destroyForcibly()
                 }
             } catch (e: Exception) {
                 // 忽略异常

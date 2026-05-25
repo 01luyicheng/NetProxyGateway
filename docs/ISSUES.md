@@ -632,12 +632,6 @@
 - **事实**: 当前标准 `ubuntu-latest` 为 **16GB RAM**（4 vCPU）；`-Xmx6g` 在 CI 与本地 16GB 环境均可接受。
 - **处置**: 已恢复 `-Xmx6g` 并保留 `MaxMetaspaceSize`/HeapDump 配置；内存不足的开发机可在 `~/.gradle/gradle.properties` 本地下调 `-Xmx`
 
-### N63: socks5-proxy `cleanupStream` 在持有 `tc.mu` 时调用 `streamConn.Close()`
-- **位置**: `server/socks5-proxy/main.go` (`cleanupStream`)
-- **问题描述**: `Close()` 可能触发 WebSocket I/O，持锁期间阻塞其他隧道操作。
-- **风险**: 中。高并发下延迟连接建立/清理
-- **建议修复**: 锁内仅从 map 删除并 `detachTunnel`，锁外 `Close()`（与 `getExistingConn` 模式一致）
-
 ---
 
 ## SubAgent 交叉审查发现（2026-05-20，审查提交 690d572..2e2e297）
@@ -662,20 +656,6 @@
 - **问题描述**: `nextVirtualIp.getAndIncrement()` 在 `require(attempts < maxAttempts)` 之前被多次调用。若 `require` 抛出（IP 池耗尽），`nextVirtualIp` 已递增但无 IP 被分配。
 - **验证结果**: **潜在风险（建议修复）**。IP 池大小为 254（MAX_IP - START_IP + 1）。AtomicInteger 溢出后会自然回绕，且 `Math.floorMod` 能将任何整数映射回有效范围，功能上不会出问题。但 `nextVirtualIp` 值会无意义漂移，若后续代码依赖其原始值做判断可能导致意外行为。
 - **建议修复**: 将 `getAndIncrement()` 移到确认分配成功后再调用，避免漂移。优先级：**低**。
-
-### N67: 子进程 `errorStream` 消费引入新的管道阻塞死锁
-- **提交哈希**: f31bcd1
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/EmulatorDetector.kt`、`RootDetector.kt`
-- **问题描述**: 先完整消费 `errorStream` 再消费 `inputStream`。若子进程向 `inputStream`（stdout）写入的数据超过管道缓冲区（约 64KB），而父进程仍在 `errorStream`（stderr）上阻塞等待 `readLine()`，子进程将因 stdout 管道满而阻塞在 `write()`，无法继续执行以产生更多 stderr 输出；父进程因此永远等待，形成管道缓冲区填满导致的进程间死锁。
-- **验证结果**: **潜在风险（建议修复）**。`getprop`/`which`/`ps` 的 stderr 几乎总是空的，但 `su` 命令在 verbose 模式下可能输出大量 stderr。极端场景下理论死锁存在。
-- **建议修复**: 统一改为 `ProcessBuilder.redirectErrorStream(true)` 合并 stdout 与 stderr，或并发消费两个流。优先级：**中**。
-
-### N68: 子进程超时后仅 `destroy()` 可能残留持续运行进程
-- **提交哈希**: f31bcd1
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/EmulatorDetector.kt`、`RootDetector.kt`
-- **问题描述**: 超时后仅调用 `process.destroy()`，未使用 `destroyForcibly()`。`su` 等命令等待用户授权时不响应 `destroy()`。
-- **验证结果**: **潜在风险（建议修复）**。`destroy()` 发送 SIGTERM，`su` 在等待授权时可能忽略。超时后 finally 中确实会调用 `destroy()`，但不保证进程立即结束。多次安全检测命令超时后可能积累残留的 `su` 进程。
-- **建议修复**: 超时后使用 `destroyForcibly()`（项目 minSdk = 26，完全支持）。优先级：**中**。
 
 ### N69: `StreamConn.Read` 中 `readMu` 锁持有时间过长阻塞并发读取
 - **提交哈希**: 15414b05
@@ -705,13 +685,6 @@
 - **验证结果**: **代码风格建议**。`closeLocal()` 设置 `Closed=1` 后，`StreamConn.Write` 在入口原子检查（`atomic.LoadInt32(&s.Closed) == 1`）会立即返回错误，不会执行到 `tunnelConn.WriteMessage`。因此当前代码在功能上是安全的。添加 `detachTunnel()` 仅有防御性价值（彻底切断引用关系），无实际 bug 风险。
 - **建议修复**: 在 `readLoop` defer 中补充 `stream.detachTunnel()` 调用，消除 `TunnelConn` 悬空引用。优先级：**极低**。
 
-### N73: Gradle `configuration-cache` 与 `configureondemand` 存在已知冲突
-- **提交哈希**: b9a9f97
-- **位置**: `android/gradle.properties`
-- **问题描述**: 同时启用 `org.gradle.configureondemand=true` 和 `org.gradle.configuration-cache=true`。
-- **验证结果**: **真实问题**。Gradle 官方文档明确说明 Configure on Demand 与 Configuration Cache 不兼容，且前者自 Gradle 8.1 起已被弃用。即使当前构建未出现明显错误，这种配置组合属于已知的坏味道，可能在特定场景（如 clean build、CI 环境）下导致不可预期的构建行为。
-- **建议修复**: 移除 `org.gradle.configureondemand=true`。优先级：**中**。
-
 ### N74: `MainViewModelTest` 使用 `mockkConstructor(Intent)` 全局静态污染
 - **提交哈希**: cc86ec21
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/ui/viewmodel/MainViewModelTest.kt`
@@ -740,3 +713,15 @@
 - **验证结果**: **真实问题**。`sendLoop`/`readLoop` 确实不持有 `connMu` 就访问 `tunnel.Conn`。`Close()` 在 `connMu` 保护下将 `Conn` 置为 nil 并关闭连接。竞态后果包括：(1) `sendLoop` 在 `Conn` 被关闭后调用 `WriteMessage` 返回错误；(2) `sendLoop` 检查 `tunnel.Conn == nil` 后到调用 `WriteMessage` 之间，`Close()` 可能将 `Conn` 置为 nil，导致 panic。`heartbeat` 通过 `WritePing` 调用的是 `WriteControl`，根据 `gorilla/websocket` 文档，`WriteControl` 可与其他方法并发安全调用，因此 `sendLoop` 与 `heartbeat` 之间不存在 `WriteMessage` 的并发调用问题。可用 `go test -race` 检测。
 - **建议修复**: 在 `sendLoop` 和 `readLoop` 中对 `tunnel.Conn` 的访问加上 `connMu` 保护，与 `WritePing` 保持一致。优先级：**中**。
 
+---
+
+## 交叉审查发现（2026-05-21，审查提交 4c84e4e..4c62b32）
+
+> 以下问题由5轮修复批次结束后的交叉审查记录；**本轮不修复**，留待后续处理。
+
+### N78: `readLoop` defer 中 `conn.Close()` 仍在 `tc.mu` 锁内执行
+- **提交哈希**: f93054a（N63 修复未覆盖此路径）
+- **位置**: `server/socks5-proxy/main.go` (`readLoop` defer，约 L860-873)
+- **问题描述**: `readLoop` 的 `defer` 块中获取 `tc.mu.Lock()`，然后在锁内调用 `stream.closeLocal()` 和 `conn.Close()`。`conn.Close()` 是 WebSocket I/O 操作，持锁期间阻塞会卡住整个 `TunnelClient` 的流管理。N63 仅修复了 `cleanupStream` 的同类问题，但 `readLoop` 的 defer 路径存在相同的持锁 I/O 模式。
+- **风险**: 中。连接异常断开时，若 `conn.Close()` 阻塞，所有需要 `tc.mu` 的隧道操作（如新建流、清理流）都会被延迟。
+- **建议修复**: 参考 `getExistingConn` / `cleanupStream` 的模式，将 I/O 操作移到锁外执行。可在锁内收集需要关闭的连接列表，解锁后再逐个关闭。

@@ -205,7 +205,7 @@ object DebugDetector {
                 }
                 false
             } finally {
-                process.destroy()
+                process.destroyForcibly()
             }
         } catch (e: Exception) {
             false
@@ -282,18 +282,18 @@ object DebugDetector {
                         }
                     }
                 } finally {
-                    process.destroy()
-                }
-            } catch (e: Exception) {
-                // 忽略异常
+                process.destroyForcibly()
             }
+        } catch (e: Exception) {
+            // 忽略异常
         }
-        return false
     }
+    return false
+}
 
-    /**
-     * 检查 JDWP（Java Debug Wire Protocol）
-     */
+/**
+ * 检查 JDWP（Java Debug Wire Protocol）
+ */
     fun checkJDWP(): Boolean {
         return try {
             val jdwpProcess = Runtime.getRuntime().exec(arrayOf("ps", "-A"))
@@ -313,7 +313,7 @@ object DebugDetector {
                 }
                 false
             } finally {
-                jdwpProcess.destroy()
+                jdwpProcess.destroyForcibly()
             }
         } catch (e: Exception) {
             false
@@ -362,7 +362,7 @@ object DebugDetector {
                 }
                 false
             } finally {
-                process.destroy()
+                process.destroyForcibly()
             }
         } catch (e: Exception) {
             false
