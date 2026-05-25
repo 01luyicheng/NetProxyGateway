@@ -20,19 +20,24 @@ val mqttBrokerUrlTlsRelease = providers.gradleProperty("MQTT_BROKER_URL_TLS_RELE
 val mqttBrokerUrlPlainRelease = providers.gradleProperty("MQTT_BROKER_URL_PLAIN_RELEASE")
 
 // 注册release构建校验任务（Configuration Cache兼容）
+// 校验在任务执行时进行，避免配置阶段求值问题
 val validateReleaseConfig by tasks.registering {
     group = "verification"
     description = "Validate release build configuration"
 
     doFirst {
-        if (!mqttBrokerUrlTlsRelease.isPresent) {
+        val tlsUrl = mqttBrokerUrlTlsRelease.orNull
+        if (tlsUrl.isNullOrBlank()) {
             throw GradleException("MQTT_BROKER_URL_TLS_RELEASE must be configured for release builds. Set it in gradle.properties or via -P flag.")
         }
     }
 }
 
-// 让所有release任务依赖校验任务
-tasks.matching { it.name.contains("Release", ignoreCase = true) }.configureEach {
+// 让真正的release构建任务依赖校验任务（排除校验任务自身和测试/lint任务）
+tasks.matching {
+    it.name != "validateReleaseConfig" &&
+    (it.name == "assembleRelease" || it.name == "bundleRelease")
+}.configureEach {
     dependsOn(validateReleaseConfig)
 }
 
@@ -72,7 +77,7 @@ android {
             )
             buildConfigField("Boolean", "MQTT_USE_TLS", "true")
             buildConfigField("Boolean", "MQTT_TRUST_ALL_CERTS", "false")
-            buildConfigField("String", "MQTT_BROKER_URL_TLS", "\"${mqttBrokerUrlTlsRelease.getOrElse(mqttBrokerUrlTlsDebug)}\"")
+            buildConfigField("String", "MQTT_BROKER_URL_TLS", "\"${mqttBrokerUrlTlsRelease.getOrElse("")}\"")
             buildConfigField("String", "MQTT_BROKER_URL_PLAIN", "\"${mqttBrokerUrlPlainRelease.getOrElse(mqttBrokerUrlPlainDebug)}\"")
             buildConfigField("String", "MQTT_TLS_PUBLIC_KEY_PINS", "\"${mqttTlsPublicKeyPinsRelease}\"")
         }

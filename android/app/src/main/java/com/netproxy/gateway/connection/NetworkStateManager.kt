@@ -39,7 +39,7 @@ class NetworkStateManager @Inject constructor(
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 val capabilities = connectivityManager.getNetworkCapabilities(network)
-                if (capabilities != null) {
+                if (capabilities != null && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
                     activeNetworks[network] = capabilities
                     trySend(getBestNetworkState())
                 }
@@ -96,12 +96,7 @@ class NetworkStateManager @Inject constructor(
     }
 
     internal fun getBestNetworkState(): NetworkState {
-        if (activeNetworks.isEmpty()) {
-            return NetworkState(isConnected = false, networkType = NetworkType.None)
-        }
-
         val bestNetwork = activeNetworks.maxByOrNull { getNetworkPriority(it.value) }
-
         return bestNetwork?.let { (network, capabilities) ->
             buildNetworkState(network, capabilities)
         } ?: NetworkState(isConnected = false, networkType = NetworkType.None)
@@ -117,11 +112,11 @@ class NetworkStateManager @Inject constructor(
     }
 
     private fun getNetworkPriority(capabilities: NetworkCapabilities): Int {
-        return when {
-            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> 3
-            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> 2
-            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> 1
-            else -> 0
+        return when (resolveNetworkType(capabilities)) {
+            NetworkType.Wifi -> 3
+            NetworkType.Cellular -> 2
+            NetworkType.Ethernet -> 4
+            NetworkType.None -> 0
         }
     }
 

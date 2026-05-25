@@ -176,9 +176,9 @@ class NetworkStateManagerTest {
 
         val state = manager.getBestNetworkState()
 
-        // WiFi should win due to highest priority
-        assertEquals(NetworkType.Wifi, state.networkType)
-        assertEquals(wifiNetwork, state.network)
+        // Ethernet should win due to highest priority (Ethernet > WiFi > Cellular)
+        assertEquals(NetworkType.Ethernet, state.networkType)
+        assertEquals(ethernetNetwork, state.network)
     }
 
     private fun capabilities(
