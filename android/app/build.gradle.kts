@@ -30,6 +30,10 @@ val validateReleaseConfig by tasks.registering {
         if (tlsUrl.isNullOrBlank()) {
             throw GradleException("MQTT_BROKER_URL_TLS_RELEASE must be configured for release builds. Set it in gradle.properties or via -P flag.")
         }
+        val plainUrl = mqttBrokerUrlPlainRelease.orNull
+        if (plainUrl.isNullOrBlank()) {
+            throw GradleException("MQTT_BROKER_URL_PLAIN_RELEASE must be configured for release builds. Set it in gradle.properties or via -P flag.")
+        }
     }
 }
 

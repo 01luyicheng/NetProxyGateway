@@ -43,4 +43,24 @@ class IpAddressUtilsTest {
         val result3 = IpAddressUtils.isPrivateIpv4Rfc1918WithResult("abc")
         assertTrue(result3.isError())
     }
+
+    @Test
+    fun validateIpv4WithResult_acceptsValidIpv4() {
+        val result = IpAddressUtils.validateIpv4WithResult("192.168.1.1")
+        assertTrue(result.isSuccess())
+        assertTrue(result.getOrNull()!!)
+    }
+
+    @Test
+    fun validateIpv4WithResult_rejectsInvalidOctet() {
+        val result = IpAddressUtils.validateIpv4WithResult("10.256.0.1")
+        assertTrue(result.isSuccess())
+        assertFalse(result.getOrNull()!!)
+    }
+
+    @Test
+    fun validateIpv4WithResult_returnsErrorForNonNumericFormat() {
+        val result = IpAddressUtils.validateIpv4WithResult("abc")
+        assertTrue(result.isError())
+    }
 }
