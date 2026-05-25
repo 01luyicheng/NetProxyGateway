@@ -858,18 +858,28 @@ func (tc *TunnelClient) readLoop(deviceID string, conn *websocket.Conn) {
 	}()
 
 	defer func() {
+		var streamsToClose []*StreamConn
+		var shouldCloseConn bool
+
 		tc.mu.Lock()
-		defer tc.mu.Unlock()
 		if tc.connections[deviceID] == conn {
 			delete(tc.connections, deviceID)
+			shouldCloseConn = true
 		}
 		for streamID, stream := range tc.streams {
 			if stream.DeviceID == deviceID {
 				delete(tc.streams, streamID)
-				stream.closeLocal()
+				streamsToClose = append(streamsToClose, stream)
 			}
 		}
-		conn.Close()
+		tc.mu.Unlock()
+
+		for _, stream := range streamsToClose {
+			stream.closeLocal()
+		}
+		if shouldCloseConn {
+			conn.Close()
+		}
 	}()
 
 	if err := conn.SetReadDeadline(time.Now().Add(tunnelReadTimeout)); err != nil {
@@ -1039,7 +1049,7 @@ func (tc *TunnelClient) handleDisconnect(data json.RawMessage) {
 }
 
 // cleanupStream 从 streams 映射中移除流并关闭连接。
-// 锁安全：即使在 streamConn.Close() panic 时也能确保 tc.mu 被释放。
+// 锁安全：streamConn.Close() 在锁外执行，避免 I/O 阻塞时持有 tc.mu。
 func (tc *TunnelClient) cleanupStream(streamID string, streamConn *StreamConn) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -1048,9 +1058,16 @@ func (tc *TunnelClient) cleanupStream(streamID string, streamConn *StreamConn) {
 	}()
 
 	tc.mu.Lock()
-	delete(tc.streams, streamID)
+	exists := false
+	if _, ok := tc.streams[streamID]; ok {
+		delete(tc.streams, streamID)
+		exists = true
+	}
 	tc.mu.Unlock()
-	streamConn.Close()
+
+	if exists {
+		streamConn.Close()
+	}
 }
 
 // ConnectThroughTunnel 通过隧道连接到目标地址
