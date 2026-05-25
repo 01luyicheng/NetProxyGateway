@@ -160,6 +160,10 @@ object RootDetector {
             detectedMethods.add("rw-paths")
         }
 
+        if (checkSuExecution()) {
+            detectedMethods.add("su-execution")
+        }
+
         return RootCheckResult(
             isRooted = detectedMethods.isNotEmpty(),
             detectedBy = detectedMethods
@@ -208,7 +212,7 @@ object RootDetector {
                 .redirectErrorStream(true)
                 .start()
             try {
-                BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
+                BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8)).use { reader ->
                     val result = reader.readLine()
                     val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                     if (!finished) {
@@ -218,6 +222,7 @@ object RootDetector {
                 }
             } finally {
                 process.destroyForcibly()
+                process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             }
         } catch (e: Exception) {
             false
@@ -243,8 +248,6 @@ object RootDetector {
      */
     private fun checkMagiskProps(): Boolean {
         val magiskProps = arrayOf(
-            "init.svc.zygote",
-            "persist.sys.isUsbOtgEnabled",
             "ro.magisk.version"
         )
 
@@ -254,7 +257,7 @@ object RootDetector {
                     .redirectErrorStream(true)
                     .start()
                 try {
-                    BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
+                    BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8)).use { reader ->
                         val value = reader.readLine()
                         val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                         if (!finished) {
@@ -265,18 +268,19 @@ object RootDetector {
                         }
                     }
                 } finally {
-                process.destroyForcibly()
+                    process.destroyForcibly()
+                    process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                }
+            } catch (e: Exception) {
+                // 忽略异常
             }
-        } catch (e: Exception) {
-            // 忽略异常
         }
+        return false
     }
-    return false
-}
 
-/**
- * 检查已安装的 Root 管理应用
- */
+    /**
+     * 检查已安装的 Root 管理应用
+     */
     fun checkRootPackages(context: Context): Boolean {
         val pm = context.packageManager
         for (packageName in ROOT_PACKAGES) {
@@ -333,7 +337,7 @@ object RootDetector {
                     .redirectErrorStream(true)
                     .start()
                 try {
-                    BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
+                    BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8)).use { reader ->
                         val value = reader.readLine()
                         val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                         if (!finished) {
@@ -344,18 +348,19 @@ object RootDetector {
                         }
                     }
                 } finally {
-                process.destroyForcibly()
+                    process.destroyForcibly()
+                    process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                }
+            } catch (e: Exception) {
+                // 忽略异常
             }
-        } catch (e: Exception) {
-            // 忽略异常
         }
+        return false
     }
-    return false
-}
 
-/**
- * 检查可写系统路径
- */
+    /**
+     * 检查可写系统路径
+     */
     fun checkRWPaths(): Boolean {
         val paths = arrayOf(
             "/system",
@@ -385,7 +390,7 @@ object RootDetector {
                 .redirectErrorStream(true)
                 .start()
             try {
-                BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
+                BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8)).use { reader ->
                     val output = reader.readLine()
                     val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                     if (!finished) {
@@ -395,6 +400,7 @@ object RootDetector {
                 }
             } finally {
                 process.destroyForcibly()
+                process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             }
         } catch (e: Exception) {
             false

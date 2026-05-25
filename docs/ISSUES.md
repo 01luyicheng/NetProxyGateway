@@ -214,6 +214,15 @@
 - **风险**: 低。灵活性不足
 - **建议修复**: 将配置提取到配置文件或远程配置中心
 
+### N67: RootDetector.checkMagiskProps() 严重误报导致100%正常设备被判定为root
+- **状态**: 已修复
+- **提交哈希**: （本次修复）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/RootDetector.kt` (L249-L254)
+- **问题描述**: `checkMagiskProps()` 的属性列表包含 `init.svc.zygote`（所有Android设备都有，值为"running"）和 `persist.sys.isUsbOtgEnabled`（与Magisk无关）。由于判断逻辑为 `value != "0" && value != ""`，`init.svc.zygote` 的值 "running" 会导致所有正常设备被误判为已root。
+- **风险**: 高。100%正常设备会被误判为root，严重影响用户体验和功能可用性。
+- **修复方式**: 移除 `init.svc.zygote` 和 `persist.sys.isUsbOtgEnabled`，只保留真正的Magisk属性 `ro.magisk.version`。
+- **验证**: `:app:compileDebugKotlin` 和 `:app:testDebugUnitTest` 通过。
+
 ### N13: 已弃用API使用
 - **位置**: 多处
 - **问题**: 编译警告显示大量使用已弃用 API（`EncryptedSharedPreferences`、`WifiConfiguration`、`NioEventLoopGroup`、`hiltViewModel()` 等）
@@ -441,12 +450,14 @@
 - **风险**: 高。单连接慢DNS查询导致整个 SOCKS5 服务所有连接停滞
 - **修复难度**: 中。需要引入异步 DNS 解析或使用线程池执行 DNS 查询
 
-### N31: NetworkStateManager onLost多网络状态误判
+### N31: NetworkStateManager onLost多网络状态误判 [已修复]
+- **状态**: 已修复
 - **提交哈希**: 1f9acee
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/NetworkStateManager.kt` (L42-L44)
-- **问题描述**: `onLost(network)` 只接收丢失的特定网络，不判断是否还有其他可用网络。`getStateAfterNetworkLost()` 直接返回 `isConnected=false`。多网络环境（WiFi+移动数据）下断开一个网络会错误报告为完全断网
-- **风险**: 高。导致 VPN/MQTT 模块误判网络状态，触发不必要的重连或停止
-- **修复难度**: 中。需要维护多网络状态，检查 `activeNetworks` 判断是否真的无网络
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/NetworkStateManager.kt`
+- **问题描述**: ~~旧实现中 `onLost(network)` 只接收丢失的特定网络，不判断是否还有其他可用网络。`getStateAfterNetworkLost()` 直接返回 `isConnected=false`。多网络环境（WiFi+移动数据）下断开一个网络会错误报告为完全断网~~
+- **当前实现**: 代码已使用 `activeNetworks` ConcurrentHashMap 维护多网络状态，`getBestNetworkState()` 遍历所有活跃网络并按优先级（Ethernet > WiFi > Cellular）返回最佳网络状态。`onLost` 仅移除对应网络，不会错误报告完全断网。
+- **风险**: 已消除。多网络场景下断开单一网络不会触发误判。
+- **修复状态**: 当前实现已正确处理多网络共存和切换场景。
 
 ### N34: MainViewModel VPN状态与真实服务状态可能不一致
 - **提交哈希**: 1f9acee
@@ -719,9 +730,16 @@
 
 > 以下问题由5轮修复批次结束后的交叉审查记录；**本轮不修复**，留待后续处理。
 
-### N78: `readLoop` defer 中 `conn.Close()` 仍在 `tc.mu` 锁内执行
-- **提交哈希**: f93054a（N63 修复未覆盖此路径）
+### N63: `cleanupStream` 中 `streamConn.Close()` 在 `tc.mu` 锁内执行 [已修复]
+- **提交哈希**: 821518f（声称修复但未实际移出锁外）
+- **修复提交**: （本次修复）
+- **位置**: `server/socks5-proxy/main.go` (`cleanupStream`，L1043-L1057)
+- **问题描述**: 提交 821518f 声称将 `streamConn.Close()` 移出 `tc.mu` 锁外，但实际代码中 `Close()` 仍在 `defer tc.mu.Unlock()` 保护下执行。`Close()` 是 I/O 操作，持锁期间阻塞会卡住整个 `TunnelClient` 的流管理。
+- **修复方式**: 改为显式 `tc.mu.Lock()` / `tc.mu.Unlock()`，在锁内仅做 `delete(tc.streams, streamID)` 并标记 `exists`，解锁后再调用 `streamConn.Close()`。
+
+### N78: `readLoop` defer 中 `conn.Close()` 仍在 `tc.mu` 锁内执行 [已修复]
+- **提交哈希**: f93054a
+- **修复提交**: （本次修复）
 - **位置**: `server/socks5-proxy/main.go` (`readLoop` defer，约 L860-873)
-- **问题描述**: `readLoop` 的 `defer` 块中获取 `tc.mu.Lock()`，然后在锁内调用 `stream.closeLocal()` 和 `conn.Close()`。`conn.Close()` 是 WebSocket I/O 操作，持锁期间阻塞会卡住整个 `TunnelClient` 的流管理。N63 仅修复了 `cleanupStream` 的同类问题，但 `readLoop` 的 defer 路径存在相同的持锁 I/O 模式。
-- **风险**: 中。连接异常断开时，若 `conn.Close()` 阻塞，所有需要 `tc.mu` 的隧道操作（如新建流、清理流）都会被延迟。
-- **建议修复**: 参考 `getExistingConn` / `cleanupStream` 的模式，将 I/O 操作移到锁外执行。可在锁内收集需要关闭的连接列表，解锁后再逐个关闭。
+- **问题描述**: `readLoop` 的 `defer` 块中获取 `tc.mu.Lock()`，然后在锁内调用 `stream.closeLocal()` 和 `conn.Close()`。`conn.Close()` 是 WebSocket I/O 操作，持锁期间阻塞会卡住整个 `TunnelClient` 的流管理。N63 同期仅修复了 `cleanupStream` 的同类问题，但 `readLoop` 的 defer 路径存在相同的持锁 I/O 模式。
+- **修复方式**: 在锁内收集需要关闭的 stream 列表和 conn 关闭标记，解锁后再逐个调用 `stream.closeLocal()` 和 `conn.Close()`。
