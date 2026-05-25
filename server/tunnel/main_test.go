@@ -245,7 +245,10 @@ func TestValidateDeviceTokenAddsInternalAPIKeyHeader(t *testing.T) {
 		HeartbeatTimeout:  2 * time.Second,
 	})
 
-	valid := tunnelServer.validateDeviceToken("device-123", "token-abc")
+	valid, err := tunnelServer.validateDeviceToken("device-123", "token-abc")
+	if err != nil {
+		t.Fatalf("unexpected token validation error: %v", err)
+	}
 	if !valid {
 		t.Fatal("expected token validation to succeed")
 	}
@@ -286,7 +289,11 @@ func TestValidateDeviceTokenUsesServerHTTPClient(t *testing.T) {
 		}),
 	}
 
-	if !tunnelServer.validateDeviceToken("device-123", "token-abc") {
+	valid, err := tunnelServer.validateDeviceToken("device-123", "token-abc")
+	if err != nil {
+		t.Fatalf("unexpected token validation error: %v", err)
+	}
+	if !valid {
 		t.Fatal("expected token validation to succeed with injected server httpClient")
 	}
 

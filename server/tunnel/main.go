@@ -536,7 +536,13 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 验证设备凭证（调用API服务）
-	if !s.validateDeviceToken(deviceID, token) {
+	valid, err := s.validateDeviceToken(deviceID, token)
+	if err != nil {
+		log.Printf("Token validation failed: %v", err)
+		http.Error(w, "token validation error", http.StatusInternalServerError)
+		return
+	}
+	if !valid {
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
@@ -568,7 +574,7 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 
 // validateDeviceToken 验证设备令牌
 // 通过HTTP请求调用API服务验证token的有效性
-func (s *Server) validateDeviceToken(deviceID, token string) bool {
+func (s *Server) validateDeviceToken(deviceID, token string) (bool, error) {
 	payload := map[string]string{
 		"device_id": deviceID,
 		"token":     token,
@@ -579,11 +585,10 @@ func (s *Server) validateDeviceToken(deviceID, token string) bool {
 	}
 
 	if err := httpclient.PostJSON(s.httpClient, s.config.APIEndpoint+"/api/session/validate", s.config.InternalAPIKey, payload, &result); err != nil {
-		log.Printf("Token validation failed: %v", err)
-		return false
+		return false, err
 	}
 
-	return result.Valid
+	return result.Valid, nil
 }
 
 // heartbeat 心跳检测
