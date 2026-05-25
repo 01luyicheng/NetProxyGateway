@@ -39,8 +39,8 @@ class NetworkStateManager @Inject constructor(
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 val capabilities = connectivityManager.getNetworkCapabilities(network)
-                if (capabilities != null && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
-                    activeNetworks[network] = capabilities
+                if (isValidNetwork(capabilities)) {
+                    activeNetworks[network] = capabilities!!
                     trySend(getBestNetworkState())
                 }
             }
@@ -54,7 +54,11 @@ class NetworkStateManager @Inject constructor(
                 network: Network,
                 networkCapabilities: NetworkCapabilities
             ) {
-                activeNetworks[network] = networkCapabilities
+                if (isValidNetwork(networkCapabilities)) {
+                    activeNetworks[network] = networkCapabilities
+                } else {
+                    activeNetworks.remove(network)
+                }
                 trySend(getBestNetworkState())
             }
         }
@@ -63,9 +67,9 @@ class NetworkStateManager @Inject constructor(
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .build()
 
-        // 注册前同步当前已连接的网络到 activeNetworks
+        // 先清空，再同步，再注册，避免与 callback 竞态
+        activeNetworks.clear()
         syncActiveNetworks()
-
         connectivityManager.registerNetworkCallback(request, callback)
 
         // 使用统一的状态获取逻辑发送初始状态
@@ -73,14 +77,21 @@ class NetworkStateManager @Inject constructor(
 
         awaitClose {
             connectivityManager.unregisterNetworkCallback(callback)
+            activeNetworks.clear()
         }
     }.distinctUntilChanged()
+
+    private fun isValidNetwork(capabilities: NetworkCapabilities?): Boolean {
+        return capabilities != null &&
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    }
 
     private fun syncActiveNetworks() {
         connectivityManager.allNetworks.forEach { network ->
             val capabilities = connectivityManager.getNetworkCapabilities(network)
-            if (capabilities != null && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
-                activeNetworks[network] = capabilities
+            if (isValidNetwork(capabilities)) {
+                activeNetworks[network] = capabilities!!
             }
         }
     }
@@ -104,9 +115,9 @@ class NetworkStateManager @Inject constructor(
 
     private fun resolveNetworkType(capabilities: NetworkCapabilities): NetworkType {
         return when {
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> NetworkType.Ethernet
             capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> NetworkType.Wifi
             capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> NetworkType.Cellular
-            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> NetworkType.Ethernet
             else -> NetworkType.None
         }
     }

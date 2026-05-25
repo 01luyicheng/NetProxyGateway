@@ -145,7 +145,7 @@ class NetworkStateManagerTest {
     }
 
     @Test
-    fun getBestNetworkState_priorityOrder_wifiOverCellularOverEthernet() {
+    fun getBestNetworkState_priorityOrder_ethernetOverWifiOverCellular() {
         val ethernetNetwork = mockk<Network>(relaxed = true)
         val wifiCapabilities = capabilities(
             transport = NetworkCapabilities.TRANSPORT_WIFI,
