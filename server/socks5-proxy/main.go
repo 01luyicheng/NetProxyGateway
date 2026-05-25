@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
@@ -22,6 +21,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/netproxy/shared/httpclient"
+	"github.com/netproxy/shared/stringutil"
 )
 
 // SOCKS5 protocol constants
@@ -142,39 +143,6 @@ func (s *APISessionStore) ValidateToken(deviceID, token string) (bool, error) {
 	return valid, nil
 }
 
-// doValidatedHTTPPost 发送POST请求到指定API端点，验证响应状态码并解析JSON响应
-func doValidatedHTTPPost(client *http.Client, endpoint string, apiKey string, payload interface{}, result interface{}) error {
-	reqBody, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to encode request body: %w", err)
-	}
-
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(reqBody))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		req.Header.Set("X-Internal-API-Key", apiKey)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("API returned status %d", resp.StatusCode)
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
-		return fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return nil
-}
-
 // validateWithAPI 调用API验证
 func (s *APISessionStore) validateWithAPI(deviceID, token string) (bool, error) {
 	u, err := url.Parse(s.apiEndpoint + "/api/session/validate")
@@ -194,7 +162,7 @@ func (s *APISessionStore) validateWithAPI(deviceID, token string) (bool, error) 
 		Valid bool `json:"valid"`
 	}
 
-	if err := doValidatedHTTPPost(s.httpClient, u.String(), s.internalAPIKey, payload, &result); err != nil {
+	if err := httpclient.PostJSON(s.httpClient, u.String(), s.internalAPIKey, payload, &result); err != nil {
 		return false, err
 	}
 
@@ -1617,16 +1585,6 @@ func isExpectedRelayError(err error) bool {
 	return strings.Contains(errMsg, "use of closed network connection") || strings.Contains(errMsg, "stream closed")
 }
 
-// firstNonEmpty 返回第一个非空字符串（环境变量优先）
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
 func main() {
 	addr := flag.String("addr", "0.0.0.0:1080", "SOCKS5 server address")
 	apiEndpoint := flag.String("api", "http://localhost:8080", "API endpoint URL")
@@ -1663,8 +1621,8 @@ func main() {
 	}
 
 	// 证书路径：环境变量优先
-	finalTLSCert := firstNonEmpty(envTLSCert, *tlsCert)
-	finalTLSKey := firstNonEmpty(envTLSKey, *tlsKey)
+	finalTLSCert := stringutil.FirstNonEmpty(envTLSCert, *tlsCert)
+	finalTLSKey := stringutil.FirstNonEmpty(envTLSKey, *tlsKey)
 
 	// 验证TLS配置
 	if enableTLS {
