@@ -181,6 +181,56 @@ class NetworkStateManagerTest {
         assertEquals(ethernetNetwork, state.network)
     }
 
+    @Test
+    fun getBestNetworkState_withUnvalidatedNetwork_returnsUnvalidatedState() {
+        val manager = NetworkStateManager(context)
+        val activeNetworksField = NetworkStateManager::class.java.getDeclaredField("activeNetworks")
+        activeNetworksField.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val activeNetworks = activeNetworksField.get(manager) as ConcurrentHashMap<Network, NetworkCapabilities>
+        activeNetworks[wifiNetwork] = capabilities(
+            transport = NetworkCapabilities.TRANSPORT_WIFI,
+            validated = false,
+            internet = true
+        )
+
+        val state = manager.getBestNetworkState()
+
+        assertTrue(state.isConnected)
+        assertFalse(state.isValidated)
+        assertEquals(NetworkType.Wifi, state.networkType)
+        assertEquals(wifiNetwork, state.network)
+    }
+
+    @Test
+    fun getBestNetworkState_withMixedValidation_prefersHigherPriority() {
+        val wifiCapabilities = capabilities(
+            transport = NetworkCapabilities.TRANSPORT_WIFI,
+            validated = false,
+            internet = true
+        )
+        val cellularCapabilities = capabilities(
+            transport = NetworkCapabilities.TRANSPORT_CELLULAR,
+            validated = true,
+            internet = true
+        )
+
+        val manager = NetworkStateManager(context)
+        val activeNetworksField = NetworkStateManager::class.java.getDeclaredField("activeNetworks")
+        activeNetworksField.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val activeNetworks = activeNetworksField.get(manager) as ConcurrentHashMap<Network, NetworkCapabilities>
+        activeNetworks[wifiNetwork] = wifiCapabilities
+        activeNetworks[cellularNetwork] = cellularCapabilities
+
+        val state = manager.getBestNetworkState()
+
+        assertTrue(state.isConnected)
+        assertFalse(state.isValidated)
+        assertEquals(NetworkType.Wifi, state.networkType)
+        assertEquals(wifiNetwork, state.network)
+    }
+
     private fun capabilities(
         transport: Int,
         validated: Boolean,

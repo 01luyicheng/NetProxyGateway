@@ -81,17 +81,11 @@ class NetworkStateManager @Inject constructor(
         }
     }.distinctUntilChanged()
 
-    private fun isValidNetwork(capabilities: NetworkCapabilities?): Boolean {
-        return capabilities != null &&
-            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-    }
-
     private fun syncActiveNetworks() {
         connectivityManager.allNetworks.forEach { network ->
             val capabilities = connectivityManager.getNetworkCapabilities(network)
-            if (isValidNetwork(capabilities)) {
-                activeNetworks[network] = capabilities!!
+            if (capabilities != null && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                activeNetworks[network] = capabilities
             }
         }
     }
