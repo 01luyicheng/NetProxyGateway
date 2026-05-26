@@ -122,6 +122,13 @@ class NetworkStateManager @Inject constructor(
         }
     }
 
+    /**
+     * 计算网络优先级，用于在多个活跃网络中选择最佳网络。
+     *
+     * 设计说明：虽然 [isValidNetwork] 当前要求网络必须已验证才能进入 [activeNetworks]，
+     * 但此处仍保留验证状态作为排序因素，作为防御性设计。如果未来放宽 [isValidNetwork]
+     * 的条件（例如允许未验证网络进入池以支持"需要登录"的 WiFi 提示），排序逻辑将自动生效。
+     */
     private fun getNetworkPriority(capabilities: NetworkCapabilities): Int {
         val basePriority = when (resolveNetworkType(capabilities)) {
             NetworkType.Wifi -> 3
