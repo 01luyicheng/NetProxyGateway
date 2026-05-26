@@ -424,16 +424,12 @@ object DebugDetector {
     /**
      * 使用 ptrace 自我防护
      * 通过 ptrace PTRACE_TRACEME 防止其他进程附加
+     *
+     * 当前为占位实现，待 JNI 集成后启用
      */
-    fun antiPtrace(): Boolean {
-        return try {
-            // 加载 native 库执行 ptrace
-            // 这里返回是否成功执行
-            // 实际实现需要 JNI
-            false
-        } catch (e: Exception) {
-            false
-        }
+    @Deprecated("占位实现，待 JNI 集成后启用", level = DeprecationLevel.WARNING)
+    private fun antiPtrace(): Boolean {
+        return false
     }
 
     /**

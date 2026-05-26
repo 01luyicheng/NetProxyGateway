@@ -181,6 +181,37 @@ class NetworkStateManagerTest {
         assertEquals(ethernetNetwork, state.network)
     }
 
+    @Test
+    fun getBestNetworkState_validatedNetworkPreferredOverUnvalidated() {
+        val manager = NetworkStateManager(context)
+        val activeNetworksField = NetworkStateManager::class.java.getDeclaredField("activeNetworks")
+        activeNetworksField.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val activeNetworks = activeNetworksField.get(manager) as ConcurrentHashMap<Network, NetworkCapabilities>
+
+        val unvalidatedWifi = capabilities(
+            transport = NetworkCapabilities.TRANSPORT_WIFI,
+            validated = false,
+            internet = true
+        )
+        val validatedCellular = capabilities(
+            transport = NetworkCapabilities.TRANSPORT_CELLULAR,
+            validated = true,
+            internet = true
+        )
+
+        activeNetworks[wifiNetwork] = unvalidatedWifi
+        activeNetworks[cellularNetwork] = validatedCellular
+
+        val state = manager.getBestNetworkState()
+
+        // Validated cellular should win over unvalidated WiFi
+        assertTrue(state.isConnected)
+        assertTrue(state.isValidated)
+        assertEquals(NetworkType.Cellular, state.networkType)
+        assertEquals(cellularNetwork, state.network)
+    }
+
     private fun capabilities(
         transport: Int,
         validated: Boolean,

@@ -123,12 +123,14 @@ class NetworkStateManager @Inject constructor(
     }
 
     private fun getNetworkPriority(capabilities: NetworkCapabilities): Int {
-        return when (resolveNetworkType(capabilities)) {
+        val basePriority = when (resolveNetworkType(capabilities)) {
             NetworkType.Wifi -> 3
             NetworkType.Cellular -> 2
             NetworkType.Ethernet -> 4
             NetworkType.None -> 0
         }
+        val validated = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        return if (validated) basePriority + 100 else basePriority
     }
 
     fun getCurrentNetworkType(): NetworkType {
