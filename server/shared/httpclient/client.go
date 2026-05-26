@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 )
 
@@ -35,6 +36,9 @@ func PostJSON(client *http.Client, endpoint string, apiKey string, payload inter
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		// Drain response body to allow connection reuse, limit to 64KB
+		const maxDiscard = 64 * 1024
+		_, _ = io.CopyN(io.Discard, resp.Body, maxDiscard)
 		return fmt.Errorf("API returned status %d", resp.StatusCode)
 	}
 

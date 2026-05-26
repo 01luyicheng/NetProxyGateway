@@ -8,13 +8,16 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -206,6 +209,7 @@ type TunnelManager struct {
 	httpClient *http.Client
 	ctx        context.Context
 	cancel     context.CancelFunc
+	wg         sync.WaitGroup
 }
 
 // NewTunnelManager 创建隧道管理器
@@ -220,11 +224,12 @@ func NewTunnelManager(config *Config) *TunnelManager {
 	}
 }
 
-// Stop 停止隧道管理器并取消所有进行中的通知
+// Stop 停止隧道管理器并取消所有进行中的通知，等待后台goroutine完成
 func (m *TunnelManager) Stop() {
 	if m.cancel != nil {
 		m.cancel()
 	}
+	m.wg.Wait()
 }
 
 // Register 注册隧道
@@ -279,7 +284,9 @@ func (m *TunnelManager) Get(deviceID string) (*TunnelConn, bool) {
 
 // notifyDeviceStatus 通知API设备状态变化
 func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string) {
+	m.wg.Add(1)
 	go func() {
+		defer m.wg.Done()
 		payload := map[string]string{
 			"device_id":   deviceID,
 			"status":      status,
@@ -329,6 +336,7 @@ func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string) 
 			}
 
 			statusCode := resp.StatusCode
+			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
 
 			if statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices {
@@ -371,6 +379,9 @@ func shouldRetryNotifyStatusCode(statusCode int) bool {
 
 // cleanupDeadTunnels 清理死连接
 func (m *TunnelManager) cleanupDeadTunnels() {
+	m.wg.Add(1)
+	defer m.wg.Done()
+
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -416,6 +427,7 @@ type Server struct {
 	upgrader   websocket.Upgrader
 	config     *Config
 	httpClient *http.Client
+	httpServer *http.Server
 }
 
 // NewServer 创建服务器
@@ -824,14 +836,28 @@ func (s *Server) Run() error {
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/stats", s.handleStats)
 
-	httpServer := newHTTPServer(s.config.Addr, mux)
+	s.httpServer = newHTTPServer(s.config.Addr, mux)
+
+	// 设置优雅关闭信号处理
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-quit
+		log.Printf("Tunnel server shutting down gracefully...")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("Tunnel server graceful shutdown failed: %v", err)
+		}
+		s.manager.Stop()
+	}()
 
 	log.Printf("Tunnel server starting on %s", s.config.Addr)
 
 	if s.config.EnableTLS {
-		return httpServer.ListenAndServeTLS(s.config.TLSCert, s.config.TLSKey)
+		return s.httpServer.ListenAndServeTLS(s.config.TLSCert, s.config.TLSKey)
 	}
-	return httpServer.ListenAndServe()
+	return s.httpServer.ListenAndServe()
 }
 
 func main() {

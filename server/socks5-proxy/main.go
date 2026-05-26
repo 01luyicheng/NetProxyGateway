@@ -15,9 +15,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -171,8 +173,10 @@ func (s *APISessionStore) validateWithAPI(deviceID, token string) (bool, error) 
 
 // RateLimiter 限流器
 type RateLimiter struct {
-	attempts map[string]*LoginAttempt
-	mu       sync.RWMutex
+	attempts     map[string]*LoginAttempt
+	mu           sync.RWMutex
+	stopCh       chan struct{}
+	restartCount int32
 }
 
 // LoginAttempt 登录尝试
@@ -187,9 +191,15 @@ type LoginAttempt struct {
 func NewRateLimiter() *RateLimiter {
 	rl := &RateLimiter{
 		attempts: make(map[string]*LoginAttempt),
+		stopCh:   make(chan struct{}),
 	}
 	go rl.cleanupLoop()
 	return rl
+}
+
+// Stop 停止限流器的清理协程
+func (rl *RateLimiter) Stop() {
+	close(rl.stopCh)
 }
 
 // Allow 检查是否允许登录
@@ -240,27 +250,39 @@ func (rl *RateLimiter) Success(key string) {
 
 // cleanupLoop 定期清理旧的尝试记录
 func (rl *RateLimiter) cleanupLoop() {
+	const maxRestarts = 3
+
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("Panic in RateLimiter.cleanupLoop, restarting: %v", r)
-			go rl.cleanupLoop()
+			count := atomic.AddInt32(&rl.restartCount, 1)
+			if count <= maxRestarts {
+				log.Printf("Panic in RateLimiter.cleanupLoop, restarting (%d/%d): %v", count, maxRestarts, r)
+				go rl.cleanupLoop()
+			} else {
+				log.Printf("Panic in RateLimiter.cleanupLoop, max restarts (%d) exceeded, not restarting: %v", maxRestarts, r)
+			}
 		}
 	}()
 
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		func() {
-			rl.mu.Lock()
-			defer rl.mu.Unlock()
-			now := time.Now()
-			for key, attempt := range rl.attempts {
-				if now.Sub(attempt.LastTry) > 30*time.Minute {
-					delete(rl.attempts, key)
+	for {
+		select {
+		case <-ticker.C:
+			func() {
+				rl.mu.Lock()
+				defer rl.mu.Unlock()
+				now := time.Now()
+				for key, attempt := range rl.attempts {
+					if now.Sub(attempt.LastTry) > 30*time.Minute {
+						delete(rl.attempts, key)
+					}
 				}
-			}
-		}()
+			}()
+		case <-rl.stopCh:
+			return
+		}
 	}
 }
 
@@ -808,10 +830,8 @@ func (tc *TunnelClient) dialTunnel(deviceID, token string) (*websocket.Conn, err
 
 // isConnAlive 检查连接是否存活
 func (tc *TunnelClient) isConnAlive(conn *websocket.Conn) bool {
-	// 尝试发送 ping
-	tc.writeMu.Lock()
-	defer tc.writeMu.Unlock()
-	if err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5*time.Second)); err != nil {
+	// WriteControl 支持并发调用，无需加锁；缩短超时避免长时间阻塞
+	if err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(1*time.Second)); err != nil {
 		return false
 	}
 	return true
@@ -977,8 +997,12 @@ func (tc *TunnelClient) handleData(data json.RawMessage) {
 	}
 
 	if err := stream.WriteToDataChan(resp.Data); err != nil {
-		log.Printf("Failed to write to DataChan for stream %s: %v, closing stream", resp.StreamID, err)
-		tc.cleanupStream(resp.StreamID, stream)
+		if err.Error() == "data channel full" {
+			log.Printf("Data channel full for stream %s, dropping packet", resp.StreamID)
+		} else {
+			log.Printf("Failed to write to DataChan for stream %s: %v, closing stream", resp.StreamID, err)
+			tc.cleanupStream(resp.StreamID, stream)
+		}
 	}
 }
 
@@ -1234,9 +1258,25 @@ func (s *SOCKS5Server) Start() error {
 		log.Printf("SOCKS5 server starting on %s", s.config.Addr)
 	}
 
+	// 设置优雅关闭信号处理
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-quit
+		log.Printf("SOCKS5 server shutting down gracefully...")
+		if s.listener != nil {
+			_ = s.listener.Close()
+		}
+		s.rateLimiter.Stop()
+	}()
+
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				log.Printf("SOCKS5 server listener closed, exiting")
+				return nil
+			}
 			log.Printf("Accept error: %v", err)
 			continue
 		}
