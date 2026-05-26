@@ -558,13 +558,17 @@
 - **修复**: `try-finally` 保证 `process.destroy()`；相关路径 drain stderr
 - **关联问题**: M3
 
-### N56: server/socks5-proxy StreamConn.SetReadDeadline 空实现导致 goroutine 泄漏
-- **状态**: 待修复
+### N56: server/socks5-proxy StreamConn deadline 实现不完整导致 goroutine 泄漏风险
+- **状态**: 部分已修复（SetReadDeadline 已实现，SetWriteDeadline 仍为空实现）
 - **提交哈希**: 9f4b1b9
-- **位置**: `server/socks5-proxy/main.go` (L464-L476, L327-L337, L1258-L1285)
-- **问题描述**: `SetReadDeadline`、`SetDeadline`、`SetWriteDeadline` 三个方法均为空实现（仅返回 `nil`），不存储 deadline 值也无实际逻辑。`Read()` 的阻塞 `select`（L327-337）无 `time.After` 超时保护。当远端目标服务器停止发送数据但不关闭连接时，`Read()` 永久阻塞在等待 `DataChan` 或 `CloseChan`。`relay()` 中通过 `io.Copy` 间接调用 `Read()`，无任何 deadline 设置。`readLoop` 的 60 秒 websocket 超时只关闭 websocket 连接，不关闭关联的 StreamConn。
-- **风险**: 高。长连接场景（SSH、数据库连接、WebSocket）下，远端静默可导致每个连接泄漏一个 goroutine 及其关联的 StreamConn、channel 等内存资源
-- **修复难度**: 中。实现基于 timer 的 `SetReadDeadline`，或在 `Read()` 的阻塞 select 中添加 idle 超时
+- **位置**: `server/socks5-proxy/main.go` (L626-L645, L363-L421)
+- **问题描述**:
+  - `SetReadDeadline`：已实现（L635-L638）。使用 `atomic.Value` 存储 deadline，`Read()`（L399-L413）中读取 deadline 并通过 `time.NewTimer` 实现超时，超时返回 `os.ErrDeadlineExceeded`。
+  - `SetDeadline`：已实现（L627-L632）。内部调用 `SetReadDeadline` 和 `SetWriteDeadline`。
+  - `SetWriteDeadline`：仍为空实现（L643-L645），仅返回 `nil`。WebSocket 写入已通过 `writeMu + streamWriteLimit` 保护，但 `net.Conn` 接口语义上写 deadline 未生效。
+  - 残余风险：`relay()` 中通过 `io.Copy` 间接调用 `Read()` 时，若调用方未主动设置 read deadline，远端静默仍可能导致 `Read()` 永久阻塞。`readLoop` 的 60 秒 websocket 超时只关闭 websocket 连接，不关闭关联的 StreamConn。
+- **风险**: 高。长连接场景（SSH、数据库连接、WebSocket）下，若调用方未设置 read deadline，远端静默可导致每个连接泄漏一个 goroutine 及其关联的 StreamConn、channel 等内存资源
+- **修复难度**: 低。`SetReadDeadline` 已实现；建议评估是否为 `relay()` 默认设置 read deadline，或实现 `SetWriteDeadline` 完整语义
 - **关联问题**: TECH_DEBT.md C79
 
 ### N57: VpnService processReturnTraffic 单协程串行处理模型导致回包处理停滞

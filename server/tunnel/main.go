@@ -224,12 +224,23 @@ func NewTunnelManager(config *Config) *TunnelManager {
 	}
 }
 
-// Stop 停止隧道管理器并取消所有进行中的通知，等待后台goroutine完成
+// Stop 停止隧道管理器并取消所有进行中的通知，等待后台goroutine完成（带30秒超时）
 func (m *TunnelManager) Stop() {
 	if m.cancel != nil {
 		m.cancel()
 	}
-	m.wg.Wait()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		m.wg.Wait()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		log.Printf("TunnelManager.Stop: timeout waiting for goroutines to finish")
+	}
 }
 
 // Register 注册隧道
@@ -378,8 +389,8 @@ func shouldRetryNotifyStatusCode(statusCode int) bool {
 }
 
 // cleanupDeadTunnels 清理死连接
+// 调用方必须在启动 goroutine 前调用 m.wg.Add(1)
 func (m *TunnelManager) cleanupDeadTunnels() {
-	m.wg.Add(1)
 	defer m.wg.Done()
 
 	ticker := time.NewTicker(30 * time.Second)
@@ -827,7 +838,8 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 
 // Run 运行服务器
 func (s *Server) Run() error {
-	// 启动清理协程
+	// 启动清理协程（wg.Add 在 goroutine 外，避免与 Stop 竞态）
+	s.manager.wg.Add(1)
 	go s.manager.cleanupDeadTunnels()
 
 	// 设置路由

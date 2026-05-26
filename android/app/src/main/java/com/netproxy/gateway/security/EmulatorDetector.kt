@@ -165,6 +165,10 @@ object EmulatorDetector {
 
     /**
      * 执行完整的模拟器检测
+     *
+     * 判定策略：采用多指标联合阈值机制（至少命中 2 个指标才判定为模拟器），
+     * 避免单一弱指标（如 hardware="generic"、manufacturer="unknown"、
+     * fingerprint="generic..."、board="unknown" 等）在真机上产生误报。
      */
     fun check(context: Context): EmulatorCheckResult {
         val detectedMethods = mutableListOf<String>()
@@ -216,7 +220,7 @@ object EmulatorDetector {
         }
 
         return EmulatorCheckResult(
-            isEmulator = detectedMethods.isNotEmpty(),
+            isEmulator = detectedMethods.size >= 2,
             detectedBy = detectedMethods
         )
     }

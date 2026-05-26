@@ -63,4 +63,38 @@ class IpAddressUtilsTest {
         val result = IpAddressUtils.validateIpv4WithResult("abc")
         assertTrue(result.isError())
     }
+
+    @Test
+    fun validateIpv4WithResult_rejectsEmptyString() {
+        val result = IpAddressUtils.validateIpv4WithResult("")
+        assertTrue(result.isError())
+    }
+
+    @Test
+    fun validateIpv4WithResult_rejectsTooFewOctets() {
+        val result = IpAddressUtils.validateIpv4WithResult("192.168.1")
+        assertTrue(result.isSuccess())
+        assertFalse(result.getOrNull()!!)
+    }
+
+    @Test
+    fun validateIpv4WithResult_rejectsTooManyOctets() {
+        val result = IpAddressUtils.validateIpv4WithResult("192.168.1.1.1")
+        assertTrue(result.isSuccess())
+        assertFalse(result.getOrNull()!!)
+    }
+
+    @Test
+    fun validateIpv4WithResult_acceptsMinBoundary() {
+        val result = IpAddressUtils.validateIpv4WithResult("0.0.0.0")
+        assertTrue(result.isSuccess())
+        assertTrue(result.getOrNull()!!)
+    }
+
+    @Test
+    fun validateIpv4WithResult_acceptsMaxBoundary() {
+        val result = IpAddressUtils.validateIpv4WithResult("255.255.255.255")
+        assertTrue(result.isSuccess())
+        assertTrue(result.getOrNull()!!)
+    }
 }

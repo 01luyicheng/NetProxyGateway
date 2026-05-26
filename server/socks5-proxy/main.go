@@ -514,6 +514,9 @@ func (s *StreamConn) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
+// ErrDataChannelFull 数据通道已满
+var ErrDataChannelFull = errors.New("data channel full")
+
 // WriteToDataChan 将数据写入 DataChan，若 StreamConn 已关闭则返回错误
 func (s *StreamConn) WriteToDataChan(data []byte) error {
 	if atomic.LoadInt32(&s.Closed) == 1 {
@@ -526,7 +529,7 @@ func (s *StreamConn) WriteToDataChan(data []byte) error {
 	case <-s.CloseChan:
 		return fmt.Errorf("stream closed")
 	default:
-		return fmt.Errorf("data channel full")
+		return ErrDataChannelFull
 	}
 }
 
@@ -997,7 +1000,7 @@ func (tc *TunnelClient) handleData(data json.RawMessage) {
 	}
 
 	if err := stream.WriteToDataChan(resp.Data); err != nil {
-		if err.Error() == "data channel full" {
+		if errors.Is(err, ErrDataChannelFull) {
 			log.Printf("Data channel full for stream %s, dropping packet", resp.StreamID)
 		} else {
 			log.Printf("Failed to write to DataChan for stream %s: %v, closing stream", resp.StreamID, err)
