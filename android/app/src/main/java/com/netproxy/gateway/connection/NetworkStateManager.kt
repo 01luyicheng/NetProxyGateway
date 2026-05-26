@@ -39,8 +39,8 @@ class NetworkStateManager @Inject constructor(
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 val capabilities = connectivityManager.getNetworkCapabilities(network)
-                if (isValidNetwork(capabilities)) {
-                    activeNetworks[network] = capabilities!!
+                if (capabilities != null && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                    activeNetworks[network] = capabilities
                     trySend(getBestNetworkState())
                 }
             }
@@ -54,7 +54,7 @@ class NetworkStateManager @Inject constructor(
                 network: Network,
                 networkCapabilities: NetworkCapabilities
             ) {
-                if (isValidNetwork(networkCapabilities)) {
+                if (networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
                     activeNetworks[network] = networkCapabilities
                 } else {
                     activeNetworks.remove(network)
