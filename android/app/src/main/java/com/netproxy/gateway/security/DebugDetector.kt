@@ -90,10 +90,6 @@ object DebugDetector {
             detectedMethods.add("timing-attack")
         }
 
-        if (antiPtrace()) {
-            detectedMethods.add("anti-ptrace")
-        }
-
         if (checkMemoryBreakpoints()) {
             detectedMethods.add("memory-breakpoints")
         }

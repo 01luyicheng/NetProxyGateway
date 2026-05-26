@@ -107,6 +107,9 @@ class GatewayVpnService : AndroidVpnService() {
         private const val TCP_DATA_OFFSET = (5 shl 4)
         private const val TCP_FLAGS_PSH_ACK = 0x18
         private const val TCP_WINDOW_SIZE = 8192
+
+        // UDP header constants
+        private const val UDP_HEADER_LEN = 8
         
         // 内网 IP 段（通过 WiFi 直连）
         // 10.0.0.0/8 - 私有 A 类
@@ -891,7 +894,7 @@ class GatewayVpnService : AndroidVpnService() {
                 if (length < ipHeaderLength + 13) return null
                 ((packet[ipHeaderLength + 12].toInt() shr 4) and 0x0F) * 4
             }
-            PROTOCOL_UDP -> 8
+            PROTOCOL_UDP -> UDP_HEADER_LEN
             else -> 0
         }
         val payloadStart = ipHeaderLength + transportHeaderLength
