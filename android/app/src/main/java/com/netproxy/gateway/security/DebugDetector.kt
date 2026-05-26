@@ -215,7 +215,6 @@ object DebugDetector {
                 false
             } finally {
                 process.destroyForcibly()
-                process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             }
         } catch (e: Exception) {
             false
@@ -290,7 +289,6 @@ object DebugDetector {
                     }
                 } finally {
                     process.destroyForcibly()
-                    process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                 }
             } catch (e: Exception) {
                 // 忽略异常
@@ -319,7 +317,6 @@ object DebugDetector {
                 false
             } finally {
                 jdwpProcess.destroyForcibly()
-                jdwpProcess.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             }
         } catch (e: Exception) {
             false
@@ -366,7 +363,6 @@ object DebugDetector {
                 false
             } finally {
                 process.destroyForcibly()
-                process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             }
         } catch (e: Exception) {
             false
