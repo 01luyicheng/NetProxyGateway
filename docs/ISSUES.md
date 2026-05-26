@@ -10,8 +10,8 @@
 需要记录：问题存在的提交哈希、问题文件路径、问题行号、问题描述、风险、修复难度、修复状态。
 ## Critical
 
-### C1: SSL信任所有证书配置风险 [已降级为Medium]
-- **状态**: 已降级至Medium优先级
+### C1: SSL信任所有证书配置风险
+- **状态**: 待修复
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L98-L114)
 - **问题**: 生产环境已有强制检查机制，当`DEBUG=false`且`MQTT_TRUST_ALL_CERTS=true`时会抛出`IllegalStateException`阻止应用启动。建议增加构建时静态检查作为额外防护
 - **风险**: 配置错误导致应用无法启动（已实现运行时防护），建议增强构建时检查
@@ -60,14 +60,15 @@
 
 ### H5: 连接池清理竞争条件 [已缓解]
 - **状态**: 已缓解（非完全消除；见 N27 写锁内阻塞 IO）
-- **修复提交**: b1e18bd
+- **修复提交**: `b1e18bd`
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (`cleanupIdleConnections`, `borrowConnection` 无效连接清理)
 - **问题**: read 锁收集、write 锁清理之间连接状态可能变化
 - **缓解**: `cleanupIdleConnections` 在单次 `write` 锁内完成筛选与移除；`borrowConnection` 在读锁外收集无效连接后，于 `write` 锁内二次校验 `inUse`/`isValid` 再关闭
 - **残余风险**: 写锁内 `removeConnection`/`close()` 仍可能阻塞（N27）
 
 ### H17: VirtualIpAllocator AtomicInteger溢出 [已修复]
-- **提交哈希**: e89e00d
+- **状态**: 已修复
+- **提交哈希**: `e89e00d`
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VirtualIpAllocator.kt` (L83, L104)
 - **问题**: `nextVirtualIp.getAndIncrement()`在达到`Int.MAX_VALUE`后溢出为负数。L72的`currentIp > MAX_IP`检查无法防止溢出（负数不满足条件），导致`require(ipNum in START_IP..MAX_IP)`抛出`IllegalArgumentException`
 - **风险**: 高。VPN服务长时间运行后必然崩溃
@@ -89,7 +90,7 @@
 
 ### M1: 边界条件：IP地址解析验证 [已修复]
 - **状态**: 已修复
-- **修复提交**: 21ffa4c
+- **修复提交**: `21ffa4c`
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/utils/IpAddressUtils.kt` (L6-L18)
 - **问题**: `isPrivateIpv4Rfc1918`方法本身没有验证每个octet是否在0-255范围内，导致`10.256.0.1`等无效IP被误判为私有地址
 - **修复方式**: `isPrivateIpv4Rfc1918WithResult`先调用`validateIpv4WithResult`做前置验证；`isPrivateIpv4Rfc1918`直接调用`isPrivateIpv4Rfc1918WithResult(ip).getOrDefault(false)`，消除重复解析
@@ -101,7 +102,8 @@
 - **建议修复**: 统一错误处理方式，移除静默失败版本
 
 ### M3: 安全检测命令执行未超时 [已修复]
-- **提交哈希**: e89e00d
+- **状态**: 已修复
+- **提交哈希**: `e89e00d`
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/security/RootDetector.kt` (L204-214, L240-L253, L312-L324, L367-378), `DebugDetector.kt` (L195, L201, L262, L292, L297, L337, L342), `EmulatorDetector.kt` (L297)
 - **问题**: `process.waitFor()`没有设置超时，如果命令被恶意hook或系统异常挂起会阻塞线程
 - **风险**: 线程被永久阻塞，影响应用响应，攻击者可利用此绕过安全检测
@@ -115,8 +117,8 @@
 - **建议修复**: 正确管理TCP序列号和确认号
 
 ### M11: 连接池状态检查与清理的竞态条件 [已缓解]
-- **状态**: 已缓解（与 H5 同一修复）
-- **修复提交**: b1e18bd
+- **状态**: 已缓解（与 H5 同一修复，见 H5 详情）
+- **修复提交**: `b1e18bd`
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (`borrowConnection` 无效连接清理路径)
 - **问题**: read 锁内收集无效连接、write 锁外清理时状态可能已变
 - **缓解**: 于 `write` 锁内对 `!conn.inUse.get() && !conn.isValid()` 二次校验后再 `remove`/`close`
@@ -138,7 +140,7 @@
 - **风险**: 组件间交互问题难以发现
 - **建议修复**: 添加集成测试套件
 
-## 新增问题（待分类）
+## 新增问题
 
 ### N1: 双版本API增加维护负担
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/wifi/GatewayWifiManager.kt`, `AuthSessionStore.kt`
@@ -216,7 +218,8 @@
 
 ### N67: RootDetector.checkMagiskProps() 严重误报导致100%正常设备被判定为root
 - **状态**: 已修复
-- **提交哈希**: （本次修复）
+- **提交哈希**: `cd7de93`
+- **修复提交**: `cd7de93`
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/security/RootDetector.kt` (L249-L254)
 - **问题描述**: `checkMagiskProps()` 的属性列表包含 `init.svc.zygote`（所有Android设备都有，值为"running"）和 `persist.sys.isUsbOtgEnabled`（与Magisk无关）。由于判断逻辑为 `value != "0" && value != ""`，`init.svc.zygote` 的值 "running" 会导致所有正常设备被误判为已root。
 - **风险**: 高。100%正常设备会被误判为root，严重影响用户体验和功能可用性。
@@ -243,11 +246,11 @@
 
 ---
 
-## Medium Severity
+## High Severity
 
-### H10: VpnService stopVpn() 竞态条件
+### H10: VpnService stopVpn() 竞态条件 [已修复]
 - **状态**: 已修复
-- **修复提交**: (Agent: SOLO, 2026-05-15)
+- **修复提交**: `d01ddd1`
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt`
 - **问题**: `isStopping` 原子标志与 `_status` StateFlow 是两个独立的状态源，存在竞态窗口
 - **修复方式**:
@@ -256,9 +259,9 @@
   3. `startVpn()` 中增加 `isStopping.get()` 检查，防止停止过程中启动
 - **验证**: `make android-test` 通过
 
-### H11: writeBufferPool 线程安全问题
+### H11: writeBufferPool 线程安全问题 [已修复]
 - **状态**: 已修复
-- **修复提交**: d01ddd1
+- **修复提交**: `d01ddd1`
 - **修复方式**: 使用局部变量替代共享缓冲区池，彻底消除线程安全问题
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L120-122, L619-622)
 - **问题验证**:
@@ -286,7 +289,7 @@
   ```
 - **最终方案**: 见 [N54](#n54-vpnservice-threadlocal-writebufferremove-抵消缓冲区复用价值)。`processReturnTraffic` 是单协程顺序执行，同一时刻只有一个 `processTcpReturn` 在执行，直接使用局部变量 `val buffer = ByteArray(PACKET_BUFFER_SIZE)` 更简单安全，无需缓冲区复用或 ThreadLocal。
 
-### H12: activeConnections 复合操作非原子
+### H12: activeConnections 复合操作非原子 [待修复]
 - **状态**: 待修复
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L426-427, L467, L429-432, L470)
 - **问题验证**:
@@ -334,7 +337,7 @@
   }
   ```
 
-### H14: processTcpReturn 调用路径仍阻止0长度 TCP 控制包注入
+### H14: processTcpReturn 调用路径仍阻止0长度 TCP 控制包注入 [待修复]
 - **状态**: 待修复
 - **提交哈希**: d01ddd1
 - **相关提交**: 6829cf3（仅放宽 `constructReturnPacket()` 的 payloadLen 检查，未解决 `processTcpReturn()` 的调用门槛）
@@ -343,7 +346,7 @@
 - **风险**: 高。当前返回路径对纯TCP控制包支持不完整，可能导致连接状态推进异常或超时。
 - **修复难度**: 高。需要实现完整的TCP状态机，或至少补齐控制包注入与正确 flags/seq/ack 维护
 
-### H15: VpnService测试直接实例化Android Service
+### H15: VpnService测试直接实例化Android Service [待修复]
 - **状态**: 待修复
 - **提交哈希**: d01ddd1
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt` (L1697, L1718, L1752, L1793)
@@ -351,7 +354,7 @@
 - **风险**: 高。测试不可靠，与实际运行时不一致，可能产生假阳性/假阴性结果。
 - **修复难度**: 中。需要引入/调整 Robolectric + Hilt 测试基座，或将纯逻辑下沉为可直接单测的无 Android 组件类
 
-### H16: VpnService测试过度使用反射
+### H16: VpnService测试过度使用反射 [待修复]
 - **状态**: 待修复
 - **提交哈希**: d01ddd1
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt` (L1748-1816)
@@ -371,10 +374,6 @@
 - **修复**: 指数退避重试、复用 `http.Client`、`TunnelManager` 上下文可取消；见 `server/tunnel/main_test.go` 重试用例
 
 ---
-
-## 新增问题（待分类）
-
-## 新增问题
 
 ### N21: 配对码输入状态配置变更丢失
 - **状态**: 已修复
@@ -425,8 +424,6 @@
 
 ---
 
-## 新增问题（待分类）
-
 ### N27: Socks5ConnectionPool cleanupIdleConnections在write锁内执行阻塞IO
 - **提交哈希**: 1f9acee
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (L435-L457)
@@ -434,14 +431,7 @@
 - **风险**: 高。严重影响连接池并发性能，可能导致连接获取超时
 - **修复难度**: 中。需要将 `socket.close()` 移出锁范围，改为异步关闭或在锁外执行
 
-### N28: Socks5ProxyHandler RelayHandler释放语义优化 [引入新问题]
-- **提交哈希**: 4de9b42
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt` (L283-L285)
-- **问题描述**: 将`ReferenceCountUtil.release(msg)`改为`ReferenceCountUtil.safeRelease(msg)`，意图避免双重释放。但Netty的`ChannelOutboundBuffer.remove()`在write失败时已自动释放msg，`safeRelease`只是吞掉`IllegalReferenceCountException`异常，不能阻止对已经释放的池化ByteBuf进行操作，可能导致内存损坏或未定义行为。原注释"Netty releases msg automatically on write failure; do NOT call release here"是正确的
-- **风险**: 高。池化ByteBuf被重复释放后可能归还到对象池，再次分配时获取到脏数据，导致数据损坏或崩溃
-- **修复难度**: 低。回滚该修改，恢复原始不释放逻辑；或改为先检查`refCnt() > 0`再释放
-- **修复状态**: 待修复
-- **关联问题**: N45
+
 
 ### N30: Socks5ProxyHandler DNS解析阻塞EventLoop
 - **提交哈希**: 1f9acee
@@ -466,13 +456,7 @@
 - **风险**: 高。用户看到的状态与实际不符，可能导致安全/功能问题
 - **修复难度**: 中。通过 ServiceConnection 或广播监听真实服务状态，UI 状态与真实状态解耦
 
-### N35: MqttConnectionManager connect阻塞Default调度器 [误报]
-- **提交哈希**: 1f9acee
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L367)
-- **问题描述**: `createdClient.connect(options)` 是 Paho MQTT 同步阻塞调用，在 `viewModelScope.launch` 中执行（默认 Main 调度器）。连接超时可达数十秒，长时间阻塞 UI 线程
-- **风险**: 高。主线程执行网络阻塞操作可能导致 ANR
-- **修复难度**: 低。使用 `withContext(Dispatchers.IO)` 将 connect 操作移到 IO 调度器
-- **误报原因**: 实际代码使用 `@ApplicationScope` 注入的 `CoroutineScope`，配置为 `Dispatchers.IO`（见 `CoroutineScopes.kt`），并非在 Main 调度器执行。代码审查时已验证不会阻塞主线程。
+
 
 ### N36: VpnService TCP固定标志位不符合协议状态机
 - **提交哈希**: 1f9acee
@@ -546,12 +530,7 @@
 - **修复**: `Read()` 现在使用双 `select` 模式优先消费已排队数据；`CloseChan` 分支使用 `for` 循环非阻塞排空 `DataChan` 后再返回 `io.EOF`
 - **修复状态**: 已修复
 
-### N52: VpnService ThreadLocal writeBuffer 在 IO 线程池上长期滞留
-- **状态**: 中间发现（最终方案见 N54）
-- **提交哈希**: d01ddd1
-- **位置**: `VpnService.kt processTcpReturn() 方法内`
-- **问题描述**: H11 修复的中间方案将共享缓冲区池替换为 `ThreadLocal<ByteArray>`，但发现 `Dispatchers.IO` 线程池会导致缓冲区长期滞留。此条目仅记录中间分析过程，最终未采用 ThreadLocal 方案。
-- **最终方案**: 见 [N54](#n54-vpnservice-threadlocal-writebufferremove-抵消缓冲区复用价值) —— 直接使用局部变量 `val buffer = ByteArray(PACKET_BUFFER_SIZE)`，彻底消除线程安全和线程池滞留问题。
+
 
 ### N54: VpnService ThreadLocal writeBuffer.remove() 抵消缓冲区复用价值
 - **状态**: 已修复
@@ -647,19 +626,7 @@
 
 ## SubAgent 交叉审查发现（2026-05-20，审查提交 690d572..2e2e297）
 
-### N64: `MqttConnectionManager.disconnect()` 在 `synchronized` 块内修改 `StateFlow`
-- **提交哈希**: 3c3784f
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (`disconnect()` 内 synchronized 块)
-- **问题描述**: `_connectionState.value = Disconnected` 和 `_diagnostics.update {}` 在 `synchronized(this@MqttConnectionManager)` 块内执行。
-- **验证结果**: **误报**。StateFlow.value setter 是线程安全的，收集器在协程中异步执行，不会同步阻塞。当前 MainViewModel 的收集器不持有 MqttConnectionManager 的锁，不存在死锁条件。模式虽不够理想，但不是当前真实 bug。
-- **建议**: 无需修复。
 
-### N65: `MqttConnectionManager.connectionLost` 在非协程线程直接修改 `StateFlow`
-- **提交哈希**: 3c3784f（既有问题，非本次引入）
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (`connectionLost` 回调)
-- **问题描述**: Paho MQTT 的 `connectionLost` 回调运行在 Paho 内部线程，直接修改 `_connectionState.value`。
-- **验证结果**: **误报**。StateFlow.value setter 是线程安全的，设计目的就是允许从任意线程发布值。收集器在协程中异步消费，MainViewModel 的 collect 使用 viewModelScope（Dispatchers.Main），Compose UI 自动在主线程消费。这是标准用法。
-- **建议**: 无需修复。
 
 ### N66: `VirtualIpAllocator` 分配失败时 `nextVirtualIp` 泄漏
 - **提交哈希**: 690d572
@@ -668,12 +635,7 @@
 - **验证结果**: **潜在风险（建议修复）**。IP 池大小为 254（MAX_IP - START_IP + 1）。AtomicInteger 溢出后会自然回绕，且 `Math.floorMod` 能将任何整数映射回有效范围，功能上不会出问题。但 `nextVirtualIp` 值会无意义漂移，若后续代码依赖其原始值做判断可能导致意外行为。
 - **建议修复**: 将 `getAndIncrement()` 移到确认分配成功后再调用，避免漂移。优先级：**低**。
 
-### N69: `StreamConn.Read` 中 `readMu` 锁持有时间过长阻塞并发读取
-- **提交哈希**: 15414b05
-- **位置**: `server/socks5-proxy/main.go` (`StreamConn.Read`)
-- **问题描述**: `readMu` 在 `Read` 入口获取，直到方法返回才释放。`select` 阻塞等待 `DataChan`/`CloseChan`/`timer.C` 期间锁一直被持有。
-- **验证结果**: **误报**。虽然 `readMu` 确实在阻塞等待期间被持有，但当前代码中 `StreamConn.Read` 只被 `io.Copy` 在单 goroutine 中调用（`relay` 函数启动两个方向的 `copyStream`，每个 StreamConn 只在一个 goroutine 中被读取），不存在多个 goroutine 并发读取同一个 StreamConn 的场景。该锁的主要目的是保护 `readRemainder` 的状态一致性。
-- **建议**: 无需修复。
+
 
 ### N70: `StreamConn.SetReadDeadline` 更新无法被阻塞中的 `Read` 感知
 - **提交哈希**: 15414b05
@@ -682,12 +644,7 @@
 - **验证结果**: **潜在风险（建议修复）**。从纯技术角度，动态更新确实无法被已阻塞的 `Read` 感知。但当前 SOCKS5 代理场景下没有动态更新 deadline 的需求（`io.Copy` 不调用 `SetReadDeadline`）。这是接口契约层面的潜在风险，而非当前运行时的 bug。
 - **建议**: 在 `StreamConn` 文档中明确说明此限制，或考虑使用 `context.Context` 方案。优先级：**低**。
 
-### N71: `getExistingConn` 返回的连接可能在调用方使用前失效
-- **提交哈希**: 15414b05
-- **位置**: `server/socks5-proxy/main.go` (`getExistingConn`)
-- **问题描述**: RLock 获取 conn 引用后释放锁，锁外调用 `isConnAlive`。竞态窗口内另一 goroutine 可能替换连接。
-- **验证结果**: **误报**。虽然理论上存在"检查通过后立即失效"的竞态窗口，但：1) `isConnAlive` 通过发送 WebSocket Ping 验证了连接的即时状态；2) 竞态窗口极短（微秒级），在实际网络环境中可忽略；3) 即使发生，后续 Write 会失败并返回错误，不会导致未定义行为；4) 这是标准的 TOCTOU 问题，在没有原子性"获取并验证"API 的情况下属于可接受的设计权衡。
-- **建议**: 无需修复。
+
 
 ### N72: `readLoop` defer 不调用 `detachTunnel()`
 - **提交哈希**: 15414b05
@@ -696,19 +653,7 @@
 - **验证结果**: **代码风格建议**。`closeLocal()` 设置 `Closed=1` 后，`StreamConn.Write` 在入口原子检查（`atomic.LoadInt32(&s.Closed) == 1`）会立即返回错误，不会执行到 `tunnelConn.WriteMessage`。因此当前代码在功能上是安全的。添加 `detachTunnel()` 仅有防御性价值（彻底切断引用关系），无实际 bug 风险。
 - **建议修复**: 在 `readLoop` defer 中补充 `stream.detachTunnel()` 调用，消除 `TunnelConn` 悬空引用。优先级：**极低**。
 
-### N74: `MainViewModelTest` 使用 `mockkConstructor(Intent)` 全局静态污染
-- **提交哈希**: cc86ec21
-- **位置**: `android/app/src/test/java/com/netproxy/gateway/ui/viewmodel/MainViewModelTest.kt`
-- **问题描述**: `mockkConstructor(Intent::class)` 是全局静态修改，若测试并行运行或与其他测试类的 `Intent` mock 冲突，会产生交叉污染。
-- **验证结果**: **误报**。`mockkConstructor` 在 `@Before setUp()` 中设置，在 `@After tearDown()` 中通过 `unmockkConstructor` 清理。JUnit 的 `@After` 保证执行（即使测试失败）。项目中只有这一个测试类 mock 了 Intent，且 Gradle 默认串行执行测试，不存在跨测试污染。
-- **建议**: 无需修复。这是代码风格偏好问题，不是真实 bug。
 
-### N75: `MainViewModel.durationUpdateJob` 使用 `Dispatchers.Default` 无测试覆盖
-- **提交哈希**: cc86ec21（既有设计问题）
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt`
-- **问题描述**: `durationUpdateJob` 使用 `Dispatchers.Default`，不受 `StandardTestDispatcher` 控制，计时逻辑完全未被测试覆盖。
-- **验证结果**: **误报（已知限制）**。测试注释已明确说明这是已知限制。计时逻辑足够简单（每1秒用 `SystemClock.elapsedRealtime() - connectionStartTime` 更新一次），没有复杂的状态机或边界条件。将调度器注入需要修改构造函数签名或引入额外抽象层，复杂度远超测试收益。
-- **建议**: 无需修复。当前测试策略（验证无崩溃 + 初始值为0）已足够。
 
 ### N76: `doValidatedHTTPPost` 在 socks5-proxy 与 tunnel 中重复定义
 - **提交哈希**: 83c547be
@@ -731,15 +676,15 @@
 > 以下问题由5轮修复批次结束后的交叉审查记录；**本轮不修复**，留待后续处理。
 
 ### N63: `cleanupStream` 中 `streamConn.Close()` 在 `tc.mu` 锁内执行 [已修复]
-- **提交哈希**: 821518f（声称修复但未实际移出锁外）
-- **修复提交**: （本次修复）
+- **提交哈希**: `821518f`
+- **修复提交**: `9fb8b32`
 - **位置**: `server/socks5-proxy/main.go` (`cleanupStream`，L1043-L1057)
 - **问题描述**: 提交 821518f 声称将 `streamConn.Close()` 移出 `tc.mu` 锁外，但实际代码中 `Close()` 仍在 `defer tc.mu.Unlock()` 保护下执行。`Close()` 是 I/O 操作，持锁期间阻塞会卡住整个 `TunnelClient` 的流管理。
 - **修复方式**: 改为显式 `tc.mu.Lock()` / `tc.mu.Unlock()`，在锁内仅做 `delete(tc.streams, streamID)` 并标记 `exists`，解锁后再调用 `streamConn.Close()`。
 
 ### N78: `readLoop` defer 中 `conn.Close()` 仍在 `tc.mu` 锁内执行 [已修复]
-- **提交哈希**: f93054a
-- **修复提交**: （本次修复）
+- **提交哈希**: `f93054a`
+- **修复提交**: `821518f`
 - **位置**: `server/socks5-proxy/main.go` (`readLoop` defer，约 L860-873)
 - **问题描述**: `readLoop` 的 `defer` 块中获取 `tc.mu.Lock()`，然后在锁内调用 `stream.closeLocal()` 和 `conn.Close()`。`conn.Close()` 是 WebSocket I/O 操作，持锁期间阻塞会卡住整个 `TunnelClient` 的流管理。N63 同期仅修复了 `cleanupStream` 的同类问题，但 `readLoop` 的 defer 路径存在相同的持锁 I/O 模式。
 - **修复方式**: 在锁内收集需要关闭的 stream 列表和 conn 关闭标记，解锁后再逐个调用 `stream.closeLocal()` 和 `conn.Close()`。

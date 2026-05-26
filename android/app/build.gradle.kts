@@ -192,7 +192,7 @@ dependencies {
 }
 
 // JaCoCo task configuration
-android.applicationVariants.all {
+android.applicationVariants.configureEach {
     val variantName = name
     val testTaskName = "test${variantName.replaceFirstChar { it.uppercase() }}UnitTest"
 
@@ -238,7 +238,8 @@ android.applicationVariants.all {
             )
         )
         classDirectories.setFrom(files(debugTree, kotlinDebugTree))
-        executionData.setFrom(layout.buildDirectory.file("jacoco/${testTaskName}.exec").get().asFile)
+        val testTask = tasks.named<Test>(testTaskName)
+        executionData.setFrom(testTask.map { it.extensions.getByType<org.gradle.testing.jacoco.plugins.JacocoTaskExtension>().destinationFile!! })
     }
 }
 

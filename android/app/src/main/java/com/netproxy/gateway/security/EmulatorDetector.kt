@@ -349,7 +349,6 @@ object EmulatorDetector {
                         lowerLine.contains("virtualbox") ||
                         lowerLine.contains("kvm") ||
                         lowerLine.contains("qemu") ||
-                        lowerLine.contains("x86") ||
                         lowerLine.contains("goldfish") ||
                         lowerLine.contains("ranchu")
                     ) {
