@@ -850,12 +850,10 @@ func (tc *TunnelClient) readLoop(deviceID string, conn *websocket.Conn) {
 
 	defer func() {
 		var streamsToClose []*StreamConn
-		var shouldCloseConn bool
 
 		tc.mu.Lock()
 		if tc.connections[deviceID] == conn {
 			delete(tc.connections, deviceID)
-			shouldCloseConn = true
 		}
 		for streamID, stream := range tc.streams {
 			if stream.DeviceID == deviceID {
@@ -868,9 +866,9 @@ func (tc *TunnelClient) readLoop(deviceID string, conn *websocket.Conn) {
 		for _, stream := range streamsToClose {
 			stream.closeLocal()
 		}
-		if shouldCloseConn {
-			conn.Close()
-		}
+		// readLoop 是 WebSocket 读取侧的拥有者，退出时必须关闭连接
+		// Close 是幂等的，即使其他路径已关闭也不会出错
+		conn.Close()
 	}()
 
 	if err := conn.SetReadDeadline(time.Now().Add(tunnelReadTimeout)); err != nil {
