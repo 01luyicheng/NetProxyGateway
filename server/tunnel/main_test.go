@@ -37,6 +37,7 @@ func TestNotifyDeviceStatusAddsInternalAPIKeyHeader(t *testing.T) {
 		InternalAPIKey: "internal-secret",
 	})
 
+	manager.wg.Add(1)
 	manager.notifyDeviceStatus("device-123", "online", "")
 
 	waitDone := make(chan struct{})
@@ -81,6 +82,7 @@ func TestNotifyDeviceStatusRetriesAndEventuallySucceeds(t *testing.T) {
 	defer server.Close()
 
 	manager := NewTunnelManager(&Config{APIEndpoint: server.URL})
+	manager.wg.Add(1)
 	manager.notifyDeviceStatus("device-123", "online", "")
 
 	for i := 0; i < 2; i++ {
@@ -124,6 +126,7 @@ func TestNotifyDeviceStatusDoesNotRetryOnBadRequest(t *testing.T) {
 	defer server.Close()
 
 	manager := NewTunnelManager(&Config{APIEndpoint: server.URL})
+	manager.wg.Add(1)
 	manager.notifyDeviceStatus("device-123", "online", "")
 
 	select {
@@ -593,6 +596,7 @@ func TestNotifyDeviceStatusExhaustsRetries(t *testing.T) {
 	defer server.Close()
 
 	manager := NewTunnelManager(&Config{APIEndpoint: server.URL})
+	manager.wg.Add(1)
 	manager.notifyDeviceStatus("device-123", "online", "")
 
 	for i := 0; i < 3; i++ {
@@ -643,6 +647,7 @@ func TestNotifyDeviceStatusRetriesOnTooManyRequests(t *testing.T) {
 	defer server.Close()
 
 	manager := NewTunnelManager(&Config{APIEndpoint: server.URL})
+	manager.wg.Add(1)
 	manager.notifyDeviceStatus("device-123", "online", "")
 
 	for i := 0; i < 2; i++ {
