@@ -9,8 +9,8 @@
 | 编号 | 标题 | 模块 | 严重程度 | 代码指纹 | 引入提交 |
 |------|------|------|----------|----------|----------|
 | H4 | SOCKS5代理DNS重绑定攻击风险 | proxy | High | Socks5ProxyHandler/validateTargetAddress/DNS解析 | e89e00d |
-| H5 | 连接池清理竞争条件（残余） | proxy | High | Socks5ConnectionPool/cleanupIdleConnections/write锁内阻塞IO | 1f9acee |
-| H8 | MQTT TLS证书固定配置可能为空 | connection | High | MqttConnectionManager/createProductionSocketFactory/空配置回退 | e89e00d |
+| H5 | 连接池清理竞争条件 [已修复] | proxy | High | Socks5ConnectionPool/cleanupIdleConnections/write锁内阻塞IO | 1f9acee |
+| H8 | MQTT TLS证书固定配置可能为空 [已修复] | connection | High | MqttConnectionManager/createProductionSocketFactory/空配置回退 | e89e00d |
 | H12 | activeConnections复合操作非原子 | vpn | High | VpnService/forwardViaSocks5/检查-获取-更新 | d01ddd1 |
 | H14 | processTcpReturn阻止0长度TCP控制包注入 | vpn | High | VpnService/processTcpReturn/available>0门槛 | d01ddd1 |
 | H15 | VpnService测试直接实例化Android Service | vpn | High | VpnServiceTest/直接实例化/生命周期违规 | d01ddd1 |
@@ -22,7 +22,7 @@
 | N36 | VpnService TCP固定标志位不符合协议状态机 | vpn | High | VpnService/constructReturnPacket/PSH+ACK固定 | 1f9acee |
 | N37 | AuthSessionStore CharArray安全设计被String抵消 | connection | High | AuthSessionStore/loadSession/CharArray转String | 1f9acee |
 | N43 | MqttConnectionManager MQTT回调无法注销导致内存泄漏 | connection | Medium | MqttConnectionManager/subscribeWithResult/无unsubscribe | 1f9acee |
-| N56 | StreamConn deadline方法空实现导致goroutine泄漏 | server | High | server/socks5-proxy/SetReadDeadline/空实现 | 9f4b1b9 |
+| N56 | StreamConn SetWriteDeadline空实现 [部分已修复] | server | Medium | server/socks5-proxy/SetWriteDeadline/空实现 | 9f4b1b9 |
 | N57 | VpnService processReturnTraffic单协程串行处理模型导致回包处理停滞 | vpn | Medium | VpnService/processReturnTraffic/forEach串行 | d01ddd1 |
 | N58 | VpnService processTcpReturn依赖InputStream.available()不可靠 | vpn | Medium | VpnService/processTcpReturn/available估计值 | d01ddd1 |
 | N59 | M13修复后首次连接失败的首轮重连延迟变为10秒 | connection | Low | MqttConnectionManager/onReconnectAttemptFailed/首次倍增 | 4e965e2 |
@@ -104,7 +104,7 @@
 | L3 | EmulatorDetector权限检查重复 | security | Low | EmulatorDetector/重复权限检查 | e89e00d |
 | L5 | 缺少集成测试 | global | Low | 测试目录/仅单元测试 | e89e00d |
 | N1 | 双版本API增加维护负担 | wifi,connection | Medium | GatewayWifiManager,AuthSessionStore/双版本 | e89e00d |
-| N2 | VpnService过于庞大 | vpn | Medium | VpnService/1054行 | e89e00d |
+| N2 | VpnService过于庞大 | vpn | Medium | VpnService/1178行 | e89e00d |
 | N3 | 过度使用@Synchronized | connection | Low | AuthSessionStore/全方法同步 | e89e00d |
 | N4 | DI模块接口设计混乱 | di | Medium | ModuleInterfaces/@Deprecated | e89e00d |
 | N5 | 状态管理分散 | global | Low | 多处/VpnState,MqttConnectionState,WiFiState | e89e00d |

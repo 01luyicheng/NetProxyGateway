@@ -55,12 +55,14 @@ Socks5ConnectionPool --> AuthSessionStore (通过credentialProvider lambda)
   2. 检查解析后的IP是否与目标域名匹配
   3. 考虑使用DNS-over-HTTPS (DoH)
 
-#### H5: 连接池清理竞争条件（残余）
+#### H5: 连接池清理竞争条件 [已修复]
+- **状态**: 已修复
+- **修复提交**: `b1e18bd`
 - **位置**: Socks5ConnectionPool.kt `cleanupIdleConnections()`, `borrowConnection()`
 - **代码指纹**: Socks5ConnectionPool/cleanupIdleConnections/write锁内阻塞IO
-- **问题**: read锁收集、write锁清理之间连接状态可能变化。`cleanupIdleConnections` 在单次 `write` 锁内完成筛选与移除；`borrowConnection` 在读锁外收集无效连接后，于 `write` 锁内二次校验
-- **残余风险**: 写锁内 `removeConnection`/`close()` 仍可能阻塞（N27）
-- **修复提交**: b1e18bd（已缓解，非完全消除）
+- **问题**: ~~read 锁收集、write 锁清理之间连接状态可能变化~~ 原始竞态已修复
+- **修复说明**: `cleanupIdleConnections` 完全在单次 `write` 锁内完成筛选与移除；`borrowConnection` 在读锁外收集无效连接后，于 `write` 锁内二次校验 `inUse`/`isValid` 再关闭
+- **残余风险**: 写锁内 `removeConnection`/`close()` 仍可能阻塞（见 N27）
 
 #### N27: Socks5ConnectionPool cleanupIdleConnections在write锁内执行阻塞IO
 - **位置**: Socks5ConnectionPool.kt `cleanupIdleConnections()` (L435-L457)

@@ -39,32 +39,34 @@
 ## High
 
 ### H4: SOCKS5代理DNS重绑定攻击风险
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt` (L107-131)
-- **问题**: 代码已有IP范围验证（拒绝回环、链路本地、广播、保留地址，仅允许RFC1918私有地址），但DNS重绑定风险仍然存在。攻击者可能通过快速切换DNS记录绕过IP验证窗口
-- **风险**: 攻击者可能通过DNS重绑定绕过IP验证，访问内网资源
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt` (L107-131, L264)
+- **问题**: `validateTargetAddress` 中进行了一次 DNS 解析（`InetAddress.getByName(host)`，L112）验证 IP 范围，但后续 `bootstrap.connect(host, port)`（L264）会**再次独立解析 DNS**。攻击者可控制 DNS 服务器，在验证时返回合法 IP（如 10.x.x.x），在实际连接时解析到内网地址（如 127.0.0.1），绕过 IP 验证。此外 `InetAddress.getByName()` 是同步阻塞调用（见 N30）。
+- **风险**: 攻击者可能通过 DNS 重绑定绕过 IP 验证，访问内网资源
 - **建议修复**:
-  1. 使用DNS缓存并验证解析结果
-  2. 检查解析后的IP是否与目标域名匹配
-  3. 考虑使用DNS-over-HTTPS (DoH)
+  1. 验证通过后缓存解析结果，后续连接使用已验证的 IP（`connect(InetSocketAddress(ip, port))`）
+  2. 检查解析后的 IP 是否与目标域名匹配
+  3. 考虑使用 DNS-over-HTTPS (DoH)
 - **代码**:
   ```kotlin
   private fun validateTargetAddress(host: String, port: Int): Boolean {
       // ... 端口验证 ...
-      val inetAddr = java.net.InetAddress.getByName(host)
+      val inetAddr = java.net.InetAddress.getByName(host)  // 第一次解析
       val ip = inetAddr.hostAddress ?: return false
       // IP范围验证：拒绝127.x, 169.254.x, 0.0.0.0, 255.255.255.255, 224.x
       // 仅允许RFC1918私有地址
       IpAddressUtils.isPrivateIpv4Rfc1918(ip)
   }
+  // ...
+  bootstrap.connect(host, port)  // 第二次独立解析！
   ```
 
-### H5: 连接池清理竞争条件 [已缓解]
-- **状态**: 已缓解（非完全消除；见 N27 写锁内阻塞 IO）
+### H5: 连接池清理竞争条件 [已修复]
+- **状态**: 已修复
 - **修复提交**: `b1e18bd`
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (`cleanupIdleConnections`, `borrowConnection` 无效连接清理)
-- **问题**: read 锁收集、write 锁清理之间连接状态可能变化
-- **缓解**: `cleanupIdleConnections` 在单次 `write` 锁内完成筛选与移除；`borrowConnection` 在读锁外收集无效连接后，于 `write` 锁内二次校验 `inUse`/`isValid` 再关闭
-- **残余风险**: 写锁内 `removeConnection`/`close()` 仍可能阻塞（N27）
+- **问题**: ~~read 锁收集、write 锁清理之间连接状态可能变化~~ 原始竞态已修复
+- **修复说明**: `cleanupIdleConnections` 完全在单次 `write` 锁内完成筛选与移除（L451-463）；`borrowConnection` 在读锁外收集无效连接后，于 `write` 锁内二次校验 `inUse`/`isValid` 再关闭
+- **残余风险**: 写锁内 `removeConnection`/`close()` 仍可能阻塞（见 N27）
 
 ### H17: VirtualIpAllocator AtomicInteger溢出 [已修复]
 - **状态**: 已修复
@@ -75,14 +77,16 @@
 - **修复**: 使用`Math.floorMod(nextVirtualIp.getAndIncrement(), MAX_IP - START_IP + 1) + START_IP`替代直接递增，与VpnService.kt中H11修复方式一致
 - **修复状态**: 已修复
 
-### H8: MQTT TLS证书固定配置可能为空
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L131-138)
-- **问题**: 当`MQTT_TLS_PUBLIC_KEY_PINS`为空时，仅记录警告，仍使用默认CA验证
-- **风险**: 生产环境可能意外使用不安全的证书验证方式
-- **建议修复**:
-  1. 生产环境强制要求配置证书固定
-  2. 空配置时抛出异常而非仅警告
-  3. 添加构建时检查确保配置正确
+### H8: MQTT TLS证书固定配置可能为空 [已修复]
+- **状态**: 已修复
+- **修复提交**: M20（运行时修复）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L232-247)
+- **问题**: ~~当`MQTT_TLS_PUBLIC_KEY_PINS`为空时，仅记录警告，仍使用默认CA验证~~ 已修复
+- **当前行为**:
+  - **Release 构建**: 空配置时抛出 `IllegalStateException` 阻止启动，强制要求证书固定（L235-239）
+  - **Debug 构建**: 允许空配置，记录警告并回退到系统 CA 验证（L241-246）
+- **风险**: Release 构建已无风险；Debug 构建为预期行为
+- **残余建议**: 可添加构建时 Lint/Gradle 静态检查作为额外防护层
 
 ---
 
@@ -149,7 +153,7 @@
 - **建议修复**: 统一使用 `AppResult` 模式，移除静默失败版本
 
 ### N2: VpnService过于庞大
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (1054行)
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (1178行)
 - **问题**: 包含 VPN 服务、数据包解析、连接管理、状态机等多个职责；`processPacket()`、`forwardViaSocks5()` 等函数超过 50 行
 - **风险**: 中。代码难以理解和维护
 - **建议修复**: 提取数据包解析为 `PacketParser`，提取连接管理为 `ConnectionManager`
@@ -558,17 +562,17 @@
 - **修复**: `try-finally` 保证 `process.destroy()`；相关路径 drain stderr
 - **关联问题**: M3
 
-### N56: server/socks5-proxy StreamConn deadline 实现不完整导致 goroutine 泄漏风险
-- **状态**: 部分已修复（SetReadDeadline 已实现，SetWriteDeadline 仍为空实现）
+### N56: StreamConn SetWriteDeadline 空实现 [部分已修复]
+- **状态**: 部分已修复
 - **提交哈希**: 9f4b1b9
-- **位置**: `server/socks5-proxy/main.go` (L626-L645, L363-L421)
+- **位置**: `server/socks5-proxy/main.go` (L629-L648)
 - **问题描述**:
-  - `SetReadDeadline`：已实现（L635-L638）。使用 `atomic.Value` 存储 deadline，`Read()`（L399-L413）中读取 deadline 并通过 `time.NewTimer` 实现超时，超时返回 `os.ErrDeadlineExceeded`。
-  - `SetDeadline`：已实现（L627-L632）。内部调用 `SetReadDeadline` 和 `SetWriteDeadline`。
-  - `SetWriteDeadline`：仍为空实现（L643-L645），仅返回 `nil`。WebSocket 写入已通过 `writeMu + streamWriteLimit` 保护，但 `net.Conn` 接口语义上写 deadline 未生效。
-  - 残余风险：`relay()` 中通过 `io.Copy` 间接调用 `Read()` 时，若调用方未主动设置 read deadline，远端静默仍可能导致 `Read()` 永久阻塞。`readLoop` 的 60 秒 websocket 超时只关闭 websocket 连接，不关闭关联的 StreamConn。
-- **风险**: 高。长连接场景（SSH、数据库连接、WebSocket）下，若调用方未设置 read deadline，远端静默可导致每个连接泄漏一个 goroutine 及其关联的 StreamConn、channel 等内存资源
-- **修复难度**: 低。`SetReadDeadline` 已实现；建议评估是否为 `relay()` 默认设置 read deadline，或实现 `SetWriteDeadline` 完整语义
+  - `SetReadDeadline`：**已实现**（L638-L641）。使用 `atomic.Value` 存储 deadline，`Read()` 中通过 `time.NewTimer` 实现超时，超时返回 `os.ErrDeadlineExceeded`。
+  - `SetDeadline`：**已实现**（L630-L635）。内部调用 `SetReadDeadline` 和 `SetWriteDeadline`。
+  - `SetWriteDeadline`：**仍为空实现**（L646-L648），仅返回 `nil`。WebSocket 写入已通过 `writeMu + streamWriteLimit` 保护，但 `net.Conn` 接口语义上写 deadline 未生效。
+  - `relay()` 阻塞风险：`relay()` 中通过 `io.Copy` 间接调用 `Read()` 时若未设置 read deadline 可能阻塞，但 `readLoop` 的 60 秒 WebSocket 超时会关闭连接，不会**永久**泄漏 goroutine（最多泄漏 60 秒）。
+- **风险**: 中。`SetWriteDeadline` 空实现导致 `SetDeadline` 写超时语义不完整；`relay()` 阻塞被 60 秒超时限制，不会永久泄漏
+- **修复难度**: 低。实现 `SetWriteDeadline` 完整语义；评估是否为 `relay()` 默认设置 read deadline
 - **关联问题**: TECH_DEBT.md C79
 
 ### N57: VpnService processReturnTraffic 单协程串行处理模型导致回包处理停滞
