@@ -294,6 +294,12 @@ func (m *TunnelManager) Get(deviceID string) (*TunnelConn, bool) {
 
 // notifyDeviceStatus notifies the API of a device status change.
 func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string) {
+	select {
+	case <-m.ctx.Done():
+		return
+	default:
+	}
+
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
