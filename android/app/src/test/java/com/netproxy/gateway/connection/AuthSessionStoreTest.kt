@@ -34,7 +34,7 @@ import org.junit.Test
 /**
  * AuthSessionStore 的单元测试
  * 使用 Mockk 模拟 Android 依赖（EncryptedSharedPreferences、SharedPreferences.Editor 等）
- * 
+ *
  * Note: 此测试使用了已弃用的 EncryptedSharedPreferences 和 MasterKey API
  * 这是为了测试向后兼容性，新代码应该使用更新的加密 API
  */
@@ -64,7 +64,7 @@ class AuthSessionStoreTest {
         // setKeyScheme 返回 Builder 自身以支持链式调用
         every { builderMock.setKeyScheme(MasterKey.KeyScheme.AES256_GCM) } returns builderMock
         every { builderMock.build() } returns masterKey
-        
+
         // Mock 构造函数返回我们的 mock 对象
         mockkConstructor(MasterKey.Builder::class)
         every { anyConstructed<MasterKey.Builder>().setKeyScheme(MasterKey.KeyScheme.AES256_GCM) } returns builderMock

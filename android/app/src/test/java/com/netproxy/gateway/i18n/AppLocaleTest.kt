@@ -70,28 +70,28 @@ class AppLocaleTest {
     fun normalizeLanguageTag_rejectedUnsupportedTag() {
         // 不支持的语言标签应被正规化为 null
         val context = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
-        
+
         AppLocale.setSelectedLanguageTag(context, "fr-FR")  // 不支持的语言
-        
+
         assertNull(AppLocale.getSelectedLanguageTag(context))
     }
 
     @Test
     fun normalizeLanguageTag_trimsWhitespaceAndNormalizes() {
         val context = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
-        
+
         // 应该清理首尾空格并正规化为规范形式
         AppLocale.setSelectedLanguageTag(context, "  en  ")
-        
+
         assertEquals("en", AppLocale.getSelectedLanguageTag(context))
     }
 
     @Test
     fun normalizeLanguageTag_emptyStringBecomesNull() {
         val context = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
-        
+
         AppLocale.setSelectedLanguageTag(context, "")
-        
+
         assertNull(AppLocale.getSelectedLanguageTag(context))
     }
 
@@ -154,7 +154,7 @@ class AppLocaleTest {
     fun languageChangeCallback_triggersOnApplyLanguage() {
         // H27: 当语言切换时应触发回调，以通知前台服务
         val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
-        
+
         val callbackTriggered = mutableListOf<String?>()
         AppLocale.registerLanguageChangeListener(TEST_LISTENER_1) { newTag ->
             callbackTriggered.add(newTag)
@@ -171,7 +171,7 @@ class AppLocaleTest {
     fun languageChangeCallback_multipleCallbacks() {
         // H27: 多次切换应多次触发回调
         val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
-        
+
         val callbackTriggered = mutableListOf<String?>()
         AppLocale.registerLanguageChangeListener(TEST_LISTENER_2) { newTag ->
             callbackTriggered.add(newTag)
