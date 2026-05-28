@@ -211,7 +211,7 @@ func TestCleanupDeadTunnelsSkipsReplacedInstance(t *testing.T) {
 	first := manager.Register("device-cleanup", nil)
 	second := manager.Register("device-cleanup", nil)
 
-	// 等待旧连接超时，但保持新连接活跃
+	// wait for old connection to timeout while keeping new connection alive
 	time.Sleep(100 * time.Millisecond)
 	second.UpdatePing()
 

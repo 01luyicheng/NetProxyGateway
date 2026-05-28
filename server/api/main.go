@@ -19,7 +19,7 @@ import (
 	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
-// 常量定义
+// Constants
 const (
 	PairingCodeTTL                = 15 * time.Minute
 	SessionTokenTTL               = 15 * time.Minute
@@ -31,39 +31,39 @@ const (
 	MaxHTTPHeaderBytes            = 1 << 20
 )
 
-// 错误消息常量 - 统一使用 ErrFailedToXxx 命名风格
-const (
-	ErrFailedToParseRequest               = "invalid request format"
-	ErrFailedToQueryDatabase              = "database error"
-	ErrFailedToFindSession                = "session not found"
-	ErrFailedToFindPairingSession         = "pairing session not found"
-	ErrFailedToGenerateCode               = "failed to generate pairing code"
-	ErrFailedToResolvePairingCodeConflict = "pairing code temporarily unavailable"
-	ErrFailedToCreateSession              = "failed to create pairing session"
-	ErrFailedToUpdateSession              = "failed to update session"
-	ErrFailedToUpdateStatus               = "failed to update device status"
-	ErrFailedToGenerateToken              = "failed to generate session token"
-	ErrFailedToCreateToken                = "failed to create session token"
-	ErrFailedToValidateToken              = "missing or invalid bearer token"
-	ErrFailedToAuthenticate               = "invalid credentials"
-	ErrUnauthorized                       = "unauthorized"
-	ErrForbidden                          = "forbidden"
-	ErrSessionExpired                     = "session expired"
-	ErrPairingNotCompleted                = "pairing not completed"
-	ErrInvalidStatusTransition            = "invalid status transition"
-	ErrRateLimitExceeded                  = "rate limit exceeded, please try again later"
-	ErrRateLimit                          = "rate limit exceeded"
-	ErrMissingEngineer                    = "missing authenticated engineer"
-	ErrInternalAPIKeyNotConfigured        = "internal api key not configured"
-	ErrMissingInternalAPIKey              = "missing internal api key"
-	ErrInvalidInternalAPIKey              = "invalid internal api key"
+// Sentinel errors - unified ErrFailedToXxx naming convention
+var (
+	ErrFailedToParseRequest               = errors.New("invalid request format")
+	ErrFailedToQueryDatabase              = errors.New("database error")
+	ErrFailedToFindSession                = errors.New("session not found")
+	ErrFailedToFindPairingSession         = errors.New("pairing session not found")
+	ErrFailedToGenerateCode               = errors.New("failed to generate pairing code")
+	ErrFailedToResolvePairingCodeConflict = errors.New("pairing code temporarily unavailable")
+	ErrFailedToCreateSession              = errors.New("failed to create pairing session")
+	ErrFailedToUpdateSession              = errors.New("failed to update session")
+	ErrFailedToUpdateStatus               = errors.New("failed to update device status")
+	ErrFailedToGenerateToken              = errors.New("failed to generate session token")
+	ErrFailedToCreateToken                = errors.New("failed to create session token")
+	ErrFailedToValidateToken              = errors.New("missing or invalid bearer token")
+	ErrFailedToAuthenticate               = errors.New("invalid credentials")
+	ErrUnauthorized                       = errors.New("unauthorized")
+	ErrForbidden                          = errors.New("forbidden")
+	ErrSessionExpired                     = errors.New("session expired")
+	ErrPairingNotCompleted                = errors.New("pairing not completed")
+	ErrInvalidStatusTransition            = errors.New("invalid status transition")
+	ErrRateLimitExceeded                  = errors.New("rate limit exceeded, please try again later")
+	ErrRateLimit                          = errors.New("rate limit exceeded")
+	ErrMissingEngineer                    = errors.New("missing authenticated engineer")
+	ErrInternalAPIKeyNotConfigured        = errors.New("internal api key not configured")
+	ErrMissingInternalAPIKey              = errors.New("missing internal api key")
+	ErrInvalidInternalAPIKey              = errors.New("invalid internal api key")
 )
 
 var (
 	errPairingCodeConflictRetryLimitReached = errors.New("pairing code conflict retry limit reached")
 )
 
-// PairingSession 配对会话
+// PairingSession represents a pairing session.
 type PairingSession struct {
 	Code       string    `json:"code"`
 	DeviceID   string    `json:"device_id"`
@@ -74,7 +74,7 @@ type PairingSession struct {
 	Used       bool      `json:"used"`
 }
 
-// SessionToken 会话令牌
+// SessionToken represents a session token.
 type SessionToken struct {
 	Token      string    `json:"token"`
 	DeviceID   string    `json:"device_id"`
@@ -83,7 +83,7 @@ type SessionToken struct {
 	ExpiresAt  time.Time `json:"expires_at"`
 }
 
-// DeviceStatus 设备状态
+// DeviceStatus represents the status of a device.
 type DeviceStatus struct {
 	DeviceID   string    `json:"device_id"`
 	Status     string    `json:"status"`
@@ -91,7 +91,7 @@ type DeviceStatus struct {
 	TunnelAddr string    `json:"tunnel_addr,omitempty"`
 }
 
-// LoginAttempt 登录尝试记录
+// LoginAttempt tracks login attempts for rate limiting.
 type LoginAttempt struct {
 	Count      int
 	LastTry    time.Time
@@ -99,12 +99,12 @@ type LoginAttempt struct {
 	BlockUntil time.Time
 }
 
-// Server 服务器结构
+// Server is the API server.
 type Server struct {
 	db                   *sql.DB
 	pairingCodeGenerator func() (string, error)
 
-	// 内存缓存（用于登录限流，不持久化）
+	// In-memory cache for login rate limiting (not persisted)
 	loginAttempts   map[string]*LoginAttempt // ip -> attempts
 	loginAttemptsMu sync.RWMutex
 
@@ -117,10 +117,10 @@ type Server struct {
 	cleanupLoginAttemptsInterval time.Duration
 }
 
-// handleBindError 统一处理请求绑定错误
+// handleBindError handles request binding errors uniformly.
 func handleBindError(c *gin.Context, component string, err error) {
 	log.Printf("[%s] Invalid request format: %v", component, err)
-	c.JSON(http.StatusBadRequest, gin.H{"error": ErrFailedToParseRequest})
+	c.JSON(http.StatusBadRequest, gin.H{"error": ErrFailedToParseRequest.Error()})
 }
 
 func validateJWTSecret(secret string) error {
@@ -133,14 +133,14 @@ func validateJWTSecret(secret string) error {
 	return nil
 }
 
-// NewServer 创建新服务器
+// NewServer creates a new server.
 func NewServer() (*Server, error) {
 	jwtSecret := os.Getenv("JWT_SECRET")
 	if err := validateJWTSecret(jwtSecret); err != nil {
 		log.Fatalf("FATAL: %v", err)
 	}
 
-	// 检查管理员凭据是否配置
+	// Check admin credentials are configured
 	adminUser := os.Getenv("ADMIN_USER")
 	adminPass := os.Getenv("ADMIN_PASS")
 	if adminUser == "" || adminPass == "" {
@@ -149,10 +149,10 @@ func NewServer() (*Server, error) {
 
 	internalAPIKey := os.Getenv("INTERNAL_API_KEY")
 	if internalAPIKey == "" {
-		// 严格检查：仅在明确设置 APP_ENV=development 且不是生产环境时允许自动生成密钥
+		// Strict check: only allow auto-generated key in APP_ENV=development
 		appEnv := os.Getenv("APP_ENV")
 		if appEnv == "development" {
-			// 额外的安全检查：确保关键生产环境变量未设置，防止误用开发模式
+			// Extra safety check: ensure production env vars are not set
 			if os.Getenv("ENABLE_TLS") == "true" {
 				log.Fatalf("FATAL: Cannot use APP_ENV=development when ENABLE_TLS is true. Development mode is not allowed in production configurations.")
 			}
@@ -178,24 +178,24 @@ func NewServer() (*Server, error) {
 		}
 	}
 
-	// 获取数据库路径
+	// Get database path
 	dbPath := os.Getenv("DB_PATH")
 	if dbPath == "" {
 		dbPath = DefaultDBPath
 	}
 
-	// 打开数据库连接
+	// Open database connection
 	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	// 验证数据库连接
+	// Verify database connection
 	if err := db.Ping(); err != nil {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	// 创建表结构
+	// Create schema
 	if err := initSchema(db); err != nil {
 		return nil, fmt.Errorf("failed to init schema: %w", err)
 	}
@@ -222,7 +222,7 @@ func isPairingCodeUniqueConstraintError(err error) bool {
 	return sqliteErr.ExtendedCode == sqlite3.ErrConstraintPrimaryKey || sqliteErr.ExtendedCode == sqlite3.ErrConstraintUnique
 }
 
-// initSchema 初始化数据库表结构
+// initSchema initializes the database schema.
 func initSchema(db *sql.DB) error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS pairing_sessions (
@@ -263,7 +263,7 @@ func initSchema(db *sql.DB) error {
 	return err
 }
 
-// Close 关闭服务器资源
+// Close closes server resources.
 func (s *Server) Close() error {
 	if s.cleanupStop != nil {
 		close(s.cleanupStop)
@@ -276,12 +276,12 @@ func (s *Server) Close() error {
 	return nil
 }
 
-// generateCode 生成6位配对码 (使用拒绝采样避免模运算偏斜)
+// generateCode generates a 6-digit pairing code using rejection sampling to avoid modulo bias.
 func generateCode() (string, error) {
 	const maxCode = 1000000
-	// uint32 最大值为 4294967295
-	// 计算 4294967296 % 1000000 = 7296
-	// 因此需要拒绝 0-7295 范围内的值以确保均匀分布
+	// uint32 max value is 4294967295
+	// 4294967296 % 1000000 = 7296
+	// Reject values 0-7295 to ensure uniform distribution
 	const maxUint32 = 1 << 32
 	const threshold = maxUint32 - (maxUint32 % maxCode)
 
@@ -291,7 +291,7 @@ func generateCode() (string, error) {
 			return "", err
 		}
 		n := binary.BigEndian.Uint32(b)
-		// 拒绝采样：如果 n >= threshold，则重新采样
+		// Rejection sampling: resample if n >= threshold
 		if n < threshold {
 			code := int(n % maxCode)
 			return fmt.Sprintf("%06d", code), nil
@@ -327,8 +327,8 @@ func generateUniquePairingCode(
 	return "", errPairingCodeConflictRetryLimitReached
 }
 
-// generateSecureRandomString 生成加密安全的随机字符串（用于API密钥等安全敏感场景）
-// 使用拒绝采样避免模运算偏斜，确保均匀分布
+// generateSecureRandomString generates a cryptographically secure random string for sensitive use cases like API keys.
+// Uses rejection sampling to avoid modulo bias and ensure uniform distribution.
 func generateSecureRandomString(length int) (string, error) {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	const charsetLen = 62
@@ -350,12 +350,12 @@ func generateSecureRandomString(length int) (string, error) {
 	return string(result), nil
 }
 
-// generateSessionToken 生成会话令牌
+// generateSessionToken generates a session token.
 func generateSessionToken() (string, error) {
 	return generateSecureRandomString(32)
 }
 
-// checkRateLimit 检查限流
+// checkRateLimit checks rate limiting for the given client IP.
 func (s *Server) checkRateLimit(clientIP string) bool {
 	s.loginAttemptsMu.Lock()
 	defer s.loginAttemptsMu.Unlock()
@@ -369,25 +369,25 @@ func (s *Server) checkRateLimit(clientIP string) bool {
 		return true
 	}
 
-	// 检查是否被封禁
+	// Check if currently blocked
 	if attempt.Blocked && time.Now().Before(attempt.BlockUntil) {
 		return false
 	}
 
-	// 重置封禁状态
+	// Reset block status if block period has expired
 	if attempt.Blocked && time.Now().After(attempt.BlockUntil) {
 		attempt.Blocked = false
 		attempt.Count = 0
 	}
 
-	// 检查是否需要封禁
+	// Check if should block
 	if attempt.Count >= MaxFailedAttempts && time.Since(attempt.LastTry) < 5*time.Minute {
 		attempt.Blocked = true
 		attempt.BlockUntil = time.Now().Add(BlockDuration)
 		return false
 	}
 
-	// 重置计数（如果超过5分钟）
+	// Reset count if more than 5 minutes have passed
 	if time.Since(attempt.LastTry) > 5*time.Minute {
 		attempt.Count = 0
 	}
@@ -397,14 +397,14 @@ func (s *Server) checkRateLimit(clientIP string) bool {
 	return true
 }
 
-// recordSuccess 记录成功
+// recordSuccess records a successful login attempt, clearing rate limit state.
 func (s *Server) recordSuccess(clientIP string) {
 	s.loginAttemptsMu.Lock()
+	defer s.loginAttemptsMu.Unlock()
 	delete(s.loginAttempts, clientIP)
-	s.loginAttemptsMu.Unlock()
 }
 
-// cleanupLoginAttempts 清理过期登录限流记录
+// cleanupLoginAttempts removes stale login attempt records.
 func (s *Server) cleanupLoginAttempts(now time.Time) {
 	const staleLoginAttemptTTL = 5 * time.Minute
 
@@ -417,7 +417,7 @@ func (s *Server) cleanupLoginAttempts(now time.Time) {
 			continue
 		}
 
-		// 在封禁窗口内的记录保留，封禁结束后删除。
+		// Keep records within the block window; delete after block expires.
 		if attempt.Blocked {
 			if !now.Before(attempt.BlockUntil) {
 				delete(s.loginAttempts, clientIP)
@@ -431,6 +431,7 @@ func (s *Server) cleanupLoginAttempts(now time.Time) {
 	}
 }
 
+// startCleanupWorkers starts the background cleanup goroutines.
 func (s *Server) startCleanupWorkers() {
 	if s.cleanupStop != nil {
 		return
@@ -443,7 +444,7 @@ func (s *Server) startCleanupWorkers() {
 	go s.cleanupExpiredLoginAttempts(s.cleanupStop)
 }
 
-// cleanupExpiredLoginAttempts 定时清理过期登录限流记录
+// cleanupExpiredLoginAttempts periodically cleans up expired login attempt records.
 func (s *Server) cleanupExpiredLoginAttempts(stop <-chan struct{}) {
 	interval := s.cleanupLoginAttemptsInterval
 	if interval <= 0 {
@@ -464,7 +465,7 @@ func (s *Server) cleanupExpiredLoginAttempts(stop <-chan struct{}) {
 	}
 }
 
-// cleanupExpiredSessions 清理过期会话
+// cleanupExpiredSessions periodically cleans up expired pairing sessions and session tokens.
 func (s *Server) cleanupExpiredSessions(stop <-chan struct{}) {
 	interval := s.cleanupSessionsInterval
 	if interval <= 0 {
@@ -482,13 +483,13 @@ func (s *Server) cleanupExpiredSessions(stop <-chan struct{}) {
 		case <-ticker.C:
 			now := time.Now().Unix()
 
-			// 清理过期配对会话
+			// Clean up expired pairing sessions
 			_, err := s.db.Exec("DELETE FROM pairing_sessions WHERE expires_at < ?", now)
 			if err != nil {
 				log.Printf("Failed to cleanup expired pairing sessions: %v", err)
 			}
 
-			// 清理过期会话令牌
+			// Clean up expired session tokens
 			_, err = s.db.Exec("DELETE FROM session_tokens WHERE expires_at < ?", now)
 			if err != nil {
 				log.Printf("Failed to cleanup expired session tokens: %v", err)
@@ -497,9 +498,9 @@ func (s *Server) cleanupExpiredSessions(stop <-chan struct{}) {
 	}
 }
 
-// ==================== 数据库操作方法 ====================
+// ==================== Database Operations ====================
 
-// createPairingSessionDB 创建配对会话到数据库
+// createPairingSessionDB inserts a pairing session into the database.
 func (s *Server) createPairingSessionDB(session *PairingSession) error {
 	_, err := s.db.Exec(
 		`INSERT INTO pairing_sessions (code, device_id, status, engineer_id, created_at, expires_at, used)
@@ -515,7 +516,7 @@ func (s *Server) createPairingSessionDB(session *PairingSession) error {
 	return err
 }
 
-// getPairingSessionDB 从数据库获取配对会话
+// getPairingSessionDB retrieves a pairing session from the database by code.
 func (s *Server) getPairingSessionDB(code string) (*PairingSession, error) {
 	var session PairingSession
 	var createdAt, expiresAt int64
@@ -549,7 +550,7 @@ func (s *Server) getPairingSessionDB(code string) (*PairingSession, error) {
 	return &session, nil
 }
 
-// updatePairingSessionDB 更新配对会话到数据库
+// updatePairingSessionDB updates a pairing session in the database.
 func (s *Server) updatePairingSessionDB(session *PairingSession) error {
 	_, err := s.db.Exec(
 		`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ?`,
@@ -561,10 +562,10 @@ func (s *Server) updatePairingSessionDB(session *PairingSession) error {
 	return err
 }
 
-// markSessionExpired 将会话标记为过期状态并更新数据库
-// 返回错误表示数据库更新失败
+// markSessionExpired marks a session as expired and updates the database.
+// Returns an error if the database update fails.
 func (s *Server) markSessionExpired(session *PairingSession) error {
-	// 先更新内存状态，再更新数据库，确保状态一致性
+	// Update in-memory state first, then persist to ensure consistency.
 	session.Status = "expired"
 	if err := s.updatePairingSessionDB(session); err != nil {
 		return err
@@ -572,7 +573,7 @@ func (s *Server) markSessionExpired(session *PairingSession) error {
 	return nil
 }
 
-// createSessionTokenDB 创建会话令牌到数据库
+// createSessionTokenDB inserts a session token into the database.
 func (s *Server) createSessionTokenDB(token *SessionToken) error {
 	_, err := s.db.Exec(
 		`INSERT INTO session_tokens (token, device_id, engineer_id, created_at, expires_at)
@@ -586,7 +587,7 @@ func (s *Server) createSessionTokenDB(token *SessionToken) error {
 	return err
 }
 
-// getSessionTokenDB 从数据库获取会话令牌
+// getSessionTokenDB retrieves a session token from the database.
 func (s *Server) getSessionTokenDB(token string) (*SessionToken, error) {
 	var st SessionToken
 	var createdAt, expiresAt int64
@@ -616,13 +617,13 @@ func (s *Server) getSessionTokenDB(token string) (*SessionToken, error) {
 	return &st, nil
 }
 
-// deleteSessionTokenDB 从数据库删除会话令牌
+// deleteSessionTokenDB deletes a session token from the database.
 func (s *Server) deleteSessionTokenDB(token string) error {
 	_, err := s.db.Exec("DELETE FROM session_tokens WHERE token = ?", token)
 	return err
 }
 
-// getDeviceStatusDB 从数据库获取设备状态
+// getDeviceStatusDB retrieves device status from the database.
 func (s *Server) getDeviceStatusDB(deviceID string) (*DeviceStatus, error) {
 	var ds DeviceStatus
 	var lastSeen int64
@@ -650,7 +651,7 @@ func (s *Server) getDeviceStatusDB(deviceID string) (*DeviceStatus, error) {
 	return &ds, nil
 }
 
-// upsertDeviceStatusDB 插入或更新设备状态到数据库
+// upsertDeviceStatusDB inserts or updates device status in the database.
 func (s *Server) upsertDeviceStatusDB(status *DeviceStatus) error {
 	_, err := s.db.Exec(
 		`INSERT INTO device_status (device_id, status, last_seen, tunnel_addr)
@@ -667,7 +668,7 @@ func (s *Server) upsertDeviceStatusDB(status *DeviceStatus) error {
 	return err
 }
 
-// boolToInt 将 bool 转换为 int (0/1)
+// boolToInt converts a bool to int (0 or 1).
 func boolToInt(b bool) int {
 	if b {
 		return 1
@@ -731,7 +732,7 @@ func validateAuthClaims(claims jwt.MapClaims) (string, string, bool) {
 	return sub, role, true
 }
 
-// authMiddleware JWT认证中间件
+// authMiddleware is the JWT authentication middleware.
 func (s *Server) authMiddleware() gin.HandlerFunc {
 	parser := jwt.NewParser(
 		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
@@ -744,7 +745,7 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 		auth := c.GetHeader("Authorization")
 		if len(auth) < 8 || !strings.HasPrefix(auth, "Bearer ") {
 			log.Printf("[Auth] JWT validation failed: token_missing_or_invalid_bearer")
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToValidateToken})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToValidateToken.Error()})
 			return
 		}
 
@@ -756,20 +757,20 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 
 		if err != nil {
 			log.Printf("[Auth] JWT validation failed: %s: %v", classifyJWTValidationError(err), err)
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToValidateToken})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToValidateToken.Error()})
 			return
 		}
 
 		if !token.Valid {
 			log.Printf("[Auth] JWT validation failed: token_invalid")
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToValidateToken})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToValidateToken.Error()})
 			return
 		}
 
 		engineerID, role, valid := validateAuthClaims(claims)
 		if !valid {
 			log.Printf("[Auth] JWT validation failed: token_invalid_claims")
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToValidateToken})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToValidateToken.Error()})
 			return
 		}
 
@@ -780,6 +781,7 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 	}
 }
 
+// internalOrUserAuthMiddleware allows either internal API key or JWT bearer token authentication.
 func (s *Server) internalOrUserAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		internalKey := c.GetHeader("X-Internal-API-Key")
@@ -790,7 +792,7 @@ func (s *Server) internalOrUserAuthMiddleware() gin.HandlerFunc {
 				return
 			}
 
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrInvalidInternalAPIKey})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrInvalidInternalAPIKey.Error()})
 			return
 		}
 
@@ -798,21 +800,22 @@ func (s *Server) internalOrUserAuthMiddleware() gin.HandlerFunc {
 	}
 }
 
+// internalAuthMiddleware enforces internal API key authentication.
 func (s *Server) internalAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if len(s.internalAPIKey) == 0 {
-			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": ErrInternalAPIKeyNotConfigured})
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": ErrInternalAPIKeyNotConfigured.Error()})
 			return
 		}
 
 		internalKey := c.GetHeader("X-Internal-API-Key")
 		if internalKey == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrMissingInternalAPIKey})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrMissingInternalAPIKey.Error()})
 			return
 		}
 
 		if subtle.ConstantTimeCompare([]byte(internalKey), s.internalAPIKey) != 1 {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrInvalidInternalAPIKey})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": ErrInvalidInternalAPIKey.Error()})
 			return
 		}
 
@@ -821,13 +824,13 @@ func (s *Server) internalAuthMiddleware() gin.HandlerFunc {
 	}
 }
 
-// createPairingSession 创建配对会话
+// createPairingSession creates a new pairing session.
 func (s *Server) createPairingSession(c *gin.Context) {
 	clientIP := c.ClientIP()
 
-	// 检查限流
+	// Check rate limiting
 	if !s.checkRateLimit(clientIP) {
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": ErrRateLimitExceeded})
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": ErrRateLimitExceeded.Error()})
 		return
 	}
 
@@ -848,7 +851,7 @@ func (s *Server) createPairingSession(c *gin.Context) {
 	for attempt := 0; attempt < MaxPairingCodeConflictRetries; attempt++ {
 		code, err := codeGenerator()
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToGenerateCode})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToGenerateCode.Error()})
 			return
 		}
 
@@ -867,57 +870,57 @@ func (s *Server) createPairingSession(c *gin.Context) {
 				continue
 			}
 
-			c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToCreateSession})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToCreateSession.Error()})
 			return
 		}
 
-		// 记录成功
+		// Record successful attempt
 		s.recordSuccess(clientIP)
 
 		c.JSON(http.StatusCreated, session)
 		return
 	}
 
-	c.JSON(http.StatusServiceUnavailable, gin.H{"error": ErrFailedToResolvePairingCodeConflict})
+	c.JSON(http.StatusServiceUnavailable, gin.H{"error": ErrFailedToResolvePairingCodeConflict.Error()})
 }
 
-// getPairingSession 获取配对会话
+// getPairingSession retrieves a pairing session by code.
 func (s *Server) getPairingSession(c *gin.Context) {
 	code := c.Param("code")
 
 	session, err := s.getPairingSessionDB(code)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToQueryDatabase})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToQueryDatabase.Error()})
 		return
 	}
 
 	if session == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": ErrFailedToFindSession})
+		c.JSON(http.StatusNotFound, gin.H{"error": ErrFailedToFindSession.Error()})
 		return
 	}
 
-	// 检查是否过期
+	// Check if expired
 	if time.Now().After(session.ExpiresAt) {
 		if err := s.markSessionExpired(session); err != nil {
 			log.Printf("Failed to mark session %s as expired: %v", session.Code, err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateSession})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateSession.Error()})
 			return
 		}
-		c.JSON(http.StatusGone, gin.H{"error": ErrSessionExpired})
+		c.JSON(http.StatusGone, gin.H{"error": ErrSessionExpired.Error()})
 		return
 	}
 
 	c.JSON(http.StatusOK, session)
 }
 
-// updatePairingSession 更新配对会话
+// updatePairingSession updates a pairing session status.
 func (s *Server) updatePairingSession(c *gin.Context) {
 	code := c.Param("code")
 
 	engineerIDValue, exists := c.Get("engineer_id")
 	engineerID, ok := engineerIDValue.(string)
 	if !exists || !ok || engineerID == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": ErrMissingEngineer})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": ErrMissingEngineer.Error()})
 		return
 	}
 
@@ -932,32 +935,32 @@ func (s *Server) updatePairingSession(c *gin.Context) {
 
 	session, err := s.getPairingSessionDB(code)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToQueryDatabase})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToQueryDatabase.Error()})
 		return
 	}
 
 	if session == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": ErrFailedToFindSession})
+		c.JSON(http.StatusNotFound, gin.H{"error": ErrFailedToFindSession.Error()})
 		return
 	}
 
 	if session.EngineerID != "" && session.EngineerID != engineerID {
-		c.JSON(http.StatusForbidden, gin.H{"error": ErrForbidden})
+		c.JSON(http.StatusForbidden, gin.H{"error": ErrForbidden.Error()})
 		return
 	}
 
-	// 检查是否过期
+	// Check if expired
 	if time.Now().After(session.ExpiresAt) {
 		if err := s.markSessionExpired(session); err != nil {
 			log.Printf("Failed to mark session %s as expired: %v", session.Code, err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateSession})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateSession.Error()})
 			return
 		}
-		c.JSON(http.StatusGone, gin.H{"error": ErrSessionExpired})
+		c.JSON(http.StatusGone, gin.H{"error": ErrSessionExpired.Error()})
 		return
 	}
 
-	// 检查状态转换
+	// Validate status transition
 	validTransitions := map[string][]string{
 		"pending":      {"connected", "expired"},
 		"connected":    {"disconnected", "expired"},
@@ -974,21 +977,21 @@ func (s *Server) updatePairingSession(c *gin.Context) {
 	}
 
 	if !valid {
-		c.JSON(http.StatusBadRequest, gin.H{"error": ErrInvalidStatusTransition})
+		c.JSON(http.StatusBadRequest, gin.H{"error": ErrInvalidStatusTransition.Error()})
 		return
 	}
 
 	session.Status = req.Status
 	session.EngineerID = engineerID
 
-	// 如果连接成功，标记为已使用
+	// Mark as used when connected
 	if req.Status == "connected" {
 		session.Used = true
 	}
 
 	if err := s.updatePairingSessionDB(session); err != nil {
 		log.Printf("Failed to update pairing session %s: %v", session.Code, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateSession})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateSession.Error()})
 		return
 	}
 
@@ -996,7 +999,7 @@ func (s *Server) updatePairingSession(c *gin.Context) {
 	c.JSON(http.StatusOK, session)
 }
 
-// validateSession 验证会话令牌（内部API，供SOCKS5服务调用）
+// validateSession validates a session token (internal API for SOCKS5 service).
 func (s *Server) validateSession(c *gin.Context) {
 	var req struct {
 		DeviceID string `json:"device_id" binding:"required"`
@@ -1019,7 +1022,7 @@ func (s *Server) validateSession(c *gin.Context) {
 		return
 	}
 
-	// 检查是否过期
+	// Check if expired
 	if time.Now().After(sessionToken.ExpiresAt) {
 		if err := s.deleteSessionTokenDB(req.Token); err != nil {
 			log.Printf("Failed to delete expired session token: %v", err)
@@ -1028,18 +1031,18 @@ func (s *Server) validateSession(c *gin.Context) {
 		return
 	}
 
-	// 验证deviceID匹配
+	// Verify device ID matches
 	valid := subtle.ConstantTimeCompare([]byte(sessionToken.DeviceID), []byte(req.DeviceID)) == 1
 
 	c.JSON(http.StatusOK, gin.H{"valid": valid})
 }
 
-// createSessionToken 创建会话令牌
+// createSessionToken creates a new session token.
 func (s *Server) createSessionToken(c *gin.Context) {
 	engineerIDValue, exists := c.Get("engineer_id")
 	engineerID, ok := engineerIDValue.(string)
 	if !exists || !ok || engineerID == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": ErrMissingEngineer})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": ErrMissingEngineer.Error()})
 		return
 	}
 
@@ -1054,29 +1057,29 @@ func (s *Server) createSessionToken(c *gin.Context) {
 
 	session, err := s.getPairingSessionDB(req.Code)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToQueryDatabase})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToQueryDatabase.Error()})
 		return
 	}
 
 	if session == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": ErrFailedToFindPairingSession})
+		c.JSON(http.StatusNotFound, gin.H{"error": ErrFailedToFindPairingSession.Error()})
 		return
 	}
 
 	if session.Status != "connected" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": ErrPairingNotCompleted})
+		c.JSON(http.StatusBadRequest, gin.H{"error": ErrPairingNotCompleted.Error()})
 		return
 	}
 
 	if session.EngineerID != engineerID {
-		c.JSON(http.StatusForbidden, gin.H{"error": ErrForbidden})
+		c.JSON(http.StatusForbidden, gin.H{"error": ErrForbidden.Error()})
 		return
 	}
 
-	// 创建会话令牌
+	// Create session token
 	token, err := generateSessionToken()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToGenerateToken})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToGenerateToken.Error()})
 		return
 	}
 	sessionToken := &SessionToken{
@@ -1088,25 +1091,25 @@ func (s *Server) createSessionToken(c *gin.Context) {
 	}
 
 	if err := s.createSessionTokenDB(sessionToken); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToCreateToken})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToCreateToken.Error()})
 		return
 	}
 
 	c.JSON(http.StatusCreated, sessionToken)
 }
 
-// getDeviceStatus 获取设备状态
+// getDeviceStatus retrieves the status of a device.
 func (s *Server) getDeviceStatus(c *gin.Context) {
 	deviceID := c.Param("id")
 
 	status, err := s.getDeviceStatusDB(deviceID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToQueryDatabase})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToQueryDatabase.Error()})
 		return
 	}
 
 	if status == nil {
-		// 返回离线状态
+		// Return offline status
 		c.JSON(http.StatusOK, DeviceStatus{
 			DeviceID: deviceID,
 			Status:   "offline",
@@ -1118,7 +1121,7 @@ func (s *Server) getDeviceStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, status)
 }
 
-// updateDeviceStatus 更新设备状态（内部API）
+// updateDeviceStatus updates device status (internal API).
 func (s *Server) updateDeviceStatus(c *gin.Context) {
 	var req struct {
 		DeviceID   string `json:"device_id" binding:"required"`
@@ -1139,20 +1142,20 @@ func (s *Server) updateDeviceStatus(c *gin.Context) {
 	}
 
 	if err := s.upsertDeviceStatusDB(status); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateStatus})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateStatus.Error()})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "updated"})
 }
 
-// login 工程师登录
+// login handles engineer login.
 func (s *Server) login(c *gin.Context) {
 	clientIP := c.ClientIP()
 
-	// 检查限流
+	// Check rate limiting
 	if !s.checkRateLimit(clientIP) {
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": ErrRateLimit})
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": ErrRateLimit.Error()})
 		return
 	}
 
@@ -1166,16 +1169,16 @@ func (s *Server) login(c *gin.Context) {
 		return
 	}
 
-	// 从环境变量获取管理员凭据（已在启动时验证存在）
+	// Get admin credentials from environment (validated at startup)
 	adminUser := os.Getenv("ADMIN_USER")
 	adminPass := os.Getenv("ADMIN_PASS")
 
 	if req.Username != adminUser || req.Password != adminPass {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToAuthenticate})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToAuthenticate.Error()})
 		return
 	}
 
-	// 生成JWT
+	// Generate JWT
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"sub":  req.Username,
 		"role": "engineer",
@@ -1185,11 +1188,11 @@ func (s *Server) login(c *gin.Context) {
 
 	tokenString, err := token.SignedString(s.jwtSecret)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToGenerateToken})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToGenerateToken.Error()})
 		return
 	}
 
-	// 记录成功
+	// Record successful attempt
 	s.recordSuccess(clientIP)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -1198,9 +1201,9 @@ func (s *Server) login(c *gin.Context) {
 	})
 }
 
-// healthCheck 健康检查
+// healthCheck returns the health status of the server.
 func (s *Server) healthCheck(c *gin.Context) {
-	// 检查数据库连接
+	// Check database connection
 	dbStatus := "ok"
 	if err := s.db.Ping(); err != nil {
 		dbStatus = "error"
@@ -1215,9 +1218,9 @@ func (s *Server) healthCheck(c *gin.Context) {
 
 func newHTTPServer(addr string, handler http.Handler) *http.Server {
 	return &http.Server{
-		Addr:           addr,
-		Handler:        handler,
-		MaxHeaderBytes: MaxHTTPHeaderBytes,
+		Addr:              addr,
+		Handler:           handler,
+		MaxHeaderBytes:    MaxHTTPHeaderBytes,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -1226,7 +1229,7 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 }
 
 func main() {
-	// 设置Gin模式
+	// Set Gin mode
 	gin.SetMode(gin.ReleaseMode)
 
 	server, err := NewServer()
@@ -1235,32 +1238,32 @@ func main() {
 	}
 	defer server.Close()
 
-	// 启动清理协程
+	// Start cleanup workers
 	server.startCleanupWorkers()
 
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(gin.Logger())
 
-	// 健康检查（公开）
+	// Health check (public)
 	r.GET("/health", server.healthCheck)
 
-	// 登录（公开）
+	// Login (public)
 	r.POST("/api/login", server.login)
 
-	// API路由组
+	// API routes
 	api := r.Group("/api")
 	{
-		// 配对会话管理
+		// Pairing session management
 		api.POST("/pair", server.authMiddleware(), server.createPairingSession)
 		api.GET("/pair/:code", server.getPairingSession)
 		api.PUT("/pair/:code", server.authMiddleware(), server.updatePairingSession)
 
-		// 会话令牌
+		// Session tokens
 		api.POST("/session/token", server.authMiddleware(), server.createSessionToken)
 		api.POST("/session/validate", server.internalAuthMiddleware(), server.validateSession)
 
-		// 设备状态
+		// Device status
 		api.GET("/device/:id/status", server.authMiddleware(), server.getDeviceStatus)
 		api.POST("/device/status", server.internalAuthMiddleware(), server.updateDeviceStatus)
 	}
@@ -1270,14 +1273,14 @@ func main() {
 		port = "8080"
 	}
 
-	// 读取TLS配置（环境变量优先）
+	// Read TLS config (environment variables take priority)
 	enableTLS := os.Getenv("ENABLE_TLS") == "true"
 	tlsCert := os.Getenv("TLS_CERT")
 	tlsKey := os.Getenv("TLS_KEY")
 
 	httpServer := newHTTPServer(":"+port, r)
 
-	// 验证TLS配置
+	// Validate TLS configuration
 	if enableTLS {
 		if tlsCert == "" || tlsKey == "" {
 			log.Fatalf("TLS enabled but certificate paths not provided")

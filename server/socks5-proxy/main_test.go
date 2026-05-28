@@ -31,7 +31,7 @@ func (s *stubTunnelDialer) ConnectThroughTunnel(deviceID, token, dstAddr string,
 	s.token = token
 	s.dstAddr = dstAddr
 	s.dstPort = dstPort
-	// 返回一个 pipe 连接用于测试
+	// returns a pipe connection for testing
 	localConn, _ := net.Pipe()
 	return localConn, s.err
 }
@@ -212,7 +212,7 @@ func TestAPISessionStoreValidateTokenPreservesDeviceIDAndToken(t *testing.T) {
 	}
 }
 
-func TestGetOrConnectTunnel_ConcurrentCallsShareSingleDial(t *testing.T) {
+func TestGetOrConnectTunnelConcurrentCallsShareSingleDial(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
 	var acceptedConns []*websocket.Conn
@@ -292,7 +292,7 @@ func TestGetOrConnectTunnel_ConcurrentCallsShareSingleDial(t *testing.T) {
 	_ = first.Close()
 }
 
-func TestRelay_ClosesPeerConnectionOnHalfClose(t *testing.T) {
+func TestRelayClosesPeerConnectionOnHalfClose(t *testing.T) {
 	server := &SOCKS5Server{}
 
 	clientConn, clientPeer := net.Pipe()
@@ -332,8 +332,8 @@ func TestRelay_ClosesPeerConnectionOnHalfClose(t *testing.T) {
 	}
 }
 
-// TestStreamConn_Close_Idempotent 验证 Close() 方法的幂等性
-func TestStreamConn_Close_Idempotent(t *testing.T) {
+// TestStreamConnCloseIdempotent verifies that Close() is idempotent.
+func TestStreamConnCloseIdempotent(t *testing.T) {
 	writeMu := &sync.Mutex{}
 	conn := &StreamConn{
 		StreamID:      "test-stream-1",
@@ -344,28 +344,28 @@ func TestStreamConn_Close_Idempotent(t *testing.T) {
 		tunnelWriteMu: writeMu,
 	}
 
-	// 第一次关闭应该成功
+	// first close should succeed
 	if err := conn.Close(); err != nil {
 		t.Fatalf("first Close() should succeed: %v", err)
 	}
 
-	// 验证 Closed 标志被设置
+	// verify Closed flag is set
 	if conn.Closed != 1 {
 		t.Fatal("Closed flag should be set to 1 after Close()")
 	}
 
-	// 第二次关闭应该安全返回（不会panic）
+	// second close should return safely (no panic)
 	if err := conn.Close(); err != nil {
 		t.Fatalf("second Close() should succeed: %v", err)
 	}
 
-	// 第三次关闭也应该安全
+	// third close should also be safe
 	if err := conn.Close(); err != nil {
 		t.Fatalf("third Close() should succeed: %v", err)
 	}
 }
 
-func TestStreamConn_ReadPreservesRemainderAcrossSmallBuffers(t *testing.T) {
+func TestStreamConnReadPreservesRemainderAcrossSmallBuffers(t *testing.T) {
 	conn := &StreamConn{
 		DataChan:      make(chan []byte, 1),
 		CloseChan:     make(chan struct{}),
@@ -393,7 +393,7 @@ func TestStreamConn_ReadPreservesRemainderAcrossSmallBuffers(t *testing.T) {
 	}
 }
 
-func TestStreamConn_ReadReturnsQueuedDataBeforeEOF(t *testing.T) {
+func TestStreamConnReadReturnsQueuedDataBeforeEOF(t *testing.T) {
 	conn := &StreamConn{
 		DataChan:      make(chan []byte, 1),
 		CloseChan:     make(chan struct{}),
@@ -419,7 +419,7 @@ func TestStreamConn_ReadReturnsQueuedDataBeforeEOF(t *testing.T) {
 	}
 }
 
-func TestStreamConn_ReadAcrossGoroutinesDeliversBufferedRemainderBeforeEOF(t *testing.T) {
+func TestStreamConnReadAcrossGoroutinesDeliversBufferedRemainderBeforeEOF(t *testing.T) {
 	conn := &StreamConn{
 		DataChan:      make(chan []byte, 1),
 		CloseChan:     make(chan struct{}),
@@ -462,8 +462,8 @@ func TestStreamConn_ReadAcrossGoroutinesDeliversBufferedRemainderBeforeEOF(t *te
 	}
 }
 
-// TestHandleConnectResponse_FailedConnection_CleansUpStream 验证连接失败时清理stream
-func TestHandleConnectResponse_FailedConnection_CleansUpStream(t *testing.T) {
+// TestHandleConnectResponseFailedConnectionCleansUpStream verifies that streams are cleaned up on connection failure.
+func TestHandleConnectResponseFailedConnectionCleansUpStream(t *testing.T) {
 	tc := &TunnelClient{
 		streams: make(map[string]*StreamConn),
 	}
@@ -478,16 +478,16 @@ func TestHandleConnectResponse_FailedConnection_CleansUpStream(t *testing.T) {
 		tunnelWriteMu: &tc.writeMu,
 	}
 
-	// 将stream添加到映射
+	// add stream to map
 	tc.mu.Lock()
 	tc.streams[streamID] = stream
 	tc.mu.Unlock()
 
-	// 模拟连接失败响应
+	// simulate failed connection response
 	response := []byte(`{"stream_id":"test-stream-cleanup","success":false,"error":"connection refused"}`)
 	tc.handleConnectResponse(response)
 
-	// 验证stream已从映射中删除
+	// verify stream is removed from map
 	tc.mu.RLock()
 	_, exists := tc.streams[streamID]
 	tc.mu.RUnlock()
@@ -496,12 +496,12 @@ func TestHandleConnectResponse_FailedConnection_CleansUpStream(t *testing.T) {
 		t.Fatal("stream should be removed from tc.streams after connection failure")
 	}
 
-	// 验证stream已关闭
+	// verify stream is closed
 	if stream.Closed != 1 {
 		t.Fatal("stream should be closed after connection failure")
 	}
 
-	// 验证Connected channel收到false
+	// verify Connected channel receives false
 	select {
 	case success := <-stream.Connected:
 		if success {
@@ -512,8 +512,8 @@ func TestHandleConnectResponse_FailedConnection_CleansUpStream(t *testing.T) {
 	}
 }
 
-// TestHandleConnectResponse_SuccessfulConnection_KeepsStream 验证连接成功时保留stream
-func TestHandleConnectResponse_SuccessfulConnection_KeepsStream(t *testing.T) {
+// TestHandleConnectResponseSuccessfulConnectionKeepsStream verifies that streams are kept on successful connection.
+func TestHandleConnectResponseSuccessfulConnectionKeepsStream(t *testing.T) {
 	tc := &TunnelClient{
 		streams: make(map[string]*StreamConn),
 	}
@@ -528,16 +528,16 @@ func TestHandleConnectResponse_SuccessfulConnection_KeepsStream(t *testing.T) {
 		tunnelWriteMu: &tc.writeMu,
 	}
 
-	// 将stream添加到映射
+	// add stream to map
 	tc.mu.Lock()
 	tc.streams[streamID] = stream
 	tc.mu.Unlock()
 
-	// 模拟连接成功响应
+	// simulate successful connection response
 	response := []byte(`{"stream_id":"test-stream-success","success":true}`)
 	tc.handleConnectResponse(response)
 
-	// 验证stream仍在映射中（成功连接不应删除）
+	// verify stream remains in map (successful connection should not delete)
 	tc.mu.RLock()
 	_, exists := tc.streams[streamID]
 	tc.mu.RUnlock()
@@ -546,7 +546,7 @@ func TestHandleConnectResponse_SuccessfulConnection_KeepsStream(t *testing.T) {
 		t.Fatal("stream should remain in tc.streams after successful connection")
 	}
 
-	// 验证Connected channel收到true
+	// verify Connected channel receives true
 	select {
 	case success := <-stream.Connected:
 		if !success {
@@ -557,7 +557,7 @@ func TestHandleConnectResponse_SuccessfulConnection_KeepsStream(t *testing.T) {
 	}
 }
 
-func TestHandleData_FullDataChan_DoesNotBlock(t *testing.T) {
+func TestHandleDataFullDataChanDoesNotBlock(t *testing.T) {
 	tc := &TunnelClient{
 		streams: make(map[string]*StreamConn),
 	}
@@ -601,7 +601,7 @@ func TestHandleData_FullDataChan_DoesNotBlock(t *testing.T) {
 	}
 }
 
-func TestHandleData_FullDataChan_ClosesAndRemovesStream(t *testing.T) {
+func TestHandleDataFullDataChanClosesAndRemovesStream(t *testing.T) {
 	tc := &TunnelClient{
 		streams: make(map[string]*StreamConn),
 	}
@@ -663,14 +663,14 @@ func TestHandleData_FullDataChan_ClosesAndRemovesStream(t *testing.T) {
 	}
 }
 
-// TestConnectThroughTunnel_CleanupOnMarshalError 验证JSON序列化失败时的资源清理
-func TestConnectThroughTunnel_CleanupOnMarshalError(t *testing.T) {
-	// 创建一个包含无法序列化数据的请求
+// TestConnectThroughTunnelCleanupOnMarshalError verifies resource cleanup when JSON marshaling fails.
+func TestConnectThroughTunnelCleanupOnMarshalError(t *testing.T) {
+	// create a request with unmarshalable data
 	tc := &TunnelClient{
 		streams: make(map[string]*StreamConn),
 	}
 
-	// 验证streams映射为空
+	// verify streams map is empty
 	tc.mu.RLock()
 	streamCount := len(tc.streams)
 	tc.mu.RUnlock()
@@ -680,7 +680,7 @@ func TestConnectThroughTunnel_CleanupOnMarshalError(t *testing.T) {
 	}
 }
 
-func TestGenerateRandomStreamID_FormatAndLength(t *testing.T) {
+func TestGenerateRandomStreamIDFormatAndLength(t *testing.T) {
 	streamID, err := generateRandomStreamID()
 	if err != nil {
 		t.Fatalf("expected stream id generation to succeed, got error: %v", err)
@@ -700,7 +700,7 @@ func TestGenerateRandomStreamID_FormatAndLength(t *testing.T) {
 	}
 }
 
-func TestGenerateRandomStreamID_DoesNotContainDeviceIDPlaintext(t *testing.T) {
+func TestGenerateRandomStreamIDDoesNotContainDeviceIDPlaintext(t *testing.T) {
 	deviceID := "device-123"
 
 	streamID, err := generateRandomStreamID()
@@ -713,7 +713,7 @@ func TestGenerateRandomStreamID_DoesNotContainDeviceIDPlaintext(t *testing.T) {
 	}
 }
 
-func TestConnectThroughTunnel_UsesRandomStreamID(t *testing.T) {
+func TestConnectThroughTunnelUsesRandomStreamID(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	streamIDCh := make(chan string, 1)
 
@@ -817,7 +817,7 @@ func TestConnectThroughTunnel_UsesRandomStreamID(t *testing.T) {
 	}
 }
 
-func TestConnectThroughTunnel_ReturnsErrorWhenStreamIDGenerationFails(t *testing.T) {
+func TestConnectThroughTunnelReturnsErrorWhenStreamIDGenerationFails(t *testing.T) {
 	originalGenerator := streamIDGenerator
 	streamIDGenerator = func() (string, error) {
 		return "", errors.New("random source failed")
@@ -863,7 +863,7 @@ func TestConnectThroughTunnel_ReturnsErrorWhenStreamIDGenerationFails(t *testing
 	}
 }
 
-func TestStreamConn_ReadConcurrent(t *testing.T) {
+func TestStreamConnReadConcurrent(t *testing.T) {
 	conn := &StreamConn{
 		DataChan:      make(chan []byte, 10),
 		CloseChan:     make(chan struct{}),

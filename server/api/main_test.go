@@ -50,8 +50,8 @@ func assertAuthValidationFailedResponse(t *testing.T, recorder *httptest.Respons
 		t.Fatalf("expected 401 for invalid auth token, got %d", recorder.Code)
 	}
 
-	if !strings.Contains(recorder.Body.String(), ErrFailedToValidateToken) {
-		t.Fatalf("expected error response to contain %q, got %s", ErrFailedToValidateToken, recorder.Body.String())
+	if !strings.Contains(recorder.Body.String(), ErrFailedToValidateToken.Error()) {
+		t.Fatalf("expected error response to contain %q, got %s", ErrFailedToValidateToken.Error(), recorder.Body.String())
 	}
 }
 
@@ -616,9 +616,9 @@ func TestServerCloseStopsCleanupWorkers(t *testing.T) {
 	}
 
 	server := &Server{
-		db:                          db,
-		loginAttempts:               make(map[string]*LoginAttempt),
-		cleanupSessionsInterval:     10 * time.Millisecond,
+		db:                           db,
+		loginAttempts:                make(map[string]*LoginAttempt),
+		cleanupSessionsInterval:      10 * time.Millisecond,
 		cleanupLoginAttemptsInterval: 10 * time.Millisecond,
 	}
 	server.startCleanupWorkers()
@@ -842,8 +842,8 @@ func TestCreatePairingSessionConflictRetryLimitReturns503(t *testing.T) {
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 when code conflicts exhaust retries, got %d", recorder.Code)
 	}
-	if !strings.Contains(recorder.Body.String(), ErrFailedToResolvePairingCodeConflict) {
-		t.Fatalf("expected response to contain %q, got %s", ErrFailedToResolvePairingCodeConflict, recorder.Body.String())
+	if !strings.Contains(recorder.Body.String(), ErrFailedToResolvePairingCodeConflict.Error()) {
+		t.Fatalf("expected response to contain %q, got %s", ErrFailedToResolvePairingCodeConflict.Error(), recorder.Body.String())
 	}
 	if attempts != MaxPairingCodeConflictRetries {
 		t.Fatalf("expected %d generation attempts, got %d", MaxPairingCodeConflictRetries, attempts)
@@ -874,8 +874,8 @@ func TestCreatePairingSessionDatabaseErrorReturns500(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("failed to decode response body: %v; body=%s", err, recorder.Body.String())
 	}
-	if response["error"] != ErrFailedToCreateSession {
-		t.Fatalf("expected error %q, got %q", ErrFailedToCreateSession, response["error"])
+	if response["error"] != ErrFailedToCreateSession.Error() {
+		t.Fatalf("expected error %q, got %q", ErrFailedToCreateSession.Error(), response["error"])
 	}
 	if attempts != 1 {
 		t.Fatalf("expected 1 generation attempt before database error, got %d", attempts)

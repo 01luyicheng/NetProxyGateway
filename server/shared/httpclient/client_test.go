@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestPostJSON_Success(t *testing.T) {
+func TestPostJSONSuccess(t *testing.T) {
 	expectedPayload := map[string]string{"key": "value"}
 	expectedResult := map[string]bool{"valid": true}
 
@@ -48,7 +48,7 @@ func TestPostJSON_Success(t *testing.T) {
 	}
 }
 
-func TestPostJSON_EmptyAPIKey(t *testing.T) {
+func TestPostJSONEmptyAPIKey(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if key := r.Header.Get("X-Internal-API-Key"); key != "" {
 			t.Errorf("expected empty X-Internal-API-Key, got %s", key)
@@ -65,7 +65,7 @@ func TestPostJSON_EmptyAPIKey(t *testing.T) {
 	}
 }
 
-func TestPostJSON_NonOKStatus(t *testing.T) {
+func TestPostJSONNonOKStatus(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -83,7 +83,7 @@ func TestPostJSON_NonOKStatus(t *testing.T) {
 	}
 }
 
-func TestPostJSON_InvalidJSONResponse(t *testing.T) {
+func TestPostJSONInvalidJSONResponse(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -99,7 +99,7 @@ func TestPostJSON_InvalidJSONResponse(t *testing.T) {
 	}
 }
 
-func TestPostJSON_InvalidPayload(t *testing.T) {
+func TestPostJSONInvalidPayload(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("server should not be called with invalid payload")
 	}))
