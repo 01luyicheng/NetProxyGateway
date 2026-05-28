@@ -285,7 +285,7 @@
   // L120-122, L619-622: 问题代码
   private val writeBufferPool = Array(4) { ByteArray(PACKET_BUFFER_SIZE) }
   private val writeBufferIndex = AtomicInteger(0)
-  
+
   private fun getWriteBuffer(): ByteArray {
       val index = writeBufferIndex.getAndIncrement() % writeBufferPool.size
       return writeBufferPool[index]  // 可能抛出负数索引异常
@@ -696,3 +696,36 @@
 - **位置**: `server/socks5-proxy/main.go` (`readLoop` defer，约 L860-873)
 - **问题描述**: `readLoop` 的 `defer` 块中获取 `tc.mu.Lock()`，然后在锁内调用 `stream.closeLocal()` 和 `conn.Close()`。`conn.Close()` 是 WebSocket I/O 操作，持锁期间阻塞会卡住整个 `TunnelClient` 的流管理。N63 同期仅修复了 `cleanupStream` 的同类问题，但 `readLoop` 的 defer 路径存在相同的持锁 I/O 模式。
 - **修复方式**: 在锁内收集需要关闭的 stream 列表和 conn 关闭标记，解锁后再逐个调用 `stream.closeLocal()` 和 `conn.Close()`。
+
+---
+
+## 交叉审查发现（工作区未提交批次，2026-05-28）
+
+> 以下问题由代码风格修改后的审查记录；**本轮不修复**，留待后续处理。
+
+### N79: SOCKS5-Proxy DataChan 满时关闭 stream 导致连接抖动风险
+- **状态**: 待修复
+- **提交哈希**: 当前工作区 (bd47aa4 引入，本次代码审查确认)
+- **位置**: `server/socks5-proxy/main.go` (`handleData`，L1030-L1035)
+- **问题描述**: `bd47aa4` 将 DataChan 满时的行为从"丢弃数据包"改为"关闭 stream"。虽然符合 TCP 语义，但在高带宽场景（文件传输、视频流）下，如果下游消费慢（工程师侧网络延迟、CPU 波动），DataChan 可能频繁填满，导致 stream 被反复关闭和重建。
+- **连锁反应**:
+  1. `cleanupStream` 发送 `disconnect` 消息到设备端
+  2. Android 端**未找到处理 `disconnect` 消息的逻辑**，导致半开连接
+  3. 设备端下一次写操作失败后才清理，经历一次失败的 I/O
+  4. 每次重建需要完整 SOCKS5 握手（1-3 个 RTT）
+- **风险**: **高**。远程协助中的文件传输、视频查看等高带宽场景下，频繁断连严重影响用户体验。
+- **缓解措施**:
+  1. 短期：增大 `defaultDataChanSize`（100 → 256/500），减少关闭频率
+  2. 中期：在 Android 端实现 `disconnect` 消息处理，及时清理连接
+  3. 长期：引入背压机制（流控消息）或重构为每个 stream 独立 goroutine
+- **关联问题**: ISSUES.md N57（VpnService 单协程串行处理）、N58（available() 不可靠）
+
+### N80: Android 端不处理 SOCKS5-Proxy 的 disconnect 消息
+- **状态**: 待修复
+- **提交哈希**: 既有问题
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt`, `Socks5ProxyHandler.kt`, `Socks5ConnectionPool.kt`
+- **问题描述**: SOCKS5-Proxy 在 stream 关闭时会通过 WebSocket 发送 `type: "disconnect"` 消息，但搜索 Android 端代码未发现任何处理该消息的逻辑。`VpnService`、`Socks5ProxyHandler`、`Socks5ConnectionPool` 均不消费此消息。
+- **后果**: 服务端已关闭 stream，但 Android 端仍认为连接有效，形成半开连接。下次写操作失败后才被动清理。
+- **风险**: **中**。导致不必要的 I/O 失败和连接重建延迟。
+- **建议修复**: 在 Tunnel 消息处理层添加 `disconnect` 类型消息的处理，收到后主动归还 SOCKS5 连接并清理会话。
+- **关联问题**: N79
