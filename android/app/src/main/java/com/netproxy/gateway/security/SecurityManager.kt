@@ -12,7 +12,7 @@ class SecurityManager(private val context: Context) {
     companion object {
         private val logger = LoggerFactory.getLogger(SecurityManager::class.java)
 
-        @Volatile private var instance: SecurityManager? = null
+        private @Volatile var instance: SecurityManager? = null
 
         fun getInstance(context: Context): SecurityManager {
             return instance ?: synchronized(this) {

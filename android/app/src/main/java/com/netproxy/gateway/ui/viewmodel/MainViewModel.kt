@@ -1,24 +1,32 @@
 package com.netproxy.gateway.ui.viewmodel
 
+import java.security.SecureRandom
+
+import javax.inject.Inject
+
+import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
+
 import android.content.Context
 import android.content.Intent
 import android.net.VpnService as AndroidVpnService
 import android.os.SystemClock
-import com.netproxy.gateway.connection.AuthSessionStore
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+
+import com.netproxy.gateway.R
+import com.netproxy.gateway.connection.AuthSessionStore
 import com.netproxy.gateway.connection.MqttConnectionManager
 import com.netproxy.gateway.connection.MqttConnectionState
 import com.netproxy.gateway.connection.NetworkStateManager
 import com.netproxy.gateway.connection.NetworkType
-import com.netproxy.gateway.R
 import com.netproxy.gateway.i18n.AppLocale
-import com.netproxy.gateway.wifi.GatewayWifiManager
-import com.netproxy.gateway.wifi.WifiNetwork
 import com.netproxy.gateway.vpn.GatewayVpnService
 import com.netproxy.gateway.vpn.VpnStatus
-import dagger.hilt.android.lifecycle.HiltViewModel
-import dagger.hilt.android.qualifiers.ApplicationContext
+import com.netproxy.gateway.wifi.GatewayWifiManager
+import com.netproxy.gateway.wifi.WifiNetwork
+
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
@@ -32,8 +40,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
-import java.security.SecureRandom
-import javax.inject.Inject
 
 enum class MqttUiState {
     Disconnected,

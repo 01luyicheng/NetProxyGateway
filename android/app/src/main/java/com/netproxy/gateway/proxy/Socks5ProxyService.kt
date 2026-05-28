@@ -35,12 +35,12 @@ import javax.inject.Inject
 
 /**
  * 移动端 SOCKS5 代理服务器
- * 
+ *
  * 角色说明:
  * - 本服务在手机上运行，监听 1080 端口
  * - 工程师通过连接手机的 SOCKS5 代理来访问客户内网
  * - 流量路径: 工程师 → 手机:1080 → VPN → WiFi网卡 → 内网设备
- * 
+ *
  * 与云端 SOCKS5 的区别:
  * - 移动端 SOCKS5: 服务器模式，供工程师连接访问内网
  * - 云端 SOCKS5: 代理模式，中转外网流量到公网
@@ -64,8 +64,7 @@ class Socks5ProxyService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var bossGroup: NioEventLoopGroup? = null
     private var workerGroup: NioEventLoopGroup? = null
-    @Volatile
-    private var serverChannel: Channel? = null
+    private @Volatile var serverChannel: Channel? = null
 
     @Inject
     lateinit var authSessionStore: AuthSessionStore
@@ -73,7 +72,7 @@ class Socks5ProxyService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        
+
         // H27: 注册语言变更监听，运行中的通知会自动刷新
         // I1: 防御性注销，防止系统强制杀死后残留监听器
         AppLocale.unregisterLanguageChangeListener(LANGUAGE_LISTENER_ID)
@@ -134,7 +133,7 @@ class Socks5ProxyService : Service() {
             ).apply {
                 description = AppLocale.getString(this@Socks5ProxyService, R.string.notification_proxy_channel_description)
             }
-            
+
             val notificationManager = getSystemService(NotificationManager::class.java)
             notificationManager.createNotificationChannel(channel)
         }
@@ -203,7 +202,7 @@ class Socks5ProxyService : Service() {
     override fun onDestroy() {
         // H27: 注销语言变更监听
         AppLocale.unregisterLanguageChangeListener(LANGUAGE_LISTENER_ID)
-        
+
         serviceScope.cancel()
         bossGroup?.shutdownGracefully()
         workerGroup?.shutdownGracefully()

@@ -1,13 +1,14 @@
 package com.netproxy.gateway.di
 
-import com.netproxy.gateway.connection.NetworkState
-import com.netproxy.gateway.connection.MqttConnectionState
-import com.netproxy.gateway.vpn.VpnStatus
-import com.netproxy.gateway.wifi.WifiNetwork
-import com.netproxy.gateway.wifi.WifiConnectionInfo
-import com.netproxy.gateway.ui.viewmodel.UiState
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.StateFlow
+
+import com.netproxy.gateway.connection.MqttConnectionState
+import com.netproxy.gateway.connection.NetworkState
+import com.netproxy.gateway.ui.viewmodel.UiState
+import com.netproxy.gateway.vpn.VpnStatus
+import com.netproxy.gateway.wifi.WifiConnectionInfo
+import com.netproxy.gateway.wifi.WifiNetwork
 
 /**
  * 模块化架构接口定义

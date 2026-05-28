@@ -1,15 +1,8 @@
 package com.netproxy.gateway.connection
 
-import android.content.Context
-import com.netproxy.gateway.BuildConfig
-import com.netproxy.gateway.debug.AppAuditLogStore
-import com.netproxy.gateway.debug.DebugSettingsStore
-import com.netproxy.gateway.di.ApplicationScope
-import com.netproxy.gateway.result.AppResult
-import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -20,6 +13,23 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+import java.security.KeyStore
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicLong
+
+import javax.inject.Inject
+import javax.inject.Singleton
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocketFactory
+import javax.net.ssl.TrustManager
+import javax.net.ssl.TrustManagerFactory
+import javax.net.ssl.X509TrustManager
+
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken
 import org.eclipse.paho.client.mqttv3.MqttCallback
 import org.eclipse.paho.client.mqttv3.MqttClient
@@ -28,20 +38,16 @@ import org.eclipse.paho.client.mqttv3.MqttException
 import org.eclipse.paho.client.mqttv3.MqttMessage
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence
 import org.slf4j.LoggerFactory
-import javax.inject.Inject
-import javax.inject.Singleton
-import javax.net.ssl.SSLContext
-import javax.net.ssl.TrustManager
-import javax.net.ssl.X509TrustManager
-import java.security.KeyStore
-import java.security.SecureRandom
-import java.security.cert.X509Certificate
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.atomic.AtomicLong
-import javax.net.ssl.HttpsURLConnection
-import javax.net.ssl.SSLSocketFactory
-import javax.net.ssl.TrustManagerFactory
+
+import dagger.hilt.android.qualifiers.ApplicationContext
+
+import android.content.Context
+
+import com.netproxy.gateway.BuildConfig
+import com.netproxy.gateway.debug.AppAuditLogStore
+import com.netproxy.gateway.debug.DebugSettingsStore
+import com.netproxy.gateway.di.ApplicationScope
+import com.netproxy.gateway.result.AppResult
 
 sealed class MqttConnectionState {
     object Disconnected : MqttConnectionState()
@@ -77,12 +83,12 @@ class MqttConnectionManager @Inject constructor(
         private val secureRandom by lazy { SecureRandom() }
     }
 
-    @Volatile private var mqttClient: MqttClient? = null
+    private @Volatile var mqttClient: MqttClient? = null
     private var reconnectDelay = INITIAL_RECONNECT_DELAY
     private var reconnectJob: Job? = null
     private var heartbeatJob: Job? = null
     private var connectJob: Job? = null
-    @Volatile private var shouldStayConnected: Boolean = false
+    private @Volatile var shouldStayConnected: Boolean = false
     private val connectionGeneration = AtomicLong(0)
 
     private val _connectionState = MutableStateFlow<MqttConnectionState>(MqttConnectionState.Disconnected)

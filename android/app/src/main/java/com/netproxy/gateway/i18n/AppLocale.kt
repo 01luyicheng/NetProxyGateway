@@ -14,8 +14,8 @@ import java.util.Locale
 
 object AppLocale {
     private val logger = LoggerFactory.getLogger(AppLocale::class.java)
-    private const val prefsName = "app_settings"
-    private const val keyLanguageTag = "app_language_tag"
+    private const val PREFS_NAME = "app_settings"
+    private const val KEY_LANGUAGE_TAG = "app_language_tag"
 
     // 语言变更回调（支持多个监听者，避免服务之间互相覆盖）
     private val languageChangeListeners = mutableMapOf<String, (String?) -> Unit>()
@@ -42,7 +42,7 @@ object AppLocale {
         supportedLanguages.mapNotNull { it.languageTag }.toSet()
 
     fun getSelectedLanguageTag(context: Context): String? {
-        val raw = prefs(context).getString(keyLanguageTag, null)
+        val raw = prefs(context).getString(KEY_LANGUAGE_TAG, null)
         return normalizeLanguageTag(raw)
     }
 
@@ -50,7 +50,7 @@ object AppLocale {
         val normalizedTag = normalizeLanguageTag(languageTag)
         prefs(context)
             .edit()
-            .putString(keyLanguageTag, normalizedTag)
+            .putString(KEY_LANGUAGE_TAG, normalizedTag)
             .apply()
     }
 
@@ -77,7 +77,7 @@ object AppLocale {
      * 应用语言设置并触发UI更新。
      * 在Android 13+上使用AppCompatDelegate.setApplicationLocales()实现无重启切换，
      * 在旧版本上使用Activity.recreate()作为fallback。
-     * 
+     *
      * 修复 H27：变更后触发语言变更回调，通知前台服务更新通知文案
      */
     fun applyLanguage(activity: Activity, languageTag: String?) {
@@ -133,7 +133,7 @@ object AppLocale {
     }
 
     private fun prefs(context: Context): SharedPreferences {
-        return context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     }
 
     private fun normalizeLanguageTag(languageTag: String?): String? {

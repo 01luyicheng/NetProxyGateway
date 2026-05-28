@@ -1,6 +1,7 @@
 package com.netproxy.gateway.proxy
 
-import com.netproxy.gateway.utils.IpAddressUtils
+import org.slf4j.LoggerFactory
+
 import io.netty.bootstrap.Bootstrap
 import io.netty.channel.Channel
 import io.netty.channel.ChannelFutureListener
@@ -12,9 +13,9 @@ import io.netty.channel.ChannelOption
 import io.netty.channel.socket.SocketChannel
 import io.netty.channel.socket.nio.NioSocketChannel
 import io.netty.handler.codec.socksx.v5.*
-import io.netty.handler.codec.socksx.v5.Socks5AddressType
 import io.netty.util.ReferenceCountUtil
-import org.slf4j.LoggerFactory
+
+import com.netproxy.gateway.utils.IpAddressUtils
 
 class Socks5ProxyHandler(
     private val connector: OutboundConnector = NettyOutboundConnector(),
@@ -59,7 +60,7 @@ class Socks5ProxyHandler(
 
                 val username = msg.username()
                 val password = msg.password()
-                
+
                 val isValid = validateCredentials(username, password)
                 val response = if (isValid) {
                     authenticated = true
@@ -68,7 +69,7 @@ class Socks5ProxyHandler(
                     authenticated = false
                     DefaultSocks5PasswordAuthResponse(Socks5PasswordAuthStatus.FAILURE)
                 }
-                
+
                 ctx.writeAndFlush(response)
                 if (!isValid) {
                     ctx.close()
@@ -115,14 +116,14 @@ class Socks5ProxyHandler(
             if (ip.contains(":")) {
                 return isPrivateIpv6Address(ip)
             }
-            
+
             // Reject loopback, link-local metadata, broadcast, and reserved ranges
             if (ip.startsWith("127.") || ip.startsWith("169.254.") ||
                 ip == "0.0.0.0" || ip == "255.255.255.255" ||
                 ip.startsWith("224.")) {
                 return false
             }
-            
+
             // Only allow RFC1918 private addresses
             IpAddressUtils.isPrivateIpv4Rfc1918(ip)
         } catch (e: Exception) {
@@ -159,7 +160,7 @@ class Socks5ProxyHandler(
                     ctx.writeAndFlush(response).addListener(ChannelFutureListener.CLOSE)
                     return
                 }
-                
+
                 if (!validateTargetAddress(dstAddr, dstPort)) {
                     logger.warn("Target address rejected: {} (non-private or reserved)", dstAddr)
                     val response = DefaultSocks5CommandResponse(

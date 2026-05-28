@@ -1,9 +1,21 @@
 package com.netproxy.gateway.di
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+
+import javax.inject.Inject
+import javax.inject.Singleton
+
+import dagger.hilt.android.qualifiers.ApplicationContext
+
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+
 import androidx.core.content.ContextCompat
+
 import com.netproxy.gateway.connection.AuthSessionStore
 import com.netproxy.gateway.connection.MqttConnectionManager
 import com.netproxy.gateway.connection.MqttConnectionState
@@ -16,13 +28,6 @@ import com.netproxy.gateway.vpn.VpnStatus
 import com.netproxy.gateway.wifi.GatewayWifiManager
 import com.netproxy.gateway.wifi.WifiConnectionInfo
 import com.netproxy.gateway.wifi.WifiNetwork
-import dagger.hilt.android.qualifiers.ApplicationContext
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.launch
-import javax.inject.Inject
-import javax.inject.Singleton
 
 @Singleton
 class CoreModuleImpl @Inject constructor(

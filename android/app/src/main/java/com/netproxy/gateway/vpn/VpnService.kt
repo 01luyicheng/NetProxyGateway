@@ -1,5 +1,26 @@
 package com.netproxy.gateway.vpn
 
+import kotlin.math.min
+
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.nio.ByteBuffer
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+
+import javax.inject.Inject
+
+import org.slf4j.LoggerFactory
+
+import dagger.hilt.android.AndroidEntryPoint
+
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -9,19 +30,20 @@ import android.content.Intent
 import android.net.VpnService as AndroidVpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+
 import androidx.core.app.NotificationCompat
+
 import com.netproxy.gateway.BuildConfig
 import com.netproxy.gateway.R
 import com.netproxy.gateway.connection.AuthSessionStore
 import com.netproxy.gateway.i18n.AppLocale
-import com.netproxy.gateway.ui.MainActivity
-import com.netproxy.gateway.proxy.Socks5ProxyService
+import com.netproxy.gateway.proxy.PooledSocks5Connection
 import com.netproxy.gateway.proxy.Socks5ConnectionPool
 import com.netproxy.gateway.proxy.Socks5ConnectionPoolConfig
-import com.netproxy.gateway.proxy.PooledSocks5Connection
+import com.netproxy.gateway.proxy.Socks5ProxyService
+import com.netproxy.gateway.ui.MainActivity
 import com.netproxy.gateway.utils.IpAddressUtils
-import dagger.hilt.android.AndroidEntryPoint
-import org.slf4j.LoggerFactory
+
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -29,22 +51,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.isActive
-import java.io.FileInputStream
-import java.io.FileOutputStream
-import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.InetAddress
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicBoolean
-import java.net.InetSocketAddress
-import java.net.Socket
-import java.nio.ByteBuffer
-import kotlin.math.min
-import javax.inject.Inject
-import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.launch
 
 enum class VpnState {
     STOPPED,
@@ -89,35 +97,35 @@ class GatewayVpnService : AndroidVpnService() {
         // SOCKS5 代理本地端口
         const val SOCKS5_PROXY_HOST = "127.0.0.1"
         const val SOCKS5_PROXY_PORT = 1080
-        
+
         private val EMPTY_BYTE_ARRAY = ByteArray(0)
-        
+
         // Protocol constants
         private const val PROTOCOL_TCP = 6
         private const val PROTOCOL_UDP = 17
-        
+
         // IP header constants
         private const val IP_VERSION_IHL = 0x45
         private const val IP_FLAG_DF = 0x40
         private const val IP_DEFAULT_TTL = 64
         private const val IP_HEADER_LEN = 20
-        
+
         // TCP header constants
         private const val TCP_HEADER_LEN = 20
         private const val TCP_DATA_OFFSET = (5 shl 4)
         private const val TCP_FLAGS_PSH_ACK = 0x18
         private const val TCP_WINDOW_SIZE = 8192
-        
+
         // 内网 IP 段（通过 WiFi 直连）
         // 10.0.0.0/8 - 私有 A 类
-        // 172.16.0.0/12 - 私有 B 类  
+        // 172.16.0.0/12 - 私有 B 类
         // 192.168.0.0/16 - 私有 C 类
         private val PRIVATE_IP_RANGES = listOf(
             "10.0.0.0" to 8,
             "172.16.0.0" to 12,
             "192.168.0.0" to 16
         )
-        
+
         // DNS 服务器（通过 WiFi）
         private val DNS_SERVERS = listOf(
             "8.8.8.8", "8.8.4.4",
@@ -139,10 +147,10 @@ class GatewayVpnService : AndroidVpnService() {
     lateinit var virtualIpAllocator: VirtualIpAllocator
 
     private var vpnInterface: ParcelFileDescriptor? = null
-    
+
     // SOCKS5连接池
     private var socks5ConnectionPool: Socks5ConnectionPool? = null
-    
+
     // 活跃的代理连接映射（四元组 -> 连接会话）- 现在存储借用自连接池的连接
     private val activeConnections = ConcurrentHashMap<String, ConnectionSession>()
     // TUN读取缓冲区
@@ -155,13 +163,13 @@ class GatewayVpnService : AndroidVpnService() {
     private val lastMissingSessionLogAt = AtomicLong(0L)
 
     private var resolvedDnsServers: Set<String> = DNS_SERVERS.toSet()
-    
+
     // TUN输出流（用于回包注入）
     private var vpnOutputStream: FileOutputStream? = null
-    
+
     // 原子标志，防止 stopVpn() 重复执行
     private val isStopping = AtomicBoolean(false)
-    
+
     // 原子标志，防止 cleanupVpnResources() 重复执行
     private val isCleaningUp = AtomicBoolean(false)
 
@@ -299,10 +307,10 @@ class GatewayVpnService : AndroidVpnService() {
         val destinationIp = parseDestinationIp(packet, length) ?: return
         val protocol = parseProtocol(packet)
         val destinationPort = parseDestinationPort(packet, length)
-        
+
         // 根据目标地址、协议和端口判断流量类型
         val routeType = determineRouteType(destinationIp, protocol, destinationPort)
-        
+
         when (routeType) {
             RouteType.LOCAL_NETWORK -> {
                 // 内网流量：绕过 VPN，最终出口由系统路由决定
@@ -323,26 +331,26 @@ class GatewayVpnService : AndroidVpnService() {
             }
         }
     }
-    
+
     /**
      * 解析 IP 包中的目标 IP 地址
      */
     private fun parseDestinationIp(packet: ByteArray, length: Int): String? {
         if (length < 20) return null
-        
+
         // 检查 IP 版本 (IPv4 = 4)
         val version = (packet[0].toInt() shr 4) and 0x0F
         if (version != 4) return null // 仅支持 IPv4
-        
+
         // IP 头长度
         val headerLength = (packet[0].toInt() and 0x0F) * 4
         if (length < headerLength || length < 20) return null
-        
+
         // 目标 IP 在第 16-19 字节
         val dstIp = "${packet[16].toInt() and 0xFF}.${packet[17].toInt() and 0xFF}.${packet[18].toInt() and 0xFF}.${packet[19].toInt() and 0xFF}"
         return dstIp
     }
-    
+
     /**
      * 判断流量类型
      */
@@ -356,12 +364,12 @@ class GatewayVpnService : AndroidVpnService() {
             )) {
             return RouteType.DNS
         }
-        
+
         // 检查是否是内网 IP
         if (isPrivateIp(destinationIp)) {
             return RouteType.LOCAL_NETWORK
         }
-        
+
         // 检查是否是云服务器 IP（需要排除）
         // 实际实现中应从配置或路由表获取
         // 这里简化为：其他所有流量走代理
@@ -373,7 +381,7 @@ class GatewayVpnService : AndroidVpnService() {
         val configuredDns = prefs.getString(DNS_SERVERS_PREF_KEY, null)
         return VpnDnsConfig.resolveDnsServers(configuredDns, DNS_SERVERS)
     }
-    
+
     /**
      * 初始化SOCKS5连接池
      */
@@ -386,7 +394,7 @@ class GatewayVpnService : AndroidVpnService() {
             maxConnectionsPerDestination = 8,
             cleanupIntervalMs = 30_000L
         )
-        
+
         socks5ConnectionPool = Socks5ConnectionPool(
             proxyHost = SOCKS5_PROXY_HOST,
             proxyPort = SOCKS5_PROXY_PORT,
@@ -401,14 +409,14 @@ class GatewayVpnService : AndroidVpnService() {
             }
         )
     }
-    
+
     /**
      * 判断是否是私有 IP 地址
      */
     private fun isPrivateIp(ip: String): Boolean {
         return IpAddressUtils.isPrivateIpv4Rfc1918(ip)
     }
-    
+
     /**
      * 直连内网流量（当前实现通过 protect() 让 socket 绕过 VPN 隧道）
      * 注意：protect() 只保证不走 VPN，不保证一定走 WiFi。
@@ -446,7 +454,7 @@ class GatewayVpnService : AndroidVpnService() {
             logger.warn("Forward via WiFi failed for ${redactIp(destinationIp)}", e)
         }
     }
-    
+
     /**
      * 通过本地 SOCKS5 代理转发（使用连接池复用SOCKS5连接）
      */
@@ -456,13 +464,13 @@ class GatewayVpnService : AndroidVpnService() {
         val payloadInfo = extractTransportPayloadInfo(packet, length) ?: return
         val srcIp = parseSourceIp(packet, length) ?: return
         val srcPort = parseSourcePort(packet, length) ?: return
-        
+
         val pool = socks5ConnectionPool
         if (pool == null) {
             logMissingSession(destinationIp)
             return
         }
-        
+
         // 使用四元组作为会话key
         val connectionKey = "$srcIp:$srcPort-$destinationIp:$destinationPort"
 
@@ -473,18 +481,18 @@ class GatewayVpnService : AndroidVpnService() {
             } else {
                 // 旧连接无效，清理
                 existingSession?.pooledConnection?.let { pool.returnConnection(it) }
-                
+
                 // 从连接池借用连接
                 val conn = pool.borrowConnection(
                     destinationIp = destinationIp,
                     destinationPort = destinationPort,
                     protectSocket = { protect(it) }
                 )
-                
+
                 if (conn != null) {
                     // 分配虚拟IP用于回包
                     val virtualSrcIp = getOrAllocateVirtualIp(destinationIp)
-                    
+
                     activeConnections[connectionKey] = ConnectionSession(
                         srcIp = srcIp,
                         srcPort = srcPort,
@@ -506,7 +514,7 @@ class GatewayVpnService : AndroidVpnService() {
                 // 写入payload（不拷贝数组）
                 pooledConn.socket.getOutputStream()?.write(packet, payloadInfo.first, payloadInfo.second)
                 pooledConn.socket.getOutputStream()?.flush()
-                
+
                 // 更新会话活动状态
                 activeConnections[connectionKey]?.updateActivity()
             }
@@ -516,7 +524,7 @@ class GatewayVpnService : AndroidVpnService() {
             activeConnections.remove(connectionKey)?.pooledConnection?.let { pool.returnConnection(it) }
         }
     }
-    
+
     /**
      * 解析源IP地址
      */
@@ -527,7 +535,7 @@ class GatewayVpnService : AndroidVpnService() {
         // 源IP在第12-15字节
         return "${packet[12].toInt() and 0xFF}.${packet[13].toInt() and 0xFF}.${packet[14].toInt() and 0xFF}.${packet[15].toInt() and 0xFF}"
     }
-    
+
     /**
      * 解析源端口
      */
@@ -542,7 +550,7 @@ class GatewayVpnService : AndroidVpnService() {
     private fun cleanupStaleConnections() {
         val now = System.currentTimeMillis()
         val pool = socks5ConnectionPool
-        
+
         activeConnections.entries.removeIf { entry ->
             val session = entry.value
             val isExpired = now - session.lastActivity > CONNECTION_TIMEOUT_MS
@@ -558,7 +566,7 @@ class GatewayVpnService : AndroidVpnService() {
             isExpired
         }
     }
-    
+
     /**
      * 处理回包（从远程服务器读取响应并注入TUN）
      * 使用平滑指数退避算法减少空闲时的CPU轮询
@@ -605,7 +613,7 @@ class GatewayVpnService : AndroidVpnService() {
         val exponent = minOf(idleRounds - 1, 6) // 限制指数最大为6，避免过大数值
         return minOf(baseDelay shl exponent, MAX_RETURN_TRAFFIC_IDLE_DELAY_MS)
     }
-    
+
     /**
      * 处理TCP回包
      */
@@ -618,7 +626,7 @@ class GatewayVpnService : AndroidVpnService() {
             activeConnections.remove(sessionKey)
             return false
         }
-        
+
         try {
             val input = socket.getInputStream()
             val available = input.available()
@@ -655,7 +663,7 @@ class GatewayVpnService : AndroidVpnService() {
             return false
         }
     }
-    
+
     /**
      * 处理UDP回包
      */
@@ -664,7 +672,7 @@ class GatewayVpnService : AndroidVpnService() {
         // 当前实现中UDP使用DatagramSocket，处理方式略有不同
         // 简化实现：UDP通常在forwardViaWifi中直接处理
     }
-    
+
     /**
      * 构造回包（IP头 + TCP头 + payload）
      * @return 完整包长度
@@ -686,7 +694,7 @@ class GatewayVpnService : AndroidVpnService() {
 
         val srcIpParts = parseIpv4Parts(session.virtualSrcIp) ?: return 0
         val dstIpParts = parseIpv4Parts(session.srcIp) ?: return 0
-        
+
         // 构造IP头（从虚拟源IP到原始源IP）
         buffer[0] = IP_VERSION_IHL.toByte() // IPv4, IHL=5
         buffer[1] = 0 // DSCP/ECN
@@ -700,24 +708,24 @@ class GatewayVpnService : AndroidVpnService() {
         buffer[9] = session.protocol.toByte()
         buffer[10] = 0 // Header checksum (稍后计算)
         buffer[11] = 0
-        
+
         // 源IP（虚拟IP）
         buffer[12] = srcIpParts[0].toByte()
         buffer[13] = srcIpParts[1].toByte()
         buffer[14] = srcIpParts[2].toByte()
         buffer[15] = srcIpParts[3].toByte()
-        
+
         // 目标IP（原始源IP）
         buffer[16] = dstIpParts[0].toByte()
         buffer[17] = dstIpParts[1].toByte()
         buffer[18] = dstIpParts[2].toByte()
         buffer[19] = dstIpParts[3].toByte()
-        
+
         // 计算IP头校验和
         val ipChecksum = calculateChecksum(buffer, 0, ipHeaderLen)
         buffer[10] = (ipChecksum shr 8).toByte()
         buffer[11] = (ipChecksum and 0xFF).toByte()
-        
+
         // 构造TCP头
         buffer[20] = (session.dstPort shr 8).toByte() // 源端口（原始目标端口）
         buffer[21] = (session.dstPort and 0xFF).toByte()
@@ -739,7 +747,7 @@ class GatewayVpnService : AndroidVpnService() {
         buffer[37] = 0
         buffer[38] = 0 // Urgent pointer
         buffer[39] = 0
-        
+
         // 计算TCP校验和（伪头 + TCP头 + payload）
         val tcpChecksum = calculateTcpChecksum(buffer, srcIpParts, dstIpParts, session.protocol, tcpHeaderLen, payloadLen)
         buffer[36] = (tcpChecksum shr 8).toByte()
@@ -761,7 +769,7 @@ class GatewayVpnService : AndroidVpnService() {
             value
         }
     }
-    
+
     /**
      * 计算IP校验和
      */
@@ -780,7 +788,7 @@ class GatewayVpnService : AndroidVpnService() {
         }
         return sum.inv() and 0xFFFF
     }
-    
+
     /**
      * 计算TCP校验和（包含伪头）
      */
@@ -793,7 +801,7 @@ class GatewayVpnService : AndroidVpnService() {
         payloadLen: Int
     ): Int {
         var sum = 0
-        
+
         // 伪头
         sum += (srcIp[0] shl 8) or srcIp[1]
         sum += (srcIp[2] shl 8) or srcIp[3]
@@ -801,7 +809,7 @@ class GatewayVpnService : AndroidVpnService() {
         sum += (dstIp[2] shl 8) or dstIp[3]
         sum += protocol
         sum += tcpHeaderLen + payloadLen
-        
+
         // TCP头和payload
         for (i in 20 until 20 + tcpHeaderLen + payloadLen step 2) {
             if (i + 1 < buffer.size) {
@@ -810,13 +818,13 @@ class GatewayVpnService : AndroidVpnService() {
                 sum += (buffer[i].toInt() and 0xFF) shl 8
             }
         }
-        
+
         while (sum shr 16 != 0) {
             sum = (sum and 0xFFFF) + (sum shr 16)
         }
         return sum.inv() and 0xFFFF
     }
-    
+
     /**
      * 注入包到TUN接口
      */
@@ -836,7 +844,7 @@ class GatewayVpnService : AndroidVpnService() {
             false
         }
     }
-    
+
     /**
      * 获取或分配虚拟 IP
      */
@@ -898,7 +906,7 @@ class GatewayVpnService : AndroidVpnService() {
         if (payloadStart >= length) return null
         return Pair(payloadStart, length - payloadStart)
     }
-    
+
     @Deprecated("使用 extractTransportPayloadInfo 避免数组拷贝", ReplaceWith("extractTransportPayloadInfo(packet, length)"))
     private fun extractTransportPayload(packet: ByteArray, length: Int): ByteArray {
         val info = extractTransportPayloadInfo(packet, length)
@@ -908,7 +916,7 @@ class GatewayVpnService : AndroidVpnService() {
             EMPTY_BYTE_ARRAY
         }
     }
-    
+
     /**
      * 路由类型枚举
      */
@@ -918,7 +926,7 @@ class GatewayVpnService : AndroidVpnService() {
         CLOUD_SERVER,  // 云服务器 - 蜂窝（排除）
         PROXY          // 其他 - SOCKS5 代理
     }
-    
+
     /**
      * 连接会话（完整四元组映射）- 使用连接池管理SOCKS5连接
      */
@@ -938,7 +946,7 @@ class GatewayVpnService : AndroidVpnService() {
             pooledConnection?.markUsed()
         }
     }
-    
+
     /**
      * 连接信息（兼容旧代码）
      */

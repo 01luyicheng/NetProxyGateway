@@ -1,17 +1,22 @@
 package com.netproxy.gateway.ui.screens
 
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
+
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.ui.semantics.Role
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
@@ -33,8 +38,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+
 import com.netproxy.gateway.R
 import com.netproxy.gateway.debug.AppAuditLogStore
 import com.netproxy.gateway.debug.AuditLogEntry
@@ -47,10 +54,6 @@ import com.netproxy.gateway.ui.viewmodel.MqttUiState
 import com.netproxy.gateway.ui.viewmodel.UiState
 import com.netproxy.gateway.vpn.VpnState
 import com.netproxy.gateway.wifi.WifiNetwork
-import java.time.Instant
-import java.time.ZoneId
-import java.time.format.DateTimeFormatter
-import java.util.Locale
 
 private enum class MainPage {
     Home,
@@ -563,9 +566,9 @@ private fun ConnectedOptionsSection(
                 text = stringResource(R.string.remote_control),
                 style = MaterialTheme.typography.titleLarge
             )
-            
+
             Spacer(modifier = Modifier.height(16.dp))
-            
+
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -583,16 +586,16 @@ private fun ConnectedOptionsSection(
                     onCheckedChange = null
                 )
             }
-            
+
             Spacer(modifier = Modifier.height(8.dp))
-            
+
             OutlinedButton(
                 onClick = { viewModel.scanWifi() },
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(stringResource(R.string.scan_wifi))
             }
-            
+
             if (uiState.wifiNetworks.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
@@ -600,9 +603,9 @@ private fun ConnectedOptionsSection(
                     style = MaterialTheme.typography.bodySmall
                 )
             }
-            
+
             Spacer(modifier = Modifier.height(16.dp))
-            
+
             Button(
                 onClick = { viewModel.disconnect() },
                 modifier = Modifier.fillMaxWidth(),
