@@ -104,7 +104,12 @@
 | L3 | EmulatorDetector权限检查重复 | security | Low | EmulatorDetector/重复权限检查 | e89e00d |
 | L5 | 缺少集成测试 | global | Low | 测试目录/仅单元测试 | e89e00d |
 | N1 | 双版本API增加维护负担 | wifi,connection | Medium | GatewayWifiManager,AuthSessionStore/双版本 | e89e00d |
-| N2 | VpnService过于庞大 | vpn | Medium | VpnService/1178行 | e89e00d |
+| N2 | VpnService过于庞大 | vpn | Medium | VpnService/1186行 | e89e00d |
+| N81 | Kotlin文件CRLF换行符未实际转换 | android | Medium | 全局/.gitattributes缺失 | 41890f9 |
+| N82 | server/tunnel异步通知引入竞态 | server | High | server/tunnel/notifyDeviceStatus/wg.Add竞态 | 37e470a |
+| N83 | server/tunnel关键并发注释被移除 | server | Low | server/tunnel/注释移除/竞态防护 | 37e470a |
+| N84 | NetworkStateManager防御性测试未标注 | connection | Low | NetworkStateManagerTest/反射注入/未来场景 | 26d221f |
+| N85 | ISSUES.md文档格式不一致 | docs | Low | docs/行号过时/格式不统一 | 9efb84e |
 | N3 | 过度使用@Synchronized | connection | Low | AuthSessionStore/全方法同步 | e89e00d |
 | N4 | DI模块接口设计混乱 | di | Medium | ModuleInterfaces/@Deprecated | e89e00d |
 | N5 | 状态管理分散 | global | Low | 多处/VpnState,MqttConnectionState,WiFiState | e89e00d |

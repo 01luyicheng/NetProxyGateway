@@ -237,8 +237,8 @@
 - **问题**: N52/N54已将ThreadLocal方案替换为局部变量方案，现有测试未验证该分配行为
 
 #### N2: VpnService过于庞大
-- **位置**: VpnService.kt (1054行)
-- **代码指纹**: VpnService/1054行
+- **位置**: VpnService.kt (1186行)
+- **代码指纹**: VpnService/1186行
 - **问题**: 包含VPN服务、数据包解析、连接管理、状态机等多个职责
 - **修复建议**: 提取数据包解析为 `PacketParser`，提取连接管理为 `ConnectionManager`
 

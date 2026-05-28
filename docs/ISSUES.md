@@ -153,7 +153,7 @@
 - **建议修复**: 统一使用 `AppResult` 模式，移除静默失败版本
 
 ### N2: VpnService过于庞大
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (1178行)
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (1186行)
 - **问题**: 包含 VPN 服务、数据包解析、连接管理、状态机等多个职责；`processPacket()`、`forwardViaSocks5()` 等函数超过 50 行
 - **风险**: 中。代码难以理解和维护
 - **建议修复**: 提取数据包解析为 `PacketParser`，提取连接管理为 `ConnectionManager`
@@ -729,3 +729,66 @@
 - **风险**: **中**。导致不必要的 I/O 失败和连接重建延迟。
 - **建议修复**: 在 Tunnel 消息处理层添加 `disconnect` 类型消息的处理，收到后主动归还 SOCKS5 连接并清理会话。
 - **关联问题**: N79
+
+---
+
+## 提交审查发现（2026-05-28，审查提交 715dd88..c0b3f87）
+
+> 以下问题由对近10次提交的代码审查记录；**本轮不修复**，留待后续处理。
+
+### N81: Kotlin文件CRLF换行符未实际转换为LF
+- **状态**: 待修复
+- **提交哈希**: `41890f9`（声称修复但未生效）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/**/*.kt`
+- **问题描述**: 提交 `41890f9` 声称将CRLF转为LF，但diff中完全没有换行符变更。根本原因是仓库缺少 `.gitattributes` 配置，Windows环境下`core.autocrlf=true`持续将工作区文件转回CRLF。当前全部32+个Kotlin源文件仍使用CRLF换行符。
+- **风险**: **中**。跨平台协作时换行符不一致导致diff噪音、review困难、潜在脚本执行问题。
+- **建议修复**:
+  1. 创建 `.gitattributes` 添加 `*.kt text eol=lf` 和 `*.kts text eol=lf`
+  2. 执行 `git add --renormalize .` 统一换行符
+  3. 重新提交
+- **关联问题**: STYLE_GUIDE.md 换行规范
+
+### N82: server/tunnel Register/Unregister异步通知引入竞态条件
+- **状态**: 已修复（代码修复在单独提交）
+- **提交哈希**: `37e470a`（风格提交中混入功能性变更）
+- **位置**: `server/tunnel/main.go` (`Register`, `Unregister`, `cleanupDeadTunnelsOnce`)
+- **问题描述**: 提交 `37e470a` 将 `m.notifyDeviceStatus(...)` 从同步调用改为 `go m.notifyDeviceStatus(...)` 异步调用。`notifyDeviceStatus` 内部调用 `m.wg.Add(1)`，存在 `wg.Add` 在 `Stop()` 的 `wg.Wait()` 之后执行的时序。**会导致 `panic: sync: WaitGroup is reused before previous Wait has returned`**。`go test -race -count=200` 可稳定复现 panic 和 data race。
+- **风险**: **高**。服务关闭时可能直接崩溃，测试高并发下几乎必现 panic。
+- **修复**: 已在 `notifyDeviceStatus` 入口处添加 `m.ctx.Done()` 检查，`Stop()` 后不再执行 `wg.Add(1)`，彻底消除竞态。
+- **关联问题**: L10（Tunnel服务设备状态通知无重试，已修复）
+
+### N83: server/tunnel关键并发安全注释被移除
+- **状态**: 待修复
+- **提交哈希**: `37e470a`
+- **位置**: `server/tunnel/main.go`
+- **问题描述**: 提交 `37e470a` 在"注释国际化"过程中移除了约27处中文注释，其中包括3处关键的并发安全设计注释：
+  1. `heartbeat` 中关于 `WritePing` 与 `Close` 共享 `connMu` 锁的竞态防护说明
+  2. `Run` 中关于 `wg.Add(1)` 必须在goroutine外的原因说明（避免与`Stop`竞态）
+  3. `cleanupDeadTunnelsOnce` 中关于 `current == tunnel` 实例匹配检查的说明
+- **风险**: **中**。代码当前功能正常，但未来重构时极易误删关键并发防护逻辑，引入竞态bug。
+- **建议修复**: 恢复上述3处注释（翻译为英文），明确记录并发安全设计决策。
+
+### N84: NetworkStateManager防御性测试未标注"未来场景"
+- **状态**: 待修复
+- **提交哈希**: `26d221f`
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/connection/NetworkStateManagerTest.kt` (L216-281)
+- **问题描述**: `validatedWifiPreferredOverUnvalidatedWifi` 和 `validatedCellularPreferredOverUnvalidatedCellular` 测试通过反射将未验证网络注入 `activeNetworks`，绕过 `isValidNetwork` 的过滤。当前生产代码中这些场景不可能发生。测试验证的是"未来放宽isValidNetwork条件"的防御性设计行为，但测试代码未明确标注此意图。
+- **风险**: **低**。维护者可能困惑为什么测试要绕过正常入口检查，误以为当前代码有bug。
+- **建议修复**: 在测试方法上方添加注释，明确说明这些测试验证的是"防御性设计场景：未来如果放宽isValidNetwork条件时的排序行为"。
+
+### N85: ISSUES.md文档格式不一致
+- **状态**: 待修复
+- **提交哈希**: `9efb84e`
+- **位置**: `docs/ISSUES.md`, `docs/issues/INDEX.md`, `docs/issues/modules/vpn.md`
+- **问题描述**: 文档中存在多处格式和行号不一致：
+  1. N2行数三处不一致：ISSUES.md写1178行、INDEX.md写1186行、vpn.md写1054行（实际1186行）
+  2. 部分问题标题使用`### Nxx:`带冒号，部分不带冒号
+  3. 部分旧问题缺少"提交哈希"字段，新增问题均有此字段
+  4. 风险等级描述格式不统一（有的用"风险: 高"，有的用"**风险**: **高**"）
+- **风险**: **低**。不影响功能，但增加维护成本和阅读困难。
+- **建议修复**:
+  1. 统一所有文档中的代码行号为实际值
+  2. 统一标题格式（建议全部使用`### Nxx: 描述`）
+  3. 统一风险等级格式为`**风险**: **等级**`
+  4. 为旧问题补全提交哈希（如已知）
+
