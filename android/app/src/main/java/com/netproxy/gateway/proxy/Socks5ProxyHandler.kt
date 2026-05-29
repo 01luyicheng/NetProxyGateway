@@ -15,6 +15,7 @@ import io.netty.channel.socket.nio.NioSocketChannel
 import io.netty.handler.codec.socksx.v5.*
 import io.netty.util.ReferenceCountUtil
 
+import com.netproxy.gateway.result.getOrDefault
 import com.netproxy.gateway.utils.IpAddressUtils
 
 class Socks5ProxyHandler(
@@ -109,26 +110,23 @@ class Socks5ProxyHandler(
         if (port !in 1..65535) {
             return false
         }
-        return try {
-            val inetAddr = java.net.InetAddress.getByName(host)
-            val ip = inetAddr.hostAddress ?: return false
 
-            if (ip.contains(":")) {
-                return isPrivateIpv6Address(ip)
-            }
+        if (host.contains(":")) {
+            return isPrivateIpv6Address(host)
+        }
 
+        val octetsResult = IpAddressUtils.validateIpv4WithResult(host)
+        if (octetsResult.getOrDefault(false)) {
             // Reject loopback, link-local metadata, broadcast, and reserved ranges
-            if (ip.startsWith("127.") || ip.startsWith("169.254.") ||
-                ip == "0.0.0.0" || ip == "255.255.255.255" ||
-                ip.startsWith("224.")) {
+            if (host.startsWith("127.") || host.startsWith("169.254.") ||
+                host == "0.0.0.0" || host == "255.255.255.255" ||
+                host.startsWith("224.")) {
                 return false
             }
-
-            // Only allow RFC1918 private addresses
-            IpAddressUtils.isPrivateIpv4Rfc1918(ip)
-        } catch (e: Exception) {
-            false
+            return IpAddressUtils.isPrivateIpv4Rfc1918(host)
         }
+
+        return false
     }
 
     private fun isPrivateIpv6Address(ip: String): Boolean {
