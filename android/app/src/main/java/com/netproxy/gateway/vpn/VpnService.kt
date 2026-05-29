@@ -475,14 +475,20 @@ class GatewayVpnService : AndroidVpnService() {
         val connectionKey = "$srcIp:$srcPort-$destinationIp:$destinationPort"
 
         try {
-            val existingSession = activeConnections[connectionKey]
-            val pooledConn = if (existingSession?.pooledConnection?.isValid() == true) {
-                existingSession.pooledConnection
-            } else {
-                // 旧连接无效，清理
-                existingSession?.pooledConnection?.let { pool.returnConnection(it) }
+            // 使用computeIfPresent原子检查并更新现有会话
+            var sessionToUse: ConnectionSession? = activeConnections.computeIfPresent(connectionKey) { _, existingSession ->
+                if (existingSession.pooledConnection?.isValid() == true) {
+                    existingSession.updateActivity()
+                    existingSession
+                } else {
+                    // 连接无效，在compute块内标记为null，后续清理
+                    existingSession.pooledConnection?.let { pool.returnConnection(it) }
+                    null
+                }
+            }
 
-                // 从连接池借用连接
+            // 如果没有有效会话，创建新会话
+            if (sessionToUse == null) {
                 val conn = pool.borrowConnection(
                     destinationIp = destinationIp,
                     destinationPort = destinationPort,
@@ -490,10 +496,8 @@ class GatewayVpnService : AndroidVpnService() {
                 )
 
                 if (conn != null) {
-                    // 分配虚拟IP用于回包
                     val virtualSrcIp = getOrAllocateVirtualIp(destinationIp)
-
-                    activeConnections[connectionKey] = ConnectionSession(
+                    val newSession = ConnectionSession(
                         srcIp = srcIp,
                         srcPort = srcPort,
                         dstIp = destinationIp,
@@ -502,25 +506,29 @@ class GatewayVpnService : AndroidVpnService() {
                         pooledConnection = conn,
                         virtualSrcIp = virtualSrcIp
                     )
-                    logDebug("Borrowed connection from pool: ${redactConnectionKey(connectionKey)} -> virtualIP: ${redactIp(virtualSrcIp)}")
-                    conn
+                    newSession.updateActivity()
+
+                    // putIfAbsent确保不会覆盖其他线程刚创建的会话
+                    val existing = activeConnections.putIfAbsent(connectionKey, newSession)
+                    sessionToUse = if (existing != null) {
+                        // 其他线程已创建会话，归还我们借用的连接
+                        pool.returnConnection(conn)
+                        existing
+                    } else {
+                        logDebug("Borrowed connection from pool: ${redactConnectionKey(connectionKey)} -> virtualIP: ${redactIp(virtualSrcIp)}")
+                        newSession
+                    }
                 } else {
                     logger.warn("Failed to borrow connection from pool for ${redactConnectionKey(connectionKey)}")
-                    null
                 }
             }
 
-            if (pooledConn != null) {
-                // 写入payload（不拷贝数组）
+            sessionToUse?.pooledConnection?.let { pooledConn ->
                 pooledConn.socket.getOutputStream()?.write(packet, payloadInfo.first, payloadInfo.second)
                 pooledConn.socket.getOutputStream()?.flush()
-
-                // 更新会话活动状态
-                activeConnections[connectionKey]?.updateActivity()
             }
         } catch (e: Exception) {
             logger.warn("Forward via SOCKS5 failed for ${redactConnectionKey(connectionKey)}", e)
-            // 连接出错，归还连接并清理会话
             activeConnections.remove(connectionKey)?.pooledConnection?.let { pool.returnConnection(it) }
         }
     }
