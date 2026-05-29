@@ -1,6 +1,6 @@
 # NetProxyGateway
 
-**AI-first Android project** — documentation is intentionally minimized for agent execution.
+**AI-first Android project** — documentation is intentionally minimized for agent execution..
 
 ## 🎯 For AI Agents Starting Work
 
