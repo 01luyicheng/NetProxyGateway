@@ -211,8 +211,10 @@ type TunnelManager struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
-	stopMu     sync.Mutex
-	stopped    bool
+	// stopMu protects stopped and coordinates with wg.Add in notifyDeviceStatus.
+	stopMu sync.Mutex
+	// stopped is set to true after Stop() has been called at least once.
+	stopped bool
 }
 
 // NewTunnelManager creates a new tunnel manager.
@@ -229,6 +231,7 @@ func NewTunnelManager(config *Config) *TunnelManager {
 
 // Stop stops the tunnel manager, cancels in-flight notifications, and waits
 // for background goroutines to finish (with a 30-second timeout).
+// Stop is safe to call multiple times; subsequent calls return immediately.
 func (m *TunnelManager) Stop() {
 	m.stopMu.Lock()
 	if m.stopped {
@@ -236,9 +239,7 @@ func (m *TunnelManager) Stop() {
 		return
 	}
 	m.stopped = true
-	if m.cancel != nil {
-		m.cancel()
-	}
+	m.cancel()
 	m.stopMu.Unlock()
 
 	done := make(chan struct{})
@@ -431,6 +432,13 @@ func (m *TunnelManager) cleanupDeadTunnels() {
 
 // cleanupDeadTunnelsOnce performs a single dead tunnel cleanup (for testing).
 func (m *TunnelManager) cleanupDeadTunnelsOnce() {
+	m.stopMu.Lock()
+	if m.stopped {
+		m.stopMu.Unlock()
+		return
+	}
+	m.stopMu.Unlock()
+
 	var deadTunnels []*TunnelConn
 	var deadIDs []string
 
