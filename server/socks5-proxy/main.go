@@ -26,7 +26,7 @@ import (
 	"github.com/netproxy/shared/httpclient"
 	"github.com/netproxy/shared/stringutil"
 )
-
+// Test for write permissions.
 // SOCKS5 protocol constants
 const (
 	socks5Version = 0x05
