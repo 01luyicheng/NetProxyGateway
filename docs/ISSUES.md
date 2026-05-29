@@ -293,8 +293,10 @@
   ```
 - **最终方案**: 见 [N54](#n54-vpnservice-threadlocal-writebufferremove-抵消缓冲区复用价值)。`processReturnTraffic` 是单协程顺序执行，同一时刻只有一个 `processTcpReturn` 在执行，直接使用局部变量 `val buffer = ByteArray(PACKET_BUFFER_SIZE)` 更简单安全，无需缓冲区复用或 ThreadLocal。
 
-### H12: activeConnections 复合操作非原子 [待修复]
-- **状态**: 待修复
+### H12: activeConnections 复合操作非原子 [已修复]
+- **状态**: 已修复
+- **提交哈希**: 1f9acee
+- **修复提交**: b2256ff
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L426-427, L467, L429-432, L470)
 - **问题验证**:
   - 虽然使用 `ConcurrentHashMap`，但"检查-获取-更新"模式不是原子的
@@ -312,34 +314,8 @@
   existing.pooledConnection.isValid()  // 访问已关闭的连接！
   ```
 - **风险**: 高。可能导致使用无效连接、空指针异常、IO异常或重复归还
-- **触发条件**: 连接刚好在30秒超时过期时、清理任务与转发并发执行、高流量场景
-- **代码分析**:
-  ```kotlin
-  // L429-432, L470: 问题代码
-  val existingSession = activeConnections[connectionKey]  // 获取
-  val pooledConn = if (existingSession?.pooledConnection?.isValid() == true) {  // 检查
-      existingSession.pooledConnection
-  } else { ... }
-  // ...
-  activeConnections[connectionKey]?.updateActivity()  // 再次获取，可能不同对象
-  ```
-- **建议修复**:
-  ```kotlin
-  // 使用compute保证原子性
-  activeConnections.compute(connectionKey) { key, existingSession ->
-      if (existingSession?.pooledConnection?.isValid() == true) {
-          existingSession.updateActivity()
-          existingSession
-      } else {
-          // 创建新连接
-          existingSession?.pooledConnection?.let { pool.returnConnection(it) }
-          val conn = pool.borrowConnection(...)
-          ConnectionSession(...)
-      }
-  }?.let { session ->
-      // 使用session发送数据
-  }
-  ```
+- **修复**: 使用 `computeIfPresent()` 原子检查并更新现有会话，使用 `putIfAbsent()` 避免覆盖其他线程刚创建的会话
+- **交叉审查结果**: 修复正确，消除了竞态条件。残留的 cleanupStaleConnections 与 forwardViaSocks5 之间的竞态是独立问题，建议后续处理
 
 ### H14: processTcpReturn 调用路径仍阻止0长度 TCP 控制包注入 [待修复]
 - **状态**: 待修复
@@ -428,20 +404,27 @@
 
 ---
 
-### N27: Socks5ConnectionPool cleanupIdleConnections在write锁内执行阻塞IO
+### N27: Socks5ConnectionPool cleanupIdleConnections在write锁内执行阻塞IO [已修复]
+- **状态**: 已修复
 - **提交哈希**: 1f9acee
+- **修复提交**: 1554cf0
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (L435-L457)
 - **问题描述**: `removeConnection(conn)` 在 `write` 锁内被调用，内部执行 `connection.close()` 阻塞IO操作。在高并发或网络异常时，长时间持有 `write` 锁会阻塞所有 `borrowConnection` 和 `returnConnection` 操作
 - **风险**: 高。严重影响连接池并发性能，可能导致连接获取超时
-- **修复难度**: 中。需要将 `socket.close()` 移出锁范围，改为异步关闭或在锁外执行
+- **修复**: 将 `cleanupIdleConnections()` 中的 `removeConnection(conn)` 拆分为锁内集合移除 + 锁外 `conn.close()`，消除write锁内的阻塞IO
+- **交叉审查结果**: 修复正确。但发现 `returnConnection()` 方法（L205, L223）仍在write锁内调用 `removeConnection()`，存在相同问题，建议后续修复
 
 
 
-### N30: Socks5ProxyHandler DNS解析阻塞EventLoop
+### N30: Socks5ProxyHandler DNS解析阻塞EventLoop [部分修复，引入回归]
+- **状态**: 部分修复
 - **提交哈希**: 1f9acee
+- **修复提交**: b18d832（移除了阻塞DNS解析，但引入功能回归）
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt` (L111-L128)
 - **问题描述**: `InetAddress.getByName(host)` 是同步阻塞调用，在 Netty EventLoop 线程上执行。DNS 查询可能耗时数百毫秒甚至超时（数秒），期间阻塞该 EventLoop 上的所有 I/O 事件
-- **风险**: 高。单连接慢DNS查询导致整个 SOCKS5 服务所有连接停滞
+- **修复**: 改为纯IP格式校验，消除了阻塞DNS调用
+- **交叉审查发现问题**: 修复后 `validateTargetAddress()` 直接拒绝所有域名格式的目标地址（返回false），导致SOCKS5域名连接功能失效。如果项目需要支持域名访问，需要恢复域名支持并将DNS解析异步化
+- **风险**: 高。单连接慢DNS查询导致整个 SOCKS5 服务所有连接停滞；修复后域名连接被拒绝
 - **修复难度**: 中。需要引入异步 DNS 解析或使用线程池执行 DNS 查询
 
 ### N31: NetworkStateManager onLost多网络状态误判 [已修复]
@@ -453,12 +436,15 @@
 - **风险**: 已消除。多网络场景下断开单一网络不会触发误判。
 - **修复状态**: 当前实现已正确处理多网络共存和切换场景。
 
-### N34: MainViewModel VPN状态与真实服务状态可能不一致
+### N34: MainViewModel VPN状态与真实服务状态可能不一致 [已修复]
+- **状态**: 已修复
 - **提交哈希**: 1f9acee
+- **修复提交**: a188bb6
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (L129-L161)
 - **问题描述**: `startForegroundService()` 后立即设 `isVpnEnabled=true`，但服务启动可能失败（权限被拒、系统限制、OOM）。UI 显示 VPN 已开启但实际服务未运行，缺少通过 ServiceConnection 同步真实状态的机制
 - **风险**: 高。用户看到的状态与实际不符，可能导致安全/功能问题
-- **修复难度**: 中。通过 ServiceConnection 或广播监听真实服务状态，UI 状态与真实状态解耦
+- **修复**: `isVpnEnabled` 不再由 `toggleVpn()` 直接设置，而是由 `GatewayVpnService.status.state` 驱动。`RUNNING`->true，`STOPPED`/`ERROR`->false，`STARTING`/`STOPPING`保持当前值避免闪烁
+- **交叉审查结果**: 修复正确，UI状态与真实服务状态一致
 
 
 
@@ -469,10 +455,13 @@
 - **风险**: 高。与严格遵循 TCP 协议栈的应用不兼容，可能导致连接建立失败或异常断开
 - **修复难度**: 高。需要实现完整的 TCP 状态机，正确管理序列号和标志位
 
-### N37: AuthSessionStore CharArray安全设计被String抵消
+### N37: AuthSessionStore CharArray安全设计被String抵消 [修复被回退]
+- **状态**: 修复被回退
 - **提交哈希**: 1f9acee
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/AuthSessionStore.kt` (L183, L190)
+- **修复提交**: 5f31a7d（已将 ProxyAuthSession.authToken 改为 CharArray）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/AuthSessionStore.kt` (L183, L190, L203-L206)
 - **问题描述**: `loadSession()` 将 `CharArray` 转为 `String` 返回，且 `ProxyAuthSession.authToken` 类型也是 `String`。`CharArray` 可清零的安全设计被完全绕过，敏感 token 以不可变 String 形式存在于内存
+- **交叉审查发现问题**: 提交 5f31a7d 确实将 `ProxyAuthSession.authToken` 改为 `CharArray`，但当前 HEAD 代码中 `authToken` 已被回退为 `String` 类型（L205）。需调查回退原因
 - **风险**: 高。安全设计意图失效，token 无法被主动擦除
 - **修复难度**: 中。将 `ProxyAuthSession.authToken` 类型改为 `CharArray`，在业务层传递时保持 `CharArray` 形式
 

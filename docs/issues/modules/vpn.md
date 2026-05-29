@@ -41,20 +41,14 @@
 
 ### High 严重程度
 
-#### H12: activeConnections复合操作非原子
+#### H12: activeConnections复合操作非原子 [已修复]
+- **状态**: 已修复
+- **修复提交**: b2256ff
 - **位置**: VpnService.kt `forwardViaSocks5()`
 - **代码指纹**: VpnService/forwardViaSocks5/检查-获取-更新
 - **问题**: 虽然使用 `ConcurrentHashMap`，但"检查-获取-更新"模式不是原子的。`activeConnections[connectionKey]` 获取后，`existingSession?.pooledConnection?.isValid()` 检查与后续 `activeConnections[connectionKey]?.updateActivity()` 之间连接可能被其他线程清理
-- **竞态场景**:
-  ```
-  线程A (forwardViaSocks5)          线程B (cleanupStaleConnections)
-  -------------------------------   --------------------------------
-  val existing = activeConnections[key]
-                                    activeConnections.remove(key)
-                                    pool.returnConnection(conn)
-  existing.pooledConnection.isValid()  // 访问已关闭的连接！
-  ```
-- **修复建议**: 使用 `activeConnections.compute()` 保证原子性
+- **修复**: 使用 `computeIfPresent()` 原子检查并更新现有会话，使用 `putIfAbsent()` 避免覆盖其他线程刚创建的会话
+- **交叉审查结果**: 修复正确，消除了竞态条件。`computeIfPresent` 返回后会话仍可能被 `cleanupStaleConnections` 移除，但风险极低（`updateActivity` 在原子块内完成，刚更新的会话不会被判定超时）
 - **关联**: H5（连接池竞态）
 
 #### H14: processTcpReturn阻止0长度TCP控制包注入
