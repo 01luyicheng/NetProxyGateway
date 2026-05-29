@@ -458,8 +458,15 @@ class Socks5ConnectionPool(
             toRemove.forEach { conn ->
                 val destKey = "${conn.destinationIp}:${conn.destinationPort}"
                 availableConnections[destKey]?.remove(conn)
-                removeConnection(conn)
+                if (allConnections.remove(conn) != null) {
+                    totalConnections.decrementAndGet()
+                }
             }
+        }
+
+        // Close sockets outside the write lock to avoid blocking borrow/return operations.
+        toRemove.forEach { conn ->
+            conn.close()
         }
 
         if (toRemove.isNotEmpty()) {
