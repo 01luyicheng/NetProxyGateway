@@ -103,7 +103,6 @@ AGENTS.md是CLAUDE.md的符号链接。
 
 ### 关键缺陷（需立即修复）
 - **连接池竞态**: 连接池清理竞争条件（docs/ISSUES.md H5），read锁和write锁之间连接状态可能变化。
-- **Root检测**: 建议去除 参考 https://github.com/01luyicheng/NetProxyGateway/issues/9#issuecomment-4569803878
 
 ### 依赖与维护风险
 - **依赖风险**: `gorilla/websocket` 库已归档不再维护（docs/ISSUES.md N14），存在安全漏洞无法及时修复的风险。
