@@ -23,6 +23,7 @@ import com.netproxy.gateway.connection.NetworkStateManager
 import com.netproxy.gateway.connection.NetworkType
 import com.netproxy.gateway.i18n.AppLocale
 import com.netproxy.gateway.vpn.GatewayVpnService
+import com.netproxy.gateway.vpn.VpnState
 import com.netproxy.gateway.vpn.VpnStatus
 import com.netproxy.gateway.wifi.GatewayWifiManager
 import com.netproxy.gateway.wifi.WifiNetwork
@@ -225,8 +226,16 @@ class MainViewModel @Inject constructor(
     private fun observeVpnStatus() {
         viewModelScope.launch {
             GatewayVpnService.status.collect { status ->
+                val isEnabled = when (status.state) {
+                    VpnState.RUNNING -> true
+                    VpnState.STOPPED, VpnState.ERROR -> false
+                    VpnState.STARTING, VpnState.STOPPING -> _uiState.value.isVpnEnabled
+                }
                 _uiState.update {
-                    it.copy(vpnDetailedStatus = status)
+                    it.copy(
+                        vpnDetailedStatus = status,
+                        isVpnEnabled = isEnabled
+                    )
                 }
             }
         }
@@ -273,7 +282,6 @@ class MainViewModel @Inject constructor(
                 context.startActivity(prepareIntent)
                 _uiState.update {
                     it.copy(
-                        isVpnEnabled = false,
                         errorMessage = AppLocale.getString(context, R.string.error_vpn_permission_required)
                     )
                 }
@@ -284,18 +292,11 @@ class MainViewModel @Inject constructor(
                 action = "START"
             }
             context.startForegroundService(intent)
-            _uiState.update {
-                it.copy(
-                    isVpnEnabled = true,
-                    errorMessage = null
-                )
-            }
         } else {
             val intent = Intent(context, GatewayVpnService::class.java).apply {
                 action = "STOP"
             }
             context.startService(intent)
-            _uiState.update { it.copy(isVpnEnabled = false) }
         }
     }
 
