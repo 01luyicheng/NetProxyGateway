@@ -211,6 +211,8 @@ type TunnelManager struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
+	stopMu     sync.Mutex
+	stopped    bool
 }
 
 // NewTunnelManager creates a new tunnel manager.
@@ -228,9 +230,16 @@ func NewTunnelManager(config *Config) *TunnelManager {
 // Stop stops the tunnel manager, cancels in-flight notifications, and waits
 // for background goroutines to finish (with a 30-second timeout).
 func (m *TunnelManager) Stop() {
+	m.stopMu.Lock()
+	if m.stopped {
+		m.stopMu.Unlock()
+		return
+	}
+	m.stopped = true
 	if m.cancel != nil {
 		m.cancel()
 	}
+	m.stopMu.Unlock()
 
 	done := make(chan struct{})
 	go func() {
@@ -294,13 +303,14 @@ func (m *TunnelManager) Get(deviceID string) (*TunnelConn, bool) {
 
 // notifyDeviceStatus notifies the API of a device status change.
 func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string) {
-	select {
-	case <-m.ctx.Done():
+	m.stopMu.Lock()
+	if m.stopped {
+		m.stopMu.Unlock()
 		return
-	default:
 	}
-
 	m.wg.Add(1)
+	m.stopMu.Unlock()
+
 	go func() {
 		defer m.wg.Done()
 		payload := map[string]string{
@@ -407,6 +417,13 @@ func (m *TunnelManager) cleanupDeadTunnels() {
 			return
 		case <-ticker.C:
 		}
+
+		m.stopMu.Lock()
+		if m.stopped {
+			m.stopMu.Unlock()
+			return
+		}
+		m.stopMu.Unlock()
 
 		m.cleanupDeadTunnelsOnce()
 	}

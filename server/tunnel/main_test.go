@@ -787,3 +787,75 @@ func TestNewHTTPServerSetsMaxHeaderBytes(t *testing.T) {
 		t.Fatalf("expected MaxHeaderBytes=%d, got %d", maxHTTPHeaderBytes, server.MaxHeaderBytes)
 	}
 }
+
+func TestNotifyDeviceStatusNoRaceWithStop(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	manager := NewTunnelManager(&Config{APIEndpoint: server.URL})
+
+	manager.notifyDeviceStatus("device-123", "online", "")
+
+	time.Sleep(10 * time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		manager.Stop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop() should not block indefinitely")
+	}
+}
+
+func TestStopIsIdempotent(t *testing.T) {
+	manager := NewTunnelManager(&Config{})
+
+	manager.Stop()
+
+	done := make(chan struct{})
+	go func() {
+		manager.Stop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("second Stop() call should return immediately")
+	}
+}
+
+func TestNotifyDeviceStatusAfterStopIsIgnored(t *testing.T) {
+	var requests int
+	var mu sync.Mutex
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	manager := NewTunnelManager(&Config{APIEndpoint: server.URL})
+	manager.Stop()
+
+	manager.notifyDeviceStatus("device-123", "online", "")
+
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	got := requests
+	mu.Unlock()
+
+	if got != 0 {
+		t.Fatalf("expected no requests after Stop(), got %d", got)
+	}
+}
