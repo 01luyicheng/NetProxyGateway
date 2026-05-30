@@ -413,6 +413,8 @@ class MqttConnectionManager @Inject constructor(
                         if (mqttClient === createdClient) {
                             reconnectDelay = INITIAL_RECONNECT_DELAY
                             _diagnostics.update { it.copy(reconnectDelay = INITIAL_RECONNECT_DELAY) }
+                            _connectionState.value = MqttConnectionState.Connected
+                            _diagnostics.update { it.copy(lastHeartbeatTime = System.currentTimeMillis()) }
                             true
                         } else {
                             // mqttClient 已被其他线程替换，不设置状态
@@ -430,37 +432,10 @@ class MqttConnectionManager @Inject constructor(
                     return@launch
                 }
 
-                val shouldMarkConnected = synchronized(this@MqttConnectionManager) {
-                    shouldStayConnected &&
-                        generation == connectionGeneration.get() &&
-                        mqttClient === createdClient
-                }
-                if (!shouldMarkConnected) {
-                    synchronized(this@MqttConnectionManager) {
-                        if (mqttClient === createdClient) {
-                            mqttClient = null
-                        }
-                    }
-                    try {
-                        createdClient.disconnect()
-                    } catch (e: MqttException) {
-                        logger.error("Disconnect error", e)
-                    } finally {
-                        try {
-                            createdClient.close()
-                        } catch (e: Exception) {
-                            logger.error("Close error", e)
-                        }
-                    }
-                    return@launch
-                }
-
                 ensureActive()
                 if (!shouldStayConnected || generation != connectionGeneration.get()) {
                     return@launch
                 }
-                _connectionState.value = MqttConnectionState.Connected
-                _diagnostics.update { it.copy(lastHeartbeatTime = System.currentTimeMillis()) }
                 AppAuditLogStore.info("MQTT", "Connection established")
 
                 subscribe("device/$deviceId/control")

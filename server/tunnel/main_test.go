@@ -797,9 +797,14 @@ func TestNotifyDeviceStatusNoRaceWithStop(t *testing.T) {
 
 	manager := NewTunnelManager(&Config{APIEndpoint: server.URL})
 
-	manager.notifyDeviceStatus("device-123", "online", "")
+	// Use a channel to ensure goroutine has started before calling Stop.
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		manager.notifyDeviceStatus("device-123", "online", "")
+	}()
 
-	time.Sleep(10 * time.Millisecond)
+	<-started
 
 	done := make(chan struct{})
 	go func() {
