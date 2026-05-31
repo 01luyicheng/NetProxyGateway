@@ -588,8 +588,9 @@ class GatewayVpnService : AndroidVpnService() {
         while (_status.value.state == VpnState.RUNNING) {
             try {
                 var hadData = false
-                // 遍历所有活跃连接，检查是否有数据可读
-                activeConnections.forEach { (key, session) ->
+                // 创建快照避免遍历期间 map 修改导致视图不一致（P20 / C33）
+                val snapshot = activeConnections.entries.toList()
+                snapshot.forEach { (key, session) ->
                     if (session.protocol == PROTOCOL_TCP) {
                         hadData = processTcpReturn(session, key) || hadData
                     } else if (session.protocol == PROTOCOL_UDP) {
@@ -628,7 +629,7 @@ class GatewayVpnService : AndroidVpnService() {
 
     /**
      * 原子移除session并归还连接池（仅当session仍是当前值时）
-     * @return 是否成功移除
+     * @return true if the entry was present and removed, false otherwise
      */
     private fun removeSessionAndReturnConnection(sessionKey: String, session: ConnectionSession): Boolean {
         return activeConnections.computeIfPresent(sessionKey) { _, existing ->
@@ -636,7 +637,7 @@ class GatewayVpnService : AndroidVpnService() {
                 existing.pooledConnection?.let { socks5ConnectionPool?.returnConnection(it) }
                 null
             } else existing
-        } != null
+        } == null
     }
 
     /**
