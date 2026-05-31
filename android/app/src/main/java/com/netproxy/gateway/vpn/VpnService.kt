@@ -591,6 +591,9 @@ class GatewayVpnService : AndroidVpnService() {
                 // 创建快照避免遍历期间 map 修改导致视图不一致（P20 / C33）
                 val snapshot = activeConnections.entries.toList()
                 snapshot.forEach { (key, session) ->
+                    // C33: 快照后验证session仍是当前活跃值，避免竞态下操作已归还的socket
+                    val stillActive = activeConnections[key] === session
+                    if (!stillActive) return@forEach
                     if (session.protocol == PROTOCOL_TCP) {
                         hadData = processTcpReturn(session, key) || hadData
                     } else if (session.protocol == PROTOCOL_UDP) {
