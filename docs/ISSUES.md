@@ -439,7 +439,7 @@
 ### N34: MainViewModel VPN状态与真实服务状态可能不一致 [已修复]
 - **状态**: 已修复
 - **提交哈希**: 1f9acee
-- **修复提交**: a188bb6
+- **修复提交**: 2f89166
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (L129-L161)
 - **问题描述**: `startForegroundService()` 后立即设 `isVpnEnabled=true`，但服务启动可能失败（权限被拒、系统限制、OOM）。UI 显示 VPN 已开启但实际服务未运行，缺少通过 ServiceConnection 同步真实状态的机制
 - **风险**: 高。用户看到的状态与实际不符，可能导致安全/功能问题
