@@ -37,6 +37,7 @@ server/tunnel/tunnel
 node_modules/
 
 # Temporary files generated during development/review
+*.diff
 diff_output.txt
 diff_*.txt
 staged.txt

@@ -559,19 +559,23 @@ class GatewayVpnService : AndroidVpnService() {
         val now = System.currentTimeMillis()
         val pool = socks5ConnectionPool
 
-        activeConnections.entries.removeIf { entry ->
-            val session = entry.value
-            val isExpired = now - session.lastActivity > CONNECTION_TIMEOUT_MS
-            if (isExpired) {
-                try {
-                    // 归还连接到连接池，而不是直接关闭
-                    session.pooledConnection?.let { pool?.returnConnection(it) }
-                    logger.debug("Returned stale connection to pool: ${redactConnectionKey(entry.key)}")
-                } catch (e: Exception) {
-                    logger.warn("Failed to return stale connection to pool", e)
+        // 使用ConcurrentHashMap的computeIfPresent原子操作，避免与forwardViaSocks5的竞态
+        activeConnections.forEach { (key, session) ->
+            activeConnections.computeIfPresent(key) { _, existingSession ->
+                val isExpired = now - existingSession.lastActivity > CONNECTION_TIMEOUT_MS
+                if (isExpired) {
+                    try {
+                        // 原子块内归还连接到连接池，确保"检查-归还-移除"三步一致
+                        existingSession.pooledConnection?.let { pool?.returnConnection(it) }
+                        logger.debug("Returned stale connection to pool: ${redactConnectionKey(key)}")
+                    } catch (e: Exception) {
+                        logger.warn("Failed to return stale connection to pool", e)
+                    }
+                    null // 返回null以移除该entry
+                } else {
+                    existingSession // 未过期，保留
                 }
             }
-            isExpired
         }
     }
 
@@ -584,8 +588,12 @@ class GatewayVpnService : AndroidVpnService() {
         while (_status.value.state == VpnState.RUNNING) {
             try {
                 var hadData = false
-                // 遍历所有活跃连接，检查是否有数据可读
-                activeConnections.forEach { (key, session) ->
+                // 创建快照避免遍历期间 map 修改导致视图不一致（P20 / C33）
+                val snapshot = activeConnections.entries.toList()
+                snapshot.forEach { (key, session) ->
+                    // C33: 快照后验证session仍是当前活跃值，避免竞态下操作已归还的socket
+                    val stillActive = activeConnections[key] === session
+                    if (!stillActive) return@forEach
                     if (session.protocol == PROTOCOL_TCP) {
                         hadData = processTcpReturn(session, key) || hadData
                     } else if (session.protocol == PROTOCOL_UDP) {
@@ -623,20 +631,37 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     /**
+     * 原子移除session并归还连接池（仅当session仍是当前值时）
+     * @return true if the entry was present, matched, and removed; false otherwise
+     */
+    private fun removeSessionAndReturnConnection(sessionKey: String, session: ConnectionSession): Boolean {
+        var removed = false
+        activeConnections.computeIfPresent(sessionKey) { _, existing ->
+            if (existing === session) {
+                existing.pooledConnection?.let { socks5ConnectionPool?.returnConnection(it) }
+                removed = true
+                null
+            } else existing
+        }
+        return removed
+    }
+
+    /**
      * 处理TCP回包
      */
     private fun processTcpReturn(session: ConnectionSession, sessionKey: String): Boolean {
+        // C33: 验证session仍是当前活跃值，防止快照后session被并发移除/替换
+        if (activeConnections[sessionKey] !== session) return false
         val pooledConn = session.pooledConnection ?: return false
-        val socket = pooledConn.socket
-        if (socket.isClosed || !pooledConn.isValid()) {
-            // 连接无效，归还到连接池并移除会话
-            socks5ConnectionPool?.returnConnection(pooledConn)
-            activeConnections.remove(sessionKey)
+        if (!pooledConn.isValid()) {
+            // P12: isValid()已包含socket.isClosed检查，移除冗余条件
+            // 连接无效，原子移除并归还到连接池（仅当session仍是当前值时）
+            removeSessionAndReturnConnection(sessionKey, session)
             return false
         }
 
         try {
-            val input = socket.getInputStream()
+            val input = pooledConn.socket.getInputStream()
             val available = input.available()
             if (available > 0) {
                 val buffer = ByteArray(PACKET_BUFFER_SIZE)
@@ -647,15 +672,13 @@ class GatewayVpnService : AndroidVpnService() {
                     val packetLen = constructReturnPacket(buffer, session, read)
                     if (packetLen <= 0) {
                         logger.warn("Drop invalid TCP return packet for ${redactConnectionKey(sessionKey)}")
-                        socks5ConnectionPool?.returnConnection(pooledConn)
-                        activeConnections.remove(sessionKey)
+                        removeSessionAndReturnConnection(sessionKey, session)
                         return false
                     }
                     // 注入TUN
                     if (!injectPacket(buffer, packetLen)) {
                         logger.warn("Failed to inject TCP return packet for ${redactConnectionKey(sessionKey)}, closing session")
-                        socks5ConnectionPool?.returnConnection(pooledConn)
-                        activeConnections.remove(sessionKey)
+                        removeSessionAndReturnConnection(sessionKey, session)
                         return false
                     }
                     session.updateActivity()
@@ -665,9 +688,8 @@ class GatewayVpnService : AndroidVpnService() {
             return false
         } catch (e: Exception) {
             logger.warn("TCP return traffic error for ${redactConnectionKey(sessionKey)}: ${e.message}")
-            // 连接出错，归还到连接池并移除会话
-            socks5ConnectionPool?.returnConnection(pooledConn)
-            activeConnections.remove(sessionKey)
+            // P13: 原子移除并归还，仅当session仍是当前值时
+            removeSessionAndReturnConnection(sessionKey, session)
             return false
         }
     }

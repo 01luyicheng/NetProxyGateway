@@ -126,6 +126,8 @@ class Socks5ProxyHandler(
             return IpAddressUtils.isPrivateIpv4Rfc1918(host)
         }
 
+        // Reject domain names (SOCKS5 ATYP=0x03). The proxy is restricted to
+        // RFC1918 private IP addresses only; clients must resolve names externally.
         return false
     }
 

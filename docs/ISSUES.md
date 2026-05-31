@@ -439,7 +439,7 @@
 ### N34: MainViewModel VPN状态与真实服务状态可能不一致 [已修复]
 - **状态**: 已修复
 - **提交哈希**: 1f9acee
-- **修复提交**: a188bb6
+- **修复提交**: 2f89166
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (L129-L161)
 - **问题描述**: `startForegroundService()` 后立即设 `isVpnEnabled=true`，但服务启动可能失败（权限被拒、系统限制、OOM）。UI 显示 VPN 已开启但实际服务未运行，缺少通过 ServiceConnection 同步真实状态的机制
 - **风险**: 高。用户看到的状态与实际不符，可能导致安全/功能问题
@@ -739,7 +739,7 @@
 
 ### N82: server/tunnel Register/Unregister异步通知引入竞态条件
 - **状态**: 已修复
-- **提交哈希**: `37e470a`（引入问题）；`8aa69d0`（修复：添加 stopMu + stopped 标志）
+- **提交哈希**: `37e470a`（引入问题）；`f9a628d`（主要修复：添加 stopMu + stopped 标志）；`8aa69d0`（审查改进：添加注释、移除冗余检查）
 - **位置**: `server/tunnel/main.go` (`Register`, `Unregister`, `cleanupDeadTunnelsOnce`)
 - **问题描述**: 提交 `37e470a` 将 `m.notifyDeviceStatus(...)` 从同步调用改为 `go m.notifyDeviceStatus(...)` 异步调用。`notifyDeviceStatus` 内部调用 `m.wg.Add(1)`，存在 `wg.Add` 在 `Stop()` 的 `wg.Wait()` 之后执行的时序。**会导致 `panic: sync: WaitGroup is reused before previous Wait has returned`**。`go test -race -count=200` 可稳定复现 panic 和 data race。
 - **风险**: **高**。服务关闭时可能直接崩溃，测试高并发下几乎必现 panic。
@@ -766,8 +766,7 @@
 - **建议修复**: 在测试方法上方添加注释，明确说明这些测试验证的是"防御性设计场景：未来如果放宽isValidNetwork条件时的排序行为"。
 
 ### N85: ISSUES.md文档格式不一致
-- **状态**: 已修复
-- **提交哈希**: `9efb84e`
+- **状态**: 待修复
 - **位置**: `docs/ISSUES.md`, `docs/issues/INDEX.md`, `docs/issues/modules/vpn.md`
 - **问题描述**: 文档中存在多处格式和行号不一致：
   1. N2行数三处不一致：ISSUES.md写1178行、INDEX.md写1186行、vpn.md写1054行（实际1186行）
