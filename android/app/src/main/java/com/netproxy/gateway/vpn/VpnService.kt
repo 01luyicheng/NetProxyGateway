@@ -634,8 +634,7 @@ class GatewayVpnService : AndroidVpnService() {
         val socket = pooledConn.socket
         if (socket.isClosed || !pooledConn.isValid()) {
             // 连接无效，归还到连接池并移除会话
-            socks5ConnectionPool?.returnConnection(pooledConn)
-            activeConnections.remove(sessionKey)
+            activeConnections.remove(sessionKey)?.pooledConnection?.let { socks5ConnectionPool?.returnConnection(it) }
             return false
         }
 
@@ -651,15 +650,13 @@ class GatewayVpnService : AndroidVpnService() {
                     val packetLen = constructReturnPacket(buffer, session, read)
                     if (packetLen <= 0) {
                         logger.warn("Drop invalid TCP return packet for ${redactConnectionKey(sessionKey)}")
-                        socks5ConnectionPool?.returnConnection(pooledConn)
-                        activeConnections.remove(sessionKey)
+                        activeConnections.remove(sessionKey)?.pooledConnection?.let { socks5ConnectionPool?.returnConnection(it) }
                         return false
                     }
                     // 注入TUN
                     if (!injectPacket(buffer, packetLen)) {
                         logger.warn("Failed to inject TCP return packet for ${redactConnectionKey(sessionKey)}, closing session")
-                        socks5ConnectionPool?.returnConnection(pooledConn)
-                        activeConnections.remove(sessionKey)
+                        activeConnections.remove(sessionKey)?.pooledConnection?.let { socks5ConnectionPool?.returnConnection(it) }
                         return false
                     }
                     session.updateActivity()
@@ -670,8 +667,7 @@ class GatewayVpnService : AndroidVpnService() {
         } catch (e: Exception) {
             logger.warn("TCP return traffic error for ${redactConnectionKey(sessionKey)}: ${e.message}")
             // 连接出错，归还到连接池并移除会话
-            socks5ConnectionPool?.returnConnection(pooledConn)
-            activeConnections.remove(sessionKey)
+            activeConnections.remove(sessionKey)?.pooledConnection?.let { socks5ConnectionPool?.returnConnection(it) }
             return false
         }
     }
