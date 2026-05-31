@@ -766,8 +766,7 @@
 - **建议修复**: 在测试方法上方添加注释，明确说明这些测试验证的是"防御性设计场景：未来如果放宽isValidNetwork条件时的排序行为"。
 
 ### N85: ISSUES.md文档格式不一致
-- **状态**: 已修复
-- **提交哈希**: `9efb84e`
+- **状态**: 待修复
 - **位置**: `docs/ISSUES.md`, `docs/issues/INDEX.md`, `docs/issues/modules/vpn.md`
 - **问题描述**: 文档中存在多处格式和行号不一致：
   1. N2行数三处不一致：ISSUES.md写1178行、INDEX.md写1186行、vpn.md写1054行（实际1186行）
