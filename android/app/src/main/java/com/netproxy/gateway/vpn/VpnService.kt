@@ -650,6 +650,8 @@ class GatewayVpnService : AndroidVpnService() {
      * 处理TCP回包
      */
     private fun processTcpReturn(session: ConnectionSession, sessionKey: String): Boolean {
+        // C33: 验证session仍是当前活跃值，防止快照后session被并发移除/替换
+        if (activeConnections[sessionKey] !== session) return false
         val pooledConn = session.pooledConnection ?: return false
         if (!pooledConn.isValid()) {
             // P12: isValid()已包含socket.isClosed检查，移除冗余条件
