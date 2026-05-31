@@ -627,22 +627,27 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     /**
+     * 原子移除session并归还连接池（仅当session仍是当前值时）
+     * @return 是否成功移除
+     */
+    private fun removeSessionAndReturnConnection(sessionKey: String, session: ConnectionSession): Boolean {
+        return activeConnections.computeIfPresent(sessionKey) { _, existing ->
+            if (existing === session) {
+                existing.pooledConnection?.let { socks5ConnectionPool?.returnConnection(it) }
+                null
+            } else existing
+        } != null
+    }
+
+    /**
      * 处理TCP回包
      */
     private fun processTcpReturn(session: ConnectionSession, sessionKey: String): Boolean {
-        // P11: 验证传入的session仍是map中的当前值，防止操作孤儿连接
-        if (activeConnections[sessionKey] !== session) return false
-
         val pooledConn = session.pooledConnection ?: return false
         if (!pooledConn.isValid()) {
             // P12: isValid()已包含socket.isClosed检查，移除冗余条件
             // 连接无效，原子移除并归还到连接池（仅当session仍是当前值时）
-            activeConnections.computeIfPresent(sessionKey) { _, existing ->
-                if (existing === session) {
-                    existing.pooledConnection?.let { socks5ConnectionPool?.returnConnection(it) }
-                    null
-                } else existing
-            }
+            removeSessionAndReturnConnection(sessionKey, session)
             return false
         }
 
@@ -658,23 +663,13 @@ class GatewayVpnService : AndroidVpnService() {
                     val packetLen = constructReturnPacket(buffer, session, read)
                     if (packetLen <= 0) {
                         logger.warn("Drop invalid TCP return packet for ${redactConnectionKey(sessionKey)}")
-                        activeConnections.computeIfPresent(sessionKey) { _, existing ->
-                            if (existing === session) {
-                                existing.pooledConnection?.let { socks5ConnectionPool?.returnConnection(it) }
-                                null
-                            } else existing
-                        }
+                        removeSessionAndReturnConnection(sessionKey, session)
                         return false
                     }
                     // 注入TUN
                     if (!injectPacket(buffer, packetLen)) {
                         logger.warn("Failed to inject TCP return packet for ${redactConnectionKey(sessionKey)}, closing session")
-                        activeConnections.computeIfPresent(sessionKey) { _, existing ->
-                            if (existing === session) {
-                                existing.pooledConnection?.let { socks5ConnectionPool?.returnConnection(it) }
-                                null
-                            } else existing
-                        }
+                        removeSessionAndReturnConnection(sessionKey, session)
                         return false
                     }
                     session.updateActivity()
@@ -685,12 +680,7 @@ class GatewayVpnService : AndroidVpnService() {
         } catch (e: Exception) {
             logger.warn("TCP return traffic error for ${redactConnectionKey(sessionKey)}: ${e.message}")
             // P13: 原子移除并归还，仅当session仍是当前值时
-            activeConnections.computeIfPresent(sessionKey) { _, existing ->
-                if (existing === session) {
-                    existing.pooledConnection?.let { socks5ConnectionPool?.returnConnection(it) }
-                    null
-                } else existing
-            }
+            removeSessionAndReturnConnection(sessionKey, session)
             return false
         }
     }
