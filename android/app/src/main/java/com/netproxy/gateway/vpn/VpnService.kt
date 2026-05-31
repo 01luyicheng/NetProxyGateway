@@ -559,19 +559,23 @@ class GatewayVpnService : AndroidVpnService() {
         val now = System.currentTimeMillis()
         val pool = socks5ConnectionPool
 
-        activeConnections.entries.removeIf { entry ->
-            val session = entry.value
-            val isExpired = now - session.lastActivity > CONNECTION_TIMEOUT_MS
-            if (isExpired) {
-                try {
-                    // 归还连接到连接池，而不是直接关闭
-                    session.pooledConnection?.let { pool?.returnConnection(it) }
-                    logger.debug("Returned stale connection to pool: ${redactConnectionKey(entry.key)}")
-                } catch (e: Exception) {
-                    logger.warn("Failed to return stale connection to pool", e)
+        // 使用ConcurrentHashMap的computeIfPresent原子操作，避免与forwardViaSocks5的竞态
+        activeConnections.forEach { (key, session) ->
+            activeConnections.computeIfPresent(key) { _, existingSession ->
+                val isExpired = now - existingSession.lastActivity > CONNECTION_TIMEOUT_MS
+                if (isExpired) {
+                    try {
+                        // 原子块内归还连接到连接池，确保"检查-归还-移除"三步一致
+                        existingSession.pooledConnection?.let { pool?.returnConnection(it) }
+                        logger.debug("Returned stale connection to pool: ${redactConnectionKey(key)}")
+                    } catch (e: Exception) {
+                        logger.warn("Failed to return stale connection to pool", e)
+                    }
+                    null // 返回null以移除该entry
+                } else {
+                    existingSession // 未过期，保留
                 }
             }
-            isExpired
         }
     }
 
