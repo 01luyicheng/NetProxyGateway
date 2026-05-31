@@ -629,15 +629,18 @@ class GatewayVpnService : AndroidVpnService() {
 
     /**
      * 原子移除session并归还连接池（仅当session仍是当前值时）
-     * @return true if the entry was present and removed, false otherwise
+     * @return true if the entry was present, matched, and removed; false otherwise
      */
     private fun removeSessionAndReturnConnection(sessionKey: String, session: ConnectionSession): Boolean {
-        return activeConnections.computeIfPresent(sessionKey) { _, existing ->
+        var removed = false
+        activeConnections.computeIfPresent(sessionKey) { _, existing ->
             if (existing === session) {
                 existing.pooledConnection?.let { socks5ConnectionPool?.returnConnection(it) }
+                removed = true
                 null
             } else existing
-        } == null
+        }
+        return removed
     }
 
     /**
