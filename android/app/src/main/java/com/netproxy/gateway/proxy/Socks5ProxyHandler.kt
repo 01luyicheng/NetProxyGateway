@@ -126,7 +126,9 @@ class Socks5ProxyHandler(
             return IpAddressUtils.isPrivateIpv4Rfc1918(host)
         }
 
-        return false
+        // Allow domain names (SOCKS5 ATYP=0x03). The upstream connector will
+        // resolve them via Netty at connection time.
+        return true
     }
 
     private fun isPrivateIpv6Address(ip: String): Boolean {
