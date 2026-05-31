@@ -360,9 +360,14 @@ class MqttConnectionManager @Inject constructor(
                             "MQTT",
                             buildConnectionLostAuditMessage(cause)
                         )
-                        _connectionState.value = MqttConnectionState.Error(cause?.message ?: "Connection lost")
-                        if (shouldStayConnected) {
-                            scheduleReconnect(deviceId, authToken, generation)
+                        synchronized(this@MqttConnectionManager) {
+                            if (!shouldStayConnected || generation != connectionGeneration.get()) {
+                                return@synchronized
+                            }
+                            _connectionState.value = MqttConnectionState.Error(cause?.message ?: "Connection lost")
+                            if (shouldStayConnected) {
+                                scheduleReconnect(deviceId, authToken, generation)
+                            }
                         }
                     }
 
