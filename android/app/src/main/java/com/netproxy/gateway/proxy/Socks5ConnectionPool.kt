@@ -159,15 +159,18 @@ class Socks5ConnectionPool(
 
         // 在读锁外清理无效连接，避免在读锁内获取写锁
         if (invalidConnections.isNotEmpty()) {
+            val toClose = mutableListOf<PooledSocks5Connection>()
             poolLock.write {
                 invalidConnections.forEach { conn ->
                     // Re-check in use state under write lock to avoid racing with a concurrent borrow.
                     if (!conn.inUse.get() && !conn.isValid() && allConnections.remove(conn) != null) {
                         totalConnections.decrementAndGet()
-                        conn.close()
+                        toClose.add(conn)
                     }
                 }
             }
+            // Close sockets outside the write lock to avoid blocking borrow/return operations.
+            toClose.forEach { it.close() }
         }
 
         if (connection != null) {
@@ -188,21 +191,23 @@ class Socks5ConnectionPool(
         }
 
         val destKey = "${connection.destinationIp}:${connection.destinationPort}"
+        var toClose: PooledSocks5Connection? = null
 
         poolLock.write {
             if (isShutdown.get()) {
-                connection.close()
+                toClose = connection
                 return@write
             }
 
             // Connection might have been concurrently cleaned up before returning.
             if (!allConnections.containsKey(connection)) {
-                connection.close()
+                toClose = connection
                 return@write
             }
 
             if (!connection.isValid()) {
                 removeConnection(connection)
+                toClose = connection
                 return@write
             }
 
@@ -221,10 +226,14 @@ class Socks5ConnectionPool(
             if (currentCount >= config.maxConnectionsPerDestination) {
                 // 超过限制，关闭此连接
                 removeConnection(connection)
+                toClose = connection
             } else {
                 queue.offer(connection)
             }
         }
+
+        // Close socket outside the write lock to avoid blocking borrow/return operations.
+        toClose?.close()
     }
 
     /**
@@ -431,13 +440,13 @@ class Socks5ConnectionPool(
     }
 
     /**
-     * 从连接池中移除连接
+     * 从连接池中移除连接（仅移除跟踪，不关闭socket）
+     * 调用者必须在写锁外调用 connection.close() 以避免阻塞其他操作
      */
     private fun removeConnection(connection: PooledSocks5Connection) {
         if (allConnections.remove(connection) != null) {
             totalConnections.decrementAndGet()
         }
-        connection.close()
     }
 
     /**

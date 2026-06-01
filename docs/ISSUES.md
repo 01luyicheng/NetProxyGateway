@@ -412,7 +412,7 @@
 - **问题描述**: `removeConnection(conn)` 在 `write` 锁内被调用，内部执行 `connection.close()` 阻塞IO操作。在高并发或网络异常时，长时间持有 `write` 锁会阻塞所有 `borrowConnection` 和 `returnConnection` 操作
 - **风险**: 高。严重影响连接池并发性能，可能导致连接获取超时
 - **修复**: 将 `cleanupIdleConnections()` 中的 `removeConnection(conn)` 拆分为锁内集合移除 + 锁外 `conn.close()`，消除write锁内的阻塞IO
-- **交叉审查结果**: 修复正确。但发现 `returnConnection()` 方法（L205, L223）仍在write锁内调用 `removeConnection()`，存在相同问题，建议后续修复
+- **残余修复**: `returnConnection()` 和 `borrowConnection()` 中仍存在的锁内 close 已修复：`removeConnection()` 改为仅做跟踪移除，调用者在锁外关闭；`returnConnection()` 使用 `toClose` 收集需关闭的连接；`borrowConnection()` 无效连接清理使用 `toClose` 列表锁外关闭
 
 
 
@@ -725,16 +725,13 @@
 
 > 以下问题由对近10次提交的代码审查记录；**本轮不修复**，留待后续处理。
 
-### N81: Kotlin文件CRLF换行符未实际转换为LF
-- **状态**: 待修复
+### N81: Kotlin文件CRLF换行符未实际转换为LF [已修复]
+- **状态**: 已修复
 - **提交哈希**: `41890f9`（声称修复但未生效）
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/**/*.kt`
 - **问题描述**: 提交 `41890f9` 声称将CRLF转为LF，但diff中完全没有换行符变更。根本原因是仓库缺少 `.gitattributes` 配置，Windows环境下`core.autocrlf=true`持续将工作区文件转回CRLF。当前全部32+个Kotlin源文件仍使用CRLF换行符。
 - **风险**: **中**。跨平台协作时换行符不一致导致diff噪音、review困难、潜在脚本执行问题。
-- **建议修复**:
-  1. 创建 `.gitattributes` 添加 `*.kt text eol=lf` 和 `*.kts text eol=lf`
-  2. 执行 `git add --renormalize .` 统一换行符
-  3. 重新提交
+- **修复**: 添加 `.gitattributes` 文件，指定 `*.kt text eol=lf`、`*.kts text eol=lf` 等源文件强制使用LF换行符
 - **关联问题**: STYLE_GUIDE.md 换行规范
 
 ### N82: server/tunnel Register/Unregister异步通知引入竞态条件
@@ -746,8 +743,8 @@
 - **修复**: 已在 `notifyDeviceStatus` 入口处添加 `m.ctx.Done()` 检查，`Stop()` 后不再执行 `wg.Add(1)`，彻底消除竞态。
 - **关联问题**: L10（Tunnel服务设备状态通知无重试，已修复）
 
-### N83: server/tunnel关键并发安全注释被移除
-- **状态**: 待修复
+### N83: server/tunnel关键并发安全注释被移除 [已修复]
+- **状态**: 已修复
 - **提交哈希**: `37e470a`
 - **位置**: `server/tunnel/main.go`
 - **问题描述**: 提交 `37e470a` 在"注释国际化"过程中移除了约27处中文注释，其中包括3处关键的并发安全设计注释：
@@ -755,7 +752,7 @@
   2. `Run` 中关于 `wg.Add(1)` 必须在goroutine外的原因说明（避免与`Stop`竞态）
   3. `cleanupDeadTunnelsOnce` 中关于 `current == tunnel` 实例匹配检查的说明
 - **风险**: **中**。代码当前功能正常，但未来重构时极易误删关键并发防护逻辑，引入竞态bug。
-- **建议修复**: 恢复上述3处注释（翻译为英文），明确记录并发安全设计决策。
+- **修复**: 恢复了3处关键并发安全注释（翻译为英文），同时补充了 `Unregister` 方法中同类身份检查的注释
 
 ### N84: NetworkStateManager防御性测试未标注"未来场景"
 - **状态**: 待修复
