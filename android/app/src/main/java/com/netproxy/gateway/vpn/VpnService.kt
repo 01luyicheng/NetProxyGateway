@@ -90,6 +90,11 @@ class GatewayVpnService : AndroidVpnService() {
         private val _status = MutableStateFlow(VpnStatus())
         val status: StateFlow<VpnStatus> = _status.asStateFlow()
 
+        /**
+         * 将 VPN 状态重置为默认初始值。
+         *
+         * 将内部状态流 `_status` 的值设置为新的默认 `VpnStatus` 实例。
+         */
         fun resetStatus() {
             _status.value = VpnStatus()
         }
@@ -133,6 +138,11 @@ class GatewayVpnService : AndroidVpnService() {
         )
     }
 
+    /**
+     * 将传入的基础 Context 包装为 AppLocale 后传递给父类以应用语言/区域设置封装。
+     *
+     * @param newBase 要包装的原始 Context。
+     */
     override fun attachBaseContext(newBase: Context) {
         super.attachBaseContext(AppLocale.wrap(newBase))
     }
@@ -173,6 +183,9 @@ class GatewayVpnService : AndroidVpnService() {
     // 原子标志，防止 cleanupVpnResources() 重复执行
     private val isCleaningUp = AtomicBoolean(false)
 
+    /**
+     * 初始化服务：创建通知渠道、构建用于 IO 的协程作用域并重置 VPN 状态，同时（防御性地）重新注册语言变更监听器以确保运行时通知能随语言变更刷新。
+     */
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
@@ -188,6 +201,16 @@ class GatewayVpnService : AndroidVpnService() {
         registerLanguageChangeListener()
     }
 
+    /**
+     * 处理启动服务的 Intent 并根据 action 控制 VPN 生命周期。
+     *
+     * 识别的 intent.action:
+     * - `"START"`：启动 VPN。
+     * - `"STOP"`：停止 VPN。
+     *
+     * @param intent 可能包含 `"START"` 或 `"STOP"` 的启动命令；为 null 时不执行任何操作。
+     * @return `START_STICKY`，表示当系统终止服务后会尝试重建服务并重传最后一个 Intent。
+     */
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             "START" -> startVpn()
@@ -196,6 +219,13 @@ class GatewayVpnService : AndroidVpnService() {
         return START_STICKY
     }
 
+    /**
+     * 启动并配置 VPN 服务，建立 TUN 接口、初始化代理连接池并启动数据转发与回包处理协程。
+     *
+     * 在启动过程中会将服务置于前台并把状态先设置为 STARTING；解析并应用 DNS 配置后尝试建立 TUN（VPN 接口），
+     * 成功时初始化 SOCKS5 连接池、创建用于回包注入的输出流、将状态置为 RUNNING，并启动处理 TUN 输入与代理回包的协程与代理前台服务；
+     * 若建立失败或发生异常，则将状态设置为 ERROR 并包含错误信息。
+     */
     private fun startVpn() {
         if (_status.value.state == VpnState.RUNNING) {
             return
@@ -276,6 +306,12 @@ class GatewayVpnService : AndroidVpnService() {
         }
     }
 
+    /**
+     * 从已建立的 TUN 接口循环读取数据包并交由处理逻辑分发，直至 VPN 状态不再为 RUNNING。
+     *
+     * 在循环中每次读取到有效数据包时会调用 processPacket(...) 进行路由与转发并触发过期会话清理。若在运行期间发生未捕获的异常，
+     * 会将服务状态设置为 `VpnState.ERROR` 并记录异常信息。
+     */
     private suspend fun processVpnTraffic() {
         val vpnFd = vpnInterface ?: return
 
@@ -300,6 +336,18 @@ class GatewayVpnService : AndroidVpnService() {
         }
     }
 
+    /**
+     * 根据包内的目标 IP、协议与端口信息，将单个从 TUN 读取到的 IP 数据报分流到对应的转发路径。
+     *
+     * 可能的分流结果：
+     * - 内网流量（LOCAL_NETWORK）：绕过 VPN 并通过系统路由直接发送；
+     * - DNS（DNS）：绕过 VPN 使用内网 DNS 解析并发送；
+     * - 云服务器（CLOUD_SERVER）：在软件层面忽略（由系统或硬件分流处理）；
+     * - 代理（PROXY）：通过本地 SOCKS5 代理转发到外网。
+     *
+     * @param packet 包含完整 IP 数据报的字节数组（至少包含 IP 头和必要的传输层头部）。
+     * @param length packet 中有效数据的字节长度。
+     */
     private fun processPacket(packet: ByteArray, length: Int) {
         if (length <= 0) return
 
@@ -333,7 +381,11 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     /**
-     * 解析 IP 包中的目标 IP 地址
+     * 从 IPv4 包中提取目的 IPv4 地址的点分十进制字符串。
+     *
+     * @param packet 包字节数组（预计为完整或部分 IP 数据包）。
+     * @param length packet 中有效字节长度。
+     * @return `null` 如果包无效、不是 IPv4 或长度不足；否则返回目的 IPv4 地址（例如 "192.0.2.1"）。
      */
     private fun parseDestinationIp(packet: ByteArray, length: Int): String? {
         if (length < 20) return null
@@ -352,8 +404,12 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     /**
-     * 判断流量类型
-     */
+     * 确定给定目标地址和传输信息应使用的路由类型。
+     *
+     * @param destinationIp 目标 IPv4 地址的点分十进制字符串。
+     * @param protocol IP 层的协议号（例如 TCP=6、UDP=17）。
+     * @param destinationPort 目标传输层端口；如果不可用则为 null。
+     * @return `RouteType.DNS` 表示应走本地 DNS（Wi‑Fi）；`RouteType.LOCAL_NETWORK` 表示目标为内网地址并应直连；`RouteType.PROXY` 表示应走代理转发。 */
     private fun determineRouteType(destinationIp: String, protocol: Int, destinationPort: Int?): RouteType {
         // DNS 分流必须同时满足：DNS IP + TCP/UDP + 53端口
         if (destinationPort != null && VpnDnsConfig.shouldRouteDnsViaWifi(
@@ -376,6 +432,13 @@ class GatewayVpnService : AndroidVpnService() {
         return RouteType.PROXY
     }
 
+    /**
+     * 解析并返回用于 VPN 的 DNS 服务器列表。
+     *
+     * 从应用配置中读取用户指定的 DNS 列表（如存在），否则使用内置默认列表，并返回最终用于 VPN 的 DNS 服务器地址字符串列表。
+     *
+     * @return 用于 VPN 的 DNS 服务器地址列表（字符串形式），优先使用用户配置，若无配置则返回默认服务器列表。
+     */
     private fun resolveDnsServers(): List<String> {
         val prefs = getSharedPreferences(GATEWAY_CONFIG_PREFS, Context.MODE_PRIVATE)
         val configuredDns = prefs.getString(DNS_SERVERS_PREF_KEY, null)
@@ -411,16 +474,27 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     /**
-     * 判断是否是私有 IP 地址
+     * 检查给定 IPv4 地址是否属于 RFC1918 定义的私有地址范围。
+     *
+     * @param ip 要检查的点分十进制 IPv4 字符串（例如 "192.168.0.1"）。
+     * @return `true` 如果该地址是 RFC1918 私有 IPv4 地址，`false` 否则。
      */
     private fun isPrivateIp(ip: String): Boolean {
         return IpAddressUtils.isPrivateIpv4Rfc1918(ip)
     }
 
     /**
-     * 直连内网流量（当前实现通过 protect() 让 socket 绕过 VPN 隧道）
-     * 注意：protect() 只保证不走 VPN，不保证一定走 WiFi。
-     * 在多网络并存或厂商网络加速场景下，系统可能将流量路由到其他网卡。
+     * 将传入的 IPv4 TCP/UDP 数据包的传输层负载通过本地网络直连发送，尝试绕过 VPN 隧道。
+     *
+     * 详细行为：
+     * - 仅对 TCP 与 UDP 生效；其它协议将被忽略。
+     * - 使用系统的 protect(...) 使创建的 Socket 不走 VPN，但不保证流量一定走 WiFi（在多网络或厂商加速场景下路由可能仍被系统调整）。
+     * - 对 UDP 使用 DatagramSocket，按单次数据包发送；对 TCP 建立到目标的短连接并发送负载（连接超时约 3000ms）。
+     * - 任何异常会被记录并吞掉，不会抛出。
+     *
+     * @param packet 包含完整 IPv4 包的字节数组（用于解析传输层负载与端口）。
+     * @param length packet 中有效字节长度。
+     * @param destinationIp 目标 IPv4 地址的点分十进制字符串。
      */
     private fun forwardViaWifi(packet: ByteArray, length: Int, destinationIp: String) {
         try {
@@ -456,7 +530,15 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     /**
-     * 通过本地 SOCKS5 代理转发（使用连接池复用SOCKS5连接）
+     * 将来自 TUN 的单个 IPv4 传输数据包通过本地 SOCKS5 代理转发并在连接池中复用或创建会话。
+     *
+     * 根据包内源/目的 IP 与端口以及协议构建会话键，在存在有效会话时复用其池中连接，
+     * 否则从连接池借出连接、分配虚拟源 IP 并尝试建立新的会话；然后将传输层负载写入 SOCKS5 连接的输出流。
+     * 在连接池不可用或发生错误时会记录警告并在可能的情况下将连接归还到池中。
+     *
+     * @param packet 包含完整 IPv4 报文的字节数组（IP 头 + 传输层头 + 负载）。
+     * @param length packet 中有效字节长度。
+     * @param destinationIp 目标 IPv4 地址的点分十进制字符串（用于向 SOCKS5 请求目标地址）。
      */
     private fun forwardViaSocks5(packet: ByteArray, length: Int, destinationIp: String) {
         val destinationPort = parseDestinationPort(packet, length) ?: return
@@ -534,7 +616,13 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     /**
-     * 解析源IP地址
+     * 从 IPv4 报文中提取源地址并以点分十进制字符串返回。
+     *
+     * 仅在输入包含完整 IPv4 首部且版本字段为 4 时返回地址；否则返回 `null`。
+     *
+     * @param packet 包含 IP 报文的数据缓冲区（整个报文或当前可用片段）。
+     * @param length 缓冲区中有效数据的字节长度，用于边界检查。
+     * @return 源 IPv4 地址，格式为 `a.b.c.d`；如果报文不是 IPv4 或长度不足（小于 20 字节）则返回 `null`。
      */
     private fun parseSourceIp(packet: ByteArray, length: Int): String? {
         if (length < 20) return null
@@ -545,7 +633,11 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     /**
-     * 解析源端口
+     * 从 IPv4 数据包中解析出传输层的源端口。
+     *
+     * @param packet 包含完整或部分 IPv4 报文的字节数组（以网络字节序存放）。
+     * @param length 数组中有效数据长度（报文总长），用于边界检查。
+     * @return 源端口号（0 到 65535），无法解析或长度不足时返回 `null`。
      */
     private fun parseSourcePort(packet: ByteArray, length: Int): Int? {
         if (length < 20) return null
@@ -555,6 +647,11 @@ class GatewayVpnService : AndroidVpnService() {
         return ((packet[headerLength].toInt() and 0xFF) shl 8) or (packet[headerLength + 1].toInt() and 0xFF)
     }
 
+    /**
+     * 扫描并清理超时的会话：对已超过 CONNECTION_TIMEOUT_MS 未活动的会话，将其连接归还到连接池并从 activeConnections 中移除。
+     *
+     * 操作对每个会话以原子方式检查并移除，确保“检查-归还-移除”在并发环境下的一致性。
+     */
     private fun cleanupStaleConnections() {
         val now = System.currentTimeMillis()
         val pool = socks5ConnectionPool
@@ -580,8 +677,10 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     /**
-     * 处理回包（从远程服务器读取响应并注入TUN）
-     * 使用平滑指数退避算法减少空闲时的CPU轮询
+     * 处理远端返回流量并将收到的数据包注入到 TUN 接口。
+     *
+     * 轮询处于活动状态的会话快照，分别处理 TCP 和 UDP 的回包（仅 TCP 实际注入），
+     * 在无数据时采用平滑的指数退避以减少空闲期间的 CPU 轮询；在运行状态发生异常时记录错误日志。
      */
     private suspend fun processReturnTraffic() {
         var idleRounds = 0
@@ -616,11 +715,12 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     /**
-     * 计算空闲退避延迟
-     * 使用平滑指数退避算法：
-     * - 有数据时：1ms（最小延迟，快速响应）
-     * - 空闲时：指数增长，最大100ms
-     * 公式：delay = min(base * 2^rounds, maxDelay)
+     * 计算基于连续空闲轮次的退避延迟。
+     *
+     * 使用平滑的指数退避：当有数据（idleRounds 为 0）时返回 1ms，空闲时按 base*2^(idleRounds-1) 增长并上限为 MAX_RETURN_TRAFFIC_IDLE_DELAY_MS。
+     *
+     * @param idleRounds 连续未收到数据的轮次数（0 表示本轮有数据）。
+     * @return 退避延迟，单位为毫秒；当 `idleRounds == 0` 返回 `1`，否则返回计算后的延迟值并保证不超过 `MAX_RETURN_TRAFFIC_IDLE_DELAY_MS`。
      */
     private fun calculateIdleDelay(idleRounds: Int): Long {
         if (idleRounds == 0) return 1L
@@ -631,8 +731,9 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     /**
-     * 原子移除session并归还连接池（仅当session仍是当前值时）
-     * @return true if the entry was present, matched, and removed; false otherwise
+     * 原子地移除指定会话并（如有）将其连接归还到 SOCKS5 连接池。
+     *
+     * @return `true` 如果映射中存在与提供的 `session` 相同的会话且已被移除并归还连接，`false` 否则。
      */
     private fun removeSessionAndReturnConnection(sessionKey: String, session: ConnectionSession): Boolean {
         var removed = false
@@ -647,7 +748,13 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     /**
-     * 处理TCP回包
+     * 处理并注入来自 SOCKS5 连接的 TCP 回包到 TUN。
+     *
+     * 从指定会话的已池化连接读取可用字节，构造 IPv4+TCP 的回包并写入到 TUN 输出流。若会话不再是当前映射值、连接不可用、构造包失败或注入失败，函数会原子地从 activeConnections 移除该会话并尝试将连接归还到连接池。
+     *
+     * @param session 会话对象，包含 pooledConnection、虚拟源 IP、源/目的端口及活动时间等信息。
+     * @param sessionKey 用于在 activeConnections 中验证当前会话实例并在必要时移除该会话的键。
+     * @return `true` 如果成功读取数据并成功构造且注入回包，`false` 否则。
      */
     private fun processTcpReturn(session: ConnectionSession, sessionKey: String): Boolean {
         // C33: 验证session仍是当前活跃值，防止快照后session被并发移除/替换
@@ -695,7 +802,12 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     /**
-     * 处理UDP回包
+     * 处理来自 SOCKS5 会话的 UDP 返回数据并将其注入到 TUN，以支持从代理回包的转发（当前为简化实现，不进行实际转发）。
+     *
+     * 此函数保留用于将来实现：读取会话的 UDP 返回数据并构建/注入对应的回包到虚拟网卡。当前实现为空操作，UDP 的正常转发在 forwardViaWifi 中处理。
+     *
+     * @param session 活动的连接会话，包含用于读写的 pooledConnection、分配的虚拟源 IP、源/目的端口等会话元数据。
+     * @param sessionKey 标识该会话的键（格式为 "$srcIp:$srcPort-$dstIp:$dstPort"），用于在会话映射中验证或移除对应条目。
      */
     private fun processUdpReturn(session: ConnectionSession, sessionKey: String) {
         // UDP回包处理（类似TCP，但协议号不同）
@@ -704,8 +816,16 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     /**
-     * 构造回包（IP头 + TCP头 + payload）
-     * @return 完整包长度
+     * 在提供的缓冲区中构造一个完整的 IPv4 + TCP 回包，用于注入到 TUN 接口。
+     *
+     * 函数会将会话的虚拟源 IP 作为 IP 包的源地址、会话的原始源 IP 作为目标地址，填充固定长度的 IP 与 TCP 头并计算相应校验和，然后在头部之后保留 payloadLen 字节用于载荷。
+     *
+     * @param buffer 用于写入构造好包的目标缓冲区；必须至少能容纳 IP 头 + TCP 头 + payloadLen 字节。
+     * @param session 提供虚拟源 IP、原始源/目标端口及协议等信息的会话对象。
+     * @param payloadLen 要在包中保留的载荷长度（字节数）。
+     * @return 返回写入到缓冲区的完整包长度（IP 头 + TCP 头 + payloadLen），在以下情况返回 `0`：
+     * - payloadLen 小于 0 或超出缓冲区可用空间；
+     * - 解析会话中 IP 地址失败或其他校验不通过时。
      */
     private fun constructReturnPacket(buffer: ByteArray, session: ConnectionSession, payloadLen: Int): Int {
         val ipHeaderLen = IP_HEADER_LEN
@@ -786,6 +906,12 @@ class GatewayVpnService : AndroidVpnService() {
         return totalLen
     }
 
+    /**
+     * 将点分十进制的 IPv4 字符串解析为四个 0–255 范围内的整数组成的列表。
+     *
+     * @param ip 要解析的 IPv4 字符串（例如 "192.168.0.1"）。
+     * @return 包含四个 0–255 整数的 `List<Int>`，如果输入不是四段或任一段无法解析为 0–255 的整数则返回 `null`。
+     */
     private fun parseIpv4Parts(ip: String): List<Int>? {
         val parts = ip.split(".")
         if (parts.size != 4) {
@@ -801,7 +927,12 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     /**
-     * 计算IP校验和
+     * 计算并返回给定字节数组指定范围的一位反码（16 位）校验和，用于 IPv4 头或 TCP/UDP 伪首部校验。
+     *
+     * @param data 要计算的字节数组。
+     * @param offset 起始字节索引（包含）。
+     * @param length 要计算的字节长度。
+     * @return 取值范围为 0 到 0xFFFF 的 16 位校验和值。
      */
     private fun calculateChecksum(data: ByteArray, offset: Int, length: Int): Int {
         var sum = 0
@@ -820,7 +951,15 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     /**
-     * 计算TCP校验和（包含伪头）
+     * 计算并返回给定 TCP 报文（含伪头）的校验和。
+     *
+     * @param buffer 包含完整 IPv4 首部（20 字节）后接 TCP 首部与负载的字节数组。
+     * @param srcIp 源 IPv4 地址的 4 个字节表示（每项 0..255），按顺序 [b0, b1, b2, b3]。
+     * @param dstIp 目的 IPv4 地址的 4 个字节表示（每项 0..255），按顺序 [b0, b1, b2, b3]。
+     * @param protocol IP 协议号（例如 TCP 为 6）。
+     * @param tcpHeaderLen TCP 首部长度（字节数）。
+     * @param payloadLen TCP 负载长度（字节数）。
+     * @return 16 位的 TCP 校验和（0..65535）。
      */
     private fun calculateTcpChecksum(
         buffer: ByteArray,
@@ -856,7 +995,11 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     /**
-     * 注入包到TUN接口
+     * 将给定字节数组中的数据写入并注入到 TUN 接口的输出流。
+     *
+     * @param packet 要注入的字节数组（包含 IP/传输层报文）。
+     * @param length 要写入的字节数，从 `packet` 开始处计数。
+     * @return `true` 表示数据已成功写入并刷新到输出流，`false` 表示未写入（例如输出流不可用或发生错误）。
      */
     private fun injectPacket(packet: ByteArray, length: Int): Boolean {
         return try {
@@ -876,7 +1019,10 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     /**
-     * 获取或分配虚拟 IP
+     * 为指定的目标真实 IP 获取对应的虚拟 IP；若尚未分配则分配一个新的虚拟 IP。
+     *
+     * @param realDstIp 目标主机的真实 IPv4 地址（点分十进制表示）。
+     * @return 已分配或已存在的虚拟 IPv4 地址字符串。
      */
     private fun getOrAllocateVirtualIp(realDstIp: String): String {
         return virtualIpAllocator.getOrAllocateVirtualIp(
@@ -889,6 +1035,13 @@ class GatewayVpnService : AndroidVpnService() {
         )
     }
 
+    /**
+     * 在缺少身份验证会话时记录一次被节流的警告日志。
+     *
+     * 以 SESSION_MISSING_LOG_INTERVAL_MS 为间隔进行节流，超过该间隔才会记录新的警告。
+     *
+     * @param destinationIp 发生缺失会话的目标 IP（用于日志记录，会被部分脱敏）。 
+     */
     private fun logMissingSession(destinationIp: String) {
         val nowMs = System.currentTimeMillis()
         val lastMs = lastMissingSessionLogAt.get()
@@ -899,12 +1052,23 @@ class GatewayVpnService : AndroidVpnService() {
         }
     }
 
+    /**
+     * 在调试构建（BuildConfig.DEBUG 为 true）时记录一条调试级别日志。
+     *
+     * @param message 要记录的日志消息
+     */
     private fun logDebug(message: String) {
         if (BuildConfig.DEBUG) {
             logger.debug(message)
         }
     }
 
+    /**
+     * 读取 IPv4 包头中的协议字段并返回协议号。
+     *
+     * @param packet 包含 IPv4 报文（从 IPv4 首部起始处）的字节数组。
+     * @return IPv4 协议字段的数值（0 到 255）。
+     */
     private fun parseProtocol(packet: ByteArray): Int {
         return packet[9].toInt() and 0xFF
     }
@@ -917,8 +1081,13 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     /**
-     * 提取传输层payload，返回payload在packet中的起始位置和长度（避免创建新数组）
-     * @return Pair<起始位置, 长度>，如果无payload返回null
+     * 查找 IPv4 数据报中传输层有效负载在 packet 内的起始偏移和长度（不分配新数组）。
+     *
+     * 支持 TCP 与 UDP；当包无效、太短或没有有效负载时返回 null。
+     *
+     * @param packet 包含完整或部分 IP 数据报的字节数组
+     * @param length packet 中有效数据的字节数
+     * @return 起始偏移与长度的 Pair（offset, length），或在包无效/无负载时返回 `null`
      */
     private fun extractTransportPayloadInfo(packet: ByteArray, length: Int): Pair<Int, Int>? {
         if (length < 20) return null
@@ -937,6 +1106,15 @@ class GatewayVpnService : AndroidVpnService() {
         return Pair(payloadStart, length - payloadStart)
     }
 
+    /**
+     * 从 IPv4 包中提取传输层（TCP 或 UDP）的载荷并返回其字节副本。
+     *
+     * 已弃用：此方法会进行数组拷贝。请使用 `extractTransportPayloadInfo(packet, length)` 获取载荷的起始偏移与长度以避免拷贝。
+     *
+     * @param packet 包含完整 IPv4 数据包的字节数组。
+     * @param length packet 中有效数据的长度（通常为从 TUN 读取的字节数）。
+     * @return 若能解析出传输层载荷则返回该载荷的字节副本；否则返回空字节数组。
+     */
     @Deprecated("使用 extractTransportPayloadInfo 避免数组拷贝", ReplaceWith("extractTransportPayloadInfo(packet, length)"))
     private fun extractTransportPayload(packet: ByteArray, length: Int): ByteArray {
         val info = extractTransportPayloadInfo(packet, length)
@@ -971,6 +1149,11 @@ class GatewayVpnService : AndroidVpnService() {
         val createdAt: Long = System.currentTimeMillis(),
         var lastActivity: Long = System.currentTimeMillis()
     ) {
+        /**
+         * 更新会话的活动时间并标记其关联的池化连接为已使用。
+         *
+         * 将 `lastActivity` 设置为当前时间戳；如果 `pooledConnection` 不为空，则调用其 `markUsed()` 来刷新连接的使用状态。
+         */
         fun updateActivity() {
             lastActivity = System.currentTimeMillis()
             pooledConnection?.markUsed()
@@ -993,6 +1176,12 @@ class GatewayVpnService : AndroidVpnService() {
         startForegroundService(intent)
     }
 
+    /**
+     * 为 VPN 前台通知创建并注册通知渠道（在 Android O 及以上生效）。
+     *
+     * 通道使用低重要性（NotificationManager.IMPORTANCE_LOW），并采用本地化的名称与描述。
+     * 所用通道 ID 为 `NOTIFICATION_CHANNEL_ID`。
+     */
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
@@ -1008,6 +1197,13 @@ class GatewayVpnService : AndroidVpnService() {
         }
     }
 
+    /**
+     * 构建用于前台服务的通知，显示应用名称与 VPN 状态文本并在点击时打开主界面。
+     *
+     * 通知使用已定义的通知渠道 ID、不可变的 PendingIntent 指向 MainActivity，设置为 ongoing（不可滑动移除）。
+     *
+     * @return 已配置好的 Notification 实例，用于 startForeground()。
+     */
     private fun createNotification(): Notification {
         val intent = Intent(this, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(
@@ -1027,8 +1223,9 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     /**
-     * H27: 注册语言变更监听
-     * 当用户切换语言时，刷新运行中的 VPN 通知文案
+     * 注册语言变更监听器，在语言切换时刷新正在运行的 VPN 前台通知。
+     *
+     * 只有当 VPN 当前状态为 `VpnState.RUNNING` 时才会调用 `updateNotification()` 以更新通知文案。
      */
     private fun registerLanguageChangeListener() {
         AppLocale.registerLanguageChangeListener(LANGUAGE_LISTENER_ID) { _ ->
@@ -1040,15 +1237,18 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     /**
-     * H27: 注销语言变更监听
+     * 注销已注册的应用语言变更监听器。
+     *
+     * 调用后将移除使用固定监听器 ID 注册的语言变更回调，防止在服务销毁或不再需要时继续接收语言更新通知。
      */
     private fun unregisterLanguageChangeListener() {
         AppLocale.unregisterLanguageChangeListener(LANGUAGE_LISTENER_ID)
     }
 
     /**
-     * H27: 刷新运行中的前台服务通知文案
-     * 当语言切换时调用，更新通知内容为当前语言
+     * 刷新并发布前台服务通知以反映当前语言设置。
+     *
+     * 在 API 26 及以上会确保通知渠道存在，然后通过 NotificationManager 更新已存在的前台通知。
      */
     private fun updateNotification() {
         try {
@@ -1064,6 +1264,13 @@ class GatewayVpnService : AndroidVpnService() {
         }
     }
 
+    /**
+     * 以原子方式停止 VPN 服务并清理相关资源。
+     *
+     * 在调用时会：若当前已处于 `STOPPED` 或 `STOPPING` 则立即返回；使用 CAS 保证只有一个停止流程执行；
+     * 将状态设置为 `STOPPING`，取消并释放协程作用域，执行一次性资源清理（包含关闭 TUN、归还/关闭代理连接等），
+     * 停止代理服务并使服务脱离前台，最后将状态设置为 `STOPPED`。方法在完成或异常退出时会重置停止标志，允许后续再次启动/停止。
+     */
     private fun stopVpn() {
         // 先读取当前状态，避免在已经停止的状态下继续执行
         val currentState = _status.value.state
@@ -1108,9 +1315,10 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     /**
-     * 清理 VPN 相关资源
-     * 提取为独立方法以便在 stopVpn() 和 onDestroy() 中复用
-     * 使用原子标志确保只执行一次，避免重复清理导致的资源泄漏或状态不一致
+     * 释放并清理与 VPN 相关的所有资源。
+     *
+     * 关闭并置空 VPN 输出流与接口，归还或关闭所有会话中持有的 SOCKS5 连接，关闭并清空连接池，清除虚拟 IP 池与反向映射。
+     * 该操作为幂等且只会执行一次（受原子标志保护），在关闭各类资源时会捕获异常以避免中途失败导致未完成的清理。
      */
     private fun cleanupVpnResources() {
         // 使用原子操作确保资源清理只执行一次
@@ -1171,11 +1379,20 @@ class GatewayVpnService : AndroidVpnService() {
         reverseIpMap.clear()
     }
 
+    /**
+     * 停止已启动的 Socks5 代理服务（如果正在运行）。
+     */
     private fun stopProxyService() {
         val intent = Intent(this, Socks5ProxyService::class.java)
         stopService(intent)
     }
 
+    /**
+     * 在服务被系统销毁时执行必要的清理并保证 VPN 与代理相关资源被安全释放。
+     *
+     * 如果此前未调用 `stopVpn()`，将把状态置为 `STOPPED` 并停止代理服务以作兜底；无论 `stopVpn()` 是否已调用，
+     * 都会调用 `cleanupVpnResources()`、取消并置空协程作用域、注销语言变更监听，最后委托给父类的 `onDestroy()`。
+     */
     override fun onDestroy() {
         // onDestroy() 由系统在服务停止时调用
         // 不要在这里调用 stopVpn()，避免循环调用
@@ -1207,6 +1424,9 @@ class GatewayVpnService : AndroidVpnService() {
         super.onDestroy()
     }
 
+    /**
+     * 在系统撤销 VPN 授权时停止正在运行的 VPN 并委托父类处理回收。
+     */
     override fun onRevoke() {
         stopVpn()
         super.onRevoke()

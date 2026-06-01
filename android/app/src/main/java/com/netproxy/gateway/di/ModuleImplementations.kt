@@ -55,15 +55,36 @@ class CommunicationModuleImpl @Inject constructor(
     private val mqttConnectionManager: MqttConnectionManager
 ) : CommunicationModule, CommunicationCommandHandler, CommunicationQueryHandler {
 
+    /**
+     * 使用提供的设备 ID 和认证令牌启动 MQTT 连接。
+     *
+     * @param deviceId 用于标识设备的字符串，传递给底层 MQTT 连接管理器以进行身份识别。
+     * @param authToken 用于认证的令牌，传递给底层 MQTT 连接管理器以进行授权。
+     * @return `true` 表示已发起连接请求（该实现始终返回 `true`）。
+     */
     override fun connect(deviceId: String, authToken: String): Boolean {
         mqttConnectionManager.connect(deviceId, authToken)
         return true
     }
 
+    /**
+     * 将一条 MQTT 消息发布到指定主题。
+     *
+     * @param topic 要发布到的 MQTT 主题。
+     * @param payload 消息内容，作为字符串（应为 UTF-8 编码）。
+     * @param qos MQTT 服务质量等级，通常为 0、1 或 2。 
+     */
     override fun publish(topic: String, payload: String, qos: Int) {
         mqttConnectionManager.publish(topic, payload, qos)
     }
 
+    /**
+     * 订阅指定主题的 MQTT 消息并在接收时通过回调分发。
+     *
+     * @param topic 要订阅的 MQTT 主题。
+     * @param qos 消息服务质量等级（通常为 0、1 或 2）。
+     * @param callback 收到消息时的处理回调；可为 `null`，表示不提供本地回调处理。 
+     */
     override fun subscribe(topic: String, qos: Int, callback: ((String) -> Unit)?) {
         mqttConnectionManager.subscribe(topic, qos, callback)
     }
@@ -200,6 +221,12 @@ class ConfigModuleImpl @Inject constructor(
         }
     }
 
+    /**
+     * 发起对一组运行时权限的请求。
+     *
+     * @param permissions 要请求的权限名称列表（例如 `android.permission.ACCESS_FINE_LOCATION`）。
+     * @return `true` 表示已发起权限请求，`false` 表示未发起。
+     */
     override fun requestPermissions(permissions: List<String>): Boolean {
         return true
     }

@@ -66,6 +66,12 @@ internal object MainScreenNavigation {
     val settingsPageName: String = MainPage.Settings.name
     val auditLogsPageName: String = MainPage.AuditLogs.name
 
+    /**
+     * 将给定页面名规范化为已知页面名之一，未知时回退到主页面名称。
+     *
+     * @param pageName 要规范化的页面名称。
+     * @return 输入的页面名称（若它等于已知的页面名称之一），否则返回 `homePageName`。
+     */
     fun normalizePageName(pageName: String): String = when (pageName) {
         homePageName,
         settingsPageName,
@@ -73,6 +79,12 @@ internal object MainScreenNavigation {
         else -> homePageName
     }
 
+    /**
+     * 根据当前页面名称选择应导航到的后退目标页面名称。
+     *
+     * @param currentPageName 当前页面的名称（可能不是已知页面之一）。
+     * @return `settingsPageName` 当当前为 `auditLogsPageName`；`homePageName` 当当前为 `settingsPageName` 或输入无法识别时。
+     */
     fun backTargetPageName(currentPageName: String): String = when (normalizePageName(currentPageName)) {
         auditLogsPageName -> settingsPageName
         settingsPageName -> homePageName
@@ -80,6 +92,11 @@ internal object MainScreenNavigation {
     }
 }
 
+/**
+ * 渲染主界面并在 Home / Settings / AuditLogs 三个页面间进行导航与状态管理。
+ *
+ * 维护当前页面状态并根据页面展示对应内容；在非 Home 页面启用系统返回处理以触发基于 MainScreenNavigation 的后退目标映射；初始化时写入审计日志 `"Main screen initialized"`；在顶部应用栏根据当前页面显示标题、可选的返回按钮及 Home 的设置入口。
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
@@ -170,6 +187,13 @@ fun MainScreen(
     }
 }
 
+/**
+ * 显示主仪表板，按顺序呈现连接状态、VPN 状态、配对或已连接选项、网络信息和诊断卡片。
+ *
+ * @param uiState 当前界面状态，用于决定各卡片的显示内容与状态（例如配对、VPN、网络和心跳信息）。
+ * @param viewModel 用于触发用户操作（例如配对、切换 VPN、扫描 Wi‑Fi、断开等）的视图模型。
+ * @param paddingValues 外部布局传入的内边距，会应用到仪表板的整体容器上以避免与 Scaffold 等父容器重叠。
+ */
 @Composable
 private fun MainDashboard(
     uiState: UiState,
@@ -215,6 +239,14 @@ private fun MainDashboard(
     }
 }
 
+/**
+ * 显示应用的设置页面，包含语言选择、打开审计日志的入口以及调试区域（可在支持的设备上切换“跳过 MQTT 证书校验”）。
+ *
+ * 调试开关的更改会通过 DebugSettingsStore 持久化；在设置成功时会向 AppAuditLogStore 写入相应的日志。
+ *
+ * @param paddingValues Scaffold 或外层布局提供的内边距，用于确保页面内容与系统栏/导航栏等不重叠。
+ * @param onOpenAuditLogs 在用户请求查看审计日志时调用的回调。
+ */
 @Composable
 private fun SettingsScreen(
     paddingValues: PaddingValues,
@@ -315,6 +347,11 @@ private fun SettingsScreen(
     }
 }
 
+/**
+ * 显示应用审计日志界面，提供“清空日志”按钮并按时间倒序列出日志条目。
+ *
+ * @param paddingValues 来自 Scaffold 的内边距，用于确保内容与系统栏或导航栏不重叠。 
+ */
 @Composable
 private fun AuditLogsScreen(
     paddingValues: PaddingValues
@@ -364,6 +401,12 @@ private fun AuditLogsScreen(
     }
 }
 
+/**
+ * 将单条审计日志条目渲染为带时间、日志级别与标签的卡片行。
+ *
+ * @param entry 要显示的审计日志条目，包含时间戳、级别、标签与消息内容。
+ * @param formatter 用于格式化条目时间戳的 `DateTimeFormatter`，用于在卡片顶部显示人类可读的时间。
+ */
 @Composable
 private fun AuditLogEntryCard(
     entry: AuditLogEntry,
@@ -393,6 +436,14 @@ private fun AuditLogEntryCard(
     }
 }
 
+/**
+ * 显示 MQTT 连接状态的卡片，呈现状态图标/指示、配对码、错误信息并在需要时提供重试按钮。
+ *
+ * 根据传入的 uiState 展示连接状态文本与配色；当存在配对码时显示配对码；当处于错误且包含错误信息时显示该信息并提供调用 `onRetry` 的重试按钮。
+ *
+ * @param uiState 当前的界面状态（用于读取 MQTT 状态、peerId 和 mqttErrorMessage 等字段）。
+ * @param onRetry 点击“重试”按钮时调用的回调。
+ */
 @Composable
 private fun ConnectionStatusCard(uiState: UiState, onRetry: () -> Unit) {
     val statusColors = LocalStatusColors.current
@@ -495,6 +546,14 @@ private fun ConnectionStatusCard(uiState: UiState, onRetry: () -> Unit) {
     }
 }
 
+/**
+ * 显示配对输入与操作区域，允许输入配对码并发起配对或生成配对码。
+ *
+ * 该组件基于传入的 UI 状态控制控件可用性：配对进行中时禁用输入与按钮并展示进度指示；当输入的配对码长度至少 6 字符且未在配对中时，主按钮可用以调用配对操作。
+ *
+ * @param uiState 当前界面状态，用于决定控件启用/禁用、是否显示配对进行中的指示等。
+ * @param viewModel 用于触发配对相关操作（pairWithCode 和 generatePairingCode）。
+ */
 @Composable
 fun PairingSection(
     uiState: UiState,
@@ -555,6 +614,14 @@ fun PairingSection(
     }
 }
 
+/**
+ * 显示远程控制相关的操作卡片：VPN 开关、扫描 Wi‑Fi 按钮、可用网络计数和断开连接按钮。
+ *
+ * 卡片 UI 的呈现由 `uiState` 驱动；用户交互会调用 `viewModel` 上的相应方法（切换 VPN 调用 `toggleVpn`、点击“扫描 Wi‑Fi”调用 `scanWifi`、点击“断开连接”调用 `disconnect`）。
+ *
+ * @param uiState 当前界面状态，用于决定开关、可用网络计数等显示内容。
+ * @param viewModel 主视图模型，用于处理用户触发的操作回调。
+ */
 @Composable
 private fun ConnectedOptionsSection(
     uiState: UiState,
@@ -626,6 +693,11 @@ private data class StatusCardData(
     val icon: ImageVector?
 )
 
+/**
+ * 显示一个用于展示 VPN 运行状态的卡片，并根据传入的 UI 状态调整文字、图标、配色和右侧指示器。
+ *
+ * @param uiState 当前界面状态，用于确定 VPN 是否启用以选择相应的文本、颜色和指示器颜色。
+ */
 @Composable
 private fun VpnStatusCard(uiState: UiState) {
     val statusColors = LocalStatusColors.current
@@ -696,6 +768,11 @@ private fun VpnStatusCard(uiState: UiState) {
     }
 }
 
+/**
+ * 展示网络状态卡片，包含 Wi‑Fi 与蜂窝连接的状态指示及（在已连接且可用时）当前 Wi‑Fi 的 SSID。
+ *
+ * @param uiState 包含网络相关显示数据的 UI 状态对象；本组件使用其中的 `wifiConnected`、`cellularConnected` 与 `currentWifiSsid` 字段来决定各项显示内容。
+ */
 @Composable
 private fun NetworkInfoCard(uiState: UiState) {
     val statusColors = LocalStatusColors.current
@@ -758,6 +835,16 @@ private fun NetworkInfoCard(uiState: UiState) {
     }
 }
 
+/**
+ * 在一行中展示网络项的状态：图标、标签与“在用/未在用”文本。
+ *
+ * @param label 显示的文本标签（例如 "Wi‑Fi" 或 "蜂窝"）。
+ * @param active 若为 `true` 则表示该网络正在使用，否则表示未使用。
+ * @param activeIcon 处于激活状态时显示的图标。
+ * @param inactiveIcon 处于未激活状态时显示的图标。
+ * @param activeColor 激活状态下用于图标和文本的颜色。
+ * @param inactiveColor 未激活状态下用于图标和文本的颜色。
+ */
 @Composable
 private fun NetworkStatusRow(
     label: String,
@@ -791,6 +878,13 @@ private fun NetworkStatusRow(
     }
 }
 
+/**
+ * 展开式显示连接与运行时诊断信息卡片，并根据传入的 UI 状态实时展示各项指标。
+ *
+ * 当卡片展开时会显示：连接时长、距上次心跳的秒数（在有心跳时间时每秒更新）、心跳失败次数、重连次数、VPN 详细状态（及已连接客户端数）和网络校验状态；若存在 VPN 错误信息则另外展示错误文本。
+ *
+ * @param uiState 用于驱动诊断显示的界面状态，包含 connectionDurationMs、lastHeartbeatTimeMs、heartbeatFailures、reconnectCount、vpnDetailedStatus 和 networkIsValidated 等字段。
+ */
 @Composable
 private fun DiagnosticsCard(uiState: UiState) {
     var expanded by rememberSaveable { mutableStateOf(false) }
@@ -901,6 +995,12 @@ private fun DiagnosticsCard(uiState: UiState) {
     }
 }
 
+/**
+ * 在一行中左右对齐显示诊断项的标签和对应值，用于展示键-值类型的信息。
+ *
+ * @param label 左侧显示的标签文本（描述项名）。
+ * @param value 右侧显示的值文本（描述项的当前值）。
+ */
 @Composable
 private fun DiagnosticsRow(label: String, value: String) {
     Row(
@@ -920,6 +1020,11 @@ private fun DiagnosticsRow(label: String, value: String) {
     }
 }
 
+/**
+ * 显示用于选择应用语言的卡片，列出 AppLocale.supportedLanguages 并允许用户切换语言。
+ *
+ * 选中某项后会将选择保存在可保存状态中，并在能获取到宿主 Activity 时立即通过 AppLocale.applyLanguage 应用新语言；如果选择未改变则不作处理。
+ */
 @Composable
 fun LanguageSettingsCard() {
     val context = LocalContext.current
@@ -972,6 +1077,11 @@ fun LanguageSettingsCard() {
     }
 }
 
+/**
+ * 在 Context 链中查找并返回最近的 Activity 实例。
+ *
+ * @return 最近的 `Activity`，如果未找到则为 `null`。
+ */
 private tailrec fun Context.findActivity(): Activity? {
     return when (this) {
         is Activity -> this

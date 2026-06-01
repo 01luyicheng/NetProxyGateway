@@ -119,7 +119,12 @@ object RootDetector {
     )
 
     /**
-     * 执行完整的 Root 检测
+     * 对设备运行一系列启发式检测以判断是否存在 root 风险，并返回触发的检测项。
+     *
+     * 依次执行多个检测（例如 test-keys、Superuser.apk、su/BusyBox/Magisk 文件、已知 root 管理或隐藏类应用、危险系统属性、可写系统路径以及尝试执行 `su` 命令），将所有命中的检测标识符收集并包含在返回结果中。
+     *
+     * @param context Android 上下文，用于查询已安装包及访问与包管理相关的系统信息。
+     * @return `RootCheckResult`：`isRooted` 在任一检测命中时为 `true`，`detectedBy` 列出触发的检测标识符列表。
      */
     fun check(context: Context): RootCheckResult {
         val detectedMethods = mutableListOf<String>()
@@ -171,21 +176,27 @@ object RootDetector {
     }
 
     /**
-     * 检查是否包含 test-keys（非官方签名）
+     * 检测 Build.TAGS 中是否包含 "test-keys" 标记。
+     *
+     * @return `true` 如果包含 "test-keys"，`false` 否则。
      */
     fun checkTestKeys(): Boolean {
         return Build.TAGS?.contains("test-keys") ?: false
     }
 
     /**
-     * 检查 Superuser.apk 是否存在
+     * 检查系统路径 /system/app 下是否存在 Superuser.apk。
+     *
+     * @return `true` 如果文件存在，`false` 否则。
      */
     fun checkSuperuserApk(): Boolean {
         return File("/system/app/Superuser.apk").exists()
     }
 
     /**
-     * 检查 su 二进制文件
+     * 检查常见系统路径以判断是否存在 su 可执行文件。
+     *
+     * @return `true` 如果在预定义路径中发现 su 可执行文件，`false` 否则。
      */
     fun checkSuBinary(): Boolean {
         for (path in ROOT_PATHS) {
@@ -197,7 +208,9 @@ object RootDetector {
     }
 
     /**
-     * 检查 BusyBox
+     * 检测设备上是否存在 BusyBox，先检查常见文件路径，若未发现则尝试通过 `which busybox` 查询。
+     *
+     * @return `true` 如果在已知路径或 `which` 命令输出中发现 BusyBox，`false` 否则。
      */
     fun checkBusyBox(): Boolean {
         for (path in BUSYBOX_PATHS) {
@@ -230,7 +243,9 @@ object RootDetector {
     }
 
     /**
-     * 检查 Magisk
+     * 检测设备上是否存在可能表明已安装 Magisk 的文件或系统属性。
+     *
+     * @return `true` 如果检测到 Magisk 相关文件或系统属性表明设备可能安装了 Magisk，`false` 否则。
      */
     fun checkMagisk(): Boolean {
         for (path in MAGISK_FILES) {
@@ -244,7 +259,11 @@ object RootDetector {
     }
 
     /**
-     * 检查 Magisk 属性
+     * 检测设备系统属性以判断是否存在 Magisk 指示器。
+     *
+     * 检查一组 Magisk 相关的系统属性（例如 `ro.magisk.version`），当任一属性的值非空且不等于 `"0"` 时视为检测到 Magisk。
+     *
+     * @return `true` 表示检测到 Magisk 相关属性，`false` 表示未检测到。 
      */
     private fun checkMagiskProps(): Boolean {
         val magiskProps = arrayOf(
@@ -279,7 +298,11 @@ object RootDetector {
     }
 
     /**
-     * 检查已安装的 Root 管理应用
+     * 检查设备上是否安装了已知的 Root 管理或相关应用包。
+     *
+     * 会查找 `ROOT_PACKAGES` 列表中的包名，若其中任一包已安装则视为检测命中。
+     *
+     * @return `true` 如果检测到已安装的已知 Root 管理/相关包，`false` 否则。
      */
     fun checkRootPackages(context: Context): Boolean {
         val pm = context.packageManager
@@ -295,7 +318,9 @@ object RootDetector {
     }
 
     /**
-     * 检查 Root 隐藏应用
+     * 检测设备上是否安装已知的 Root 隐藏或相关工具的应用包。
+     *
+     * @return `true` 如果发现任一已知的 root-cloaking 或相关应用包已安装，`false` 否则。
      */
     fun checkRootCloakingApps(context: Context): Boolean {
         val cloakingPackages = arrayOf(
@@ -323,7 +348,11 @@ object RootDetector {
     }
 
     /**
-     * 检查危险属性
+     * 检测系统属性中是否存在已知的危险值（指示设备可能被 Root 或处于不安全状态）。
+     *
+     * 检查的属性包括 `ro.debuggable`（期望值 `"1"` 表示可调试）和 `ro.secure`（期望值 `"0"` 表示不安全）。
+     *
+     * @return `true` 如果任一被检查的属性的值匹配危险值，`false` 否则。
      */
     fun checkDangerousProps(): Boolean {
         val dangerousProps = mapOf(
@@ -359,7 +388,9 @@ object RootDetector {
     }
 
     /**
-     * 检查可写系统路径
+     * 检查一组典型的系统路径是否存在且具有写权限。
+     *
+     * @return `true` 如果至少有一个路径存在并且可写，`false` 否则。
      */
     fun checkRWPaths(): Boolean {
         val paths = arrayOf(
@@ -382,7 +413,11 @@ object RootDetector {
     }
 
     /**
-     * 尝试执行 su 命令（主动检测）
+     * 尝试通过执行 `su` 命令判断设备是否可以获得 root 权限。
+     *
+     * 在执行 `su -c id` 并检测其输出包含 `uid=0` 时视为已获取 root 权限。
+     *
+     * @return `true` 如果命令输出表明已获得 root（包含 `uid=0`），`false` 否则。
      */
     fun checkSuExecution(): Boolean {
         return try {

@@ -45,7 +45,11 @@ object DebugDetector {
     )
 
     /**
-     * 执行完整的调试检测
+     * 执行一系列反调试与调试环境检测，并将触发的检测项汇总为结果。
+     *
+     * @return 一个包含检测汇总的 [DebugCheckResult]：
+     *         - `isDebugged`：若任一检测触发则为 `true`，否则为 `false`；
+     *         - `detectedBy`：触发检测的方法标识字符串列表（按检测顺序收集）。
      */
     fun check(): DebugCheckResult {
         val detectedMethods = mutableListOf<String>()
@@ -105,14 +109,20 @@ object DebugDetector {
     }
 
     /**
-     * 检查是否有调试器连接（Java 层）
+     * 检查当前进程是否有 Java 层调试器连接。
+     *
+     * @return `true` 如果检测到 Java 层调试器连接，`false` 否则。
      */
     fun checkDebuggerConnected(): Boolean {
         return Debug.isDebuggerConnected()
     }
 
     /**
-     * 检查 /proc/self/status 中的 TracerPid
+     * 检查当前进程在 /proc/self/status 中的 `TracerPid` 是否指示被跟踪（调试）。
+     *
+     * 读取 `/proc/self/status`，查找以 `TracerPid:` 开头的行并解析其数值；若该值大于 0 则视为被跟踪。
+     *
+     * @return `true` 当 `TracerPid` 的解析值大于 0，`false` 当文件不存在、未找到 `TracerPid` 行、解析失败或发生异常时。 
      */
     fun checkBeingDebugged(): Boolean {
         return try {
@@ -135,8 +145,11 @@ object DebugDetector {
     }
 
     /**
-     * 检查 ptrace 状态
-     */
+     * 检查当前进程的 ptrace/追踪状态。
+     *
+     * 读取 `/proc/self/status` 并解析其中的 `TracerPid` 与 `PPid` 信息；当检测到被其他进程追踪（TracerPid != 0）或父进程为 PID 1 时视为可疑并返回 `true`。
+     *
+     * @return `true` 如果检测到被 ptrace/追踪 或 父进程为 1，`false` 如果未检测到或在读取/解析过程中发生错误。 */
     fun checkPtraceStatus(): Boolean {
         return try {
             val statusFile = File("/proc/self/status")
@@ -148,6 +161,13 @@ object DebugDetector {
         }
     }
 
+    /**
+     * 基于 /proc/[pid]/status 的文本内容判断进程是否可能被调试或由可疑父进程启动。
+     *
+     * @param statusContent /proc/[pid]/status 的完整文本内容。
+     * @param currentPid 当前进程的 PID（默认使用 android.os.Process.myPid()），用于上下文判定。
+     * @return `true` 如果 `TracerPid` 不为 0 或 `PPid` 等于 1，`false` 否则。
+     */
     internal fun parsePtraceStatus(statusContent: String, currentPid: Int = android.os.Process.myPid()): Boolean {
         val tracerPid = statusContent
             .lineSequence()
@@ -172,6 +192,12 @@ object DebugDetector {
         return ppid == 1
     }
 
+    /**
+     * 从给定的 `/proc/<pid>/status` 文本中提取 `TracerPid` 的整数值。
+     *
+     * @param statusContent `/proc/<pid>/status` 文件的完整文本内容。
+     * @return 提取到的 `TracerPid` 的整数值；若未找到或无法解析则返回 `0`。
+     */
     internal fun parseTracerPid(statusContent: String): Int {
         return statusContent
             .lineSequence()
@@ -182,6 +208,12 @@ object DebugDetector {
             ?: 0
     }
 
+    /**
+     * 从 `/proc/<pid>/status` 格式的文本中提取 `PPid`（父进程 ID）。
+     *
+     * @param statusContent 要解析的 `/proc/*/status` 文件内容文本。
+     * @return 解析得到的 `PPid`（父进程 ID），若 `PPid` 字段不存在或无法解析为整数则返回 `0`。
+     */
     internal fun parsePpid(statusContent: String): Int {
         return statusContent
             .lineSequence()
@@ -193,7 +225,9 @@ object DebugDetector {
     }
 
     /**
-     * 检查调试器进程
+     * 扫描系统进程列表以检测已知调试器或调试工具是否正在运行。
+     *
+     * @return `true` 如果检测到已知调试器或调试工具进程，`false` 否则。
      */
     fun checkDebuggerProcess(): Boolean {
         return try {
@@ -223,7 +257,9 @@ object DebugDetector {
     }
 
     /**
-     * 检查是否为 Debug 构建
+     * 确定当前应用是否为可调试的 Debug 构建。
+     *
+     * @return `true` 当 BuildConfig.DEBUG 为 `true` 或应用的 ApplicationInfo.flags 包含 `FLAG_DEBUGGABLE`，`false` 否则。
      */
     fun checkDebugBuild(): Boolean {
         return resolveDebugBuildState(
@@ -232,6 +268,13 @@ object DebugDetector {
         )
     }
 
+    /**
+     * 判断当前应用是否被标记为可调试（基于 BuildConfig 和 ApplicationInfo flags）。
+     *
+     * @param isBuildConfigDebug 来自 BuildConfig.DEBUG 的值；若为 `true` 则直接视为可调试。
+     * @param applicationInfoFlagsProvider 延迟获取 `ApplicationInfo.flags` 的函数；可为 null 或抛出异常。
+     * @return `true` 当 BuildConfig.DEBUG 为 `true` 或者 `ApplicationInfo.FLAG_DEBUGGABLE` 在 flags 中被设置，`false` 否则（包括 flags 为 null 或提供者抛出异常的情况）。
+     */
     internal fun resolveDebugBuildState(
         isBuildConfigDebug: Boolean,
         applicationInfoFlagsProvider: () -> Int?
@@ -248,6 +291,11 @@ object DebugDetector {
         }
     }
 
+    /**
+     * 通过反射获取当前 Application 的 applicationInfo.flags 值。
+     *
+     * @return 当前 Application 的 `applicationInfo.flags` 的整数值；若无法获取或发生异常则返回 `null`。
+     */
     private fun currentApplicationInfoFlags(): Int? {
         return try {
             val application = Class.forName("android.app.ActivityThread")
@@ -260,7 +308,15 @@ object DebugDetector {
     }
 
     /**
-     * 检查调试属性
+     * 检测系统属性以判定设备是否处于可调试或允许 ADB 的状态。
+     *
+     * 检查以下系统属性并基于其值判断是否存在可被利用的调试环境：
+     * - `ro.debuggable`：当值为 `"1"` 时视为可调试；
+     * - `ro.secure`：当值为 `"0"` 时视为不安全（可疑）；
+     * - `persist.sys.usb.config`：当值包含 `"adb"` 时视为启用 ADB。
+     * 异常或命令超时会被忽略并继续检查其他属性。
+     *
+     * @return `true` 若任一属性指示可调试或启用 ADB，`false` 否则。
      */
     fun checkDebugProperties(): Boolean {
         val debugProps = arrayOf(
@@ -300,7 +356,9 @@ object DebugDetector {
     }
 
     /**
-     * 检查 JDWP（Java Debug Wire Protocol）
+     * 检测系统进程列表中是否存在与 JDWP（Java Debug Wire Protocol）相关的进程条目。
+     *
+     * @return `true` 如果在进程列表中发现包含 "jdwp" 的行，`false` 否则。
      */
     fun checkJDWP(): Boolean {
         return try {
@@ -327,7 +385,12 @@ object DebugDetector {
     }
 
     /**
-     * 检查 Frida 框架
+     * 检测设备上是否存在 Frida 相关痕迹（文件或进程）。
+     *
+     * 先检查一组常见的 Frida 文件路径，若未命中则读取系统进程列表查找进程名中包含 `frida` 或 `gadget` 的条目。
+     * 在发生异常或未发现任何痕迹时返回 `false`。
+     *
+     * @return `true` 当检测到 Frida 相关文件或进程名包含 `frida` 或 `gadget`，`false` 否则或发生异常。
      */
     fun checkFrida(): Boolean {
         // 检查 Frida 特定文件
@@ -374,7 +437,11 @@ object DebugDetector {
     }
 
     /**
-     * 检查 Xposed 框架
+     * 检测设备上是否存在 Xposed 框架的指示器。
+     *
+     * 通过检查常见的 Xposed 相关文件路径或尝试加载 `de.robv.android.xposed.XposedBridge` 类来判断。
+     *
+     * @return `true` 表示检测到 Xposed（存在常见文件或能加载 `XposedBridge` 类），`false` 表示未检测到。
      */
     fun checkXposed(): Boolean {
         // 检查 Xposed 特定文件
@@ -403,8 +470,10 @@ object DebugDetector {
     }
 
     /**
-     * 检查时间差异常（反动态调试）
-     * 在调试器中单步执行时，时间差会异常大
+     * 检测短时间计算任务的执行耗时是否异常以发现可能的动态调试或单步调试行为。
+     *
+     * @param thresholdMs 触发检测的时间阈值（毫秒），当任务耗时大于此值时被视为可疑。默认值为 1000。
+     * @return `true` 如果任务执行耗时大于 thresholdMs，`false` 否则。
      */
     fun checkTimingAttack(thresholdMs: Long = 1000): Boolean {
         val startTime = System.currentTimeMillis()
@@ -422,10 +491,11 @@ object DebugDetector {
     }
 
     /**
-     * 使用 ptrace 自我防护
-     * 通过 ptrace PTRACE_TRACEME 防止其他进程附加
+     * 使用 ptrace 进行自我保护以阻止其他进程附加（占位实现）。
      *
-     * 当前为占位实现，待 JNI 集成后启用
+     * 当前为占位实现，始终返回 `false`；计划在集成 JNI 后启用真正的 ptrace 防护。
+     *
+     * @return `true` 表示已成功启用 ptrace 自我防护，`false` 表示未启用（当前始终为 `false`）。
      */
     @Deprecated("占位实现，待 JNI 集成后启用", level = DeprecationLevel.WARNING)
     private fun antiPtrace(): Boolean {
@@ -433,7 +503,11 @@ object DebugDetector {
     }
 
     /**
-     * 检查内存断点
+     * 检测进程内存映射中可能用于内存断点或代码注入的可执行且可写区域。
+     *
+     * 扫描 /proc/self/maps 的每一行；若出现包含 "rwx" 或 "rxp" 的映射，且该映射不属于 "[stack]" 或 "[heap]"，则视为可疑并返回 `true`。当映射文件不存在、未发现可疑项或读取/解析发生异常时返回 `false`。
+     *
+     * @return `true` 表示检测到可疑的可写可执行内存映射，`false` 表示未检测到或在读取/解析期间发生错误。
      */
     fun checkMemoryBreakpoints(): Boolean {
         return try {

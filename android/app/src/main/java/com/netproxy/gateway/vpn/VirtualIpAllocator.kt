@@ -13,19 +13,21 @@ import javax.inject.Singleton
  */
 interface VirtualIpAllocator {
     /**
-     * 获取或分配虚拟IP
+     * 根据给定的真实目标IP返回已有的虚拟IP，或为其分配并返回一个新的虚拟IP。
      *
-     * 如果 [realDstIp] 已有对应的虚拟IP，则直接返回已存在的映射（不会触发 [onNewAllocation] 回调）。
-     * 如果不存在映射，则分配一个新的虚拟IP，并触发 [onNewAllocation] 回调。
+     * 如果 [realDstIp] 已存在映射，会直接返回已有的虚拟IP（不会触发 [onNewAllocation]）。
+     * 若不存在映射，则从可用地址池分配一个未被占用的虚拟IP，写入双向映射后返回。
+     * 当分配器发现计数器越界并实际清空/重置地址池时，会在同步块外触发一次 [onPoolReset]。
+     * 在实际产生新的映射时，会在同步块外触发 [onNewAllocation]；获取已有映射时不触发该回调。
      *
-     * @param realDstIp 真实目标IP，不能为空
-     * @param virtualIpPool 虚拟IP池 (realDstIp -> virtualSrcIp)
-     * @param reverseIpMap 反向IP映射 (virtualSrcIp -> realDstIp)
-     * @param nextVirtualIp 下一个虚拟IP计数器
-     * @param onPoolReset IP池重置时的回调（在同步块外执行，仅在真正发生重置时触发一次）
-     * @param onNewAllocation 当**新分配**虚拟IP时的回调（获取已存在IP时不触发，在同步块外执行）
-     * @return 虚拟IP地址（新分配或已存在的）
-     * @throws IllegalArgumentException 如果 [realDstIp] 为空
+     * @param realDstIp 目标真实IP，不能为空或空白
+     * @param virtualIpPool 从真实目标IP到虚拟IP的映射表（写入新的映射）
+     * @param reverseIpMap 从虚拟IP到真实目标IP的反向映射表（用于检测占用并写入反向映射）
+     * @param nextVirtualIp 用于生成下一个候选虚拟IP的计数器（会在分配时递增，越界时会触发池重置）
+     * @param onPoolReset 地址池被实际重置时的可选回调（在同步块外执行，仅在真实发生重置时触发一次）
+     * @param onNewAllocation 当方法为 [realDstIp] 新分配虚拟IP时的可选回调，回调参数为 `(virtualIp, realDstIp)`（在同步块外执行）
+     * @return 分配得到或已存在的虚拟IP地址字符串
+     * @throws IllegalArgumentException 如果 [realDstIp] 为空或仅包含空白字符，或在地址池耗尽时抛出（表示无法为该真实IP分配虚拟IP）
      */
     fun getOrAllocateVirtualIp(
         realDstIp: String,
@@ -49,6 +51,23 @@ class VirtualIpAllocatorImpl @Inject constructor() : VirtualIpAllocator {
     // 专用锁对象，保护所有共享状态的复合操作
     private val ipAllocationLock = Any()
 
+    /**
+     * 为指定的真实目标 IP 返回已有的虚拟 IP 映射，或在可用时分配并保存一个新的虚拟 IP。
+     *
+     * 该方法会在必要时更新 `virtualIpPool`（real -> virtual）和 `reverseIpMap`（virtual -> real），并可能重置 `nextVirtualIp` 计数器；若发生重置则调用 `onPoolReset`（在同步块外触发），若完成新的分配则调用 `onNewAllocation`（在同步块外触发）。
+     *
+     * @param realDstIp 目标真实 IP，不能为空或仅空白。
+     * @param virtualIpPool 可变映射，用于保存从真实 IP 到虚拟 IP 的映射（会在成功分配时写入，重置时清空）。
+     * @param reverseIpMap 可变映射，用于保存从虚拟 IP 到真实 IP 的反向映射（会在成功分配时写入，重置时清空）。
+     * @param nextVirtualIp 原子整数，作为下一个候选虚拟 IP 编号的计数器（在必要时会被重置或递增）。
+     * @param onPoolReset 在实际发生池重置时调用一次；该回调在同步块外执行。可为 null。
+     * @param onNewAllocation 在成功分配新的虚拟 IP 后调用，参数为（分配的虚拟 IP，真实目标 IP）；该回调在同步块外执行。可为 null.
+     *
+     * @return 分配或已有的虚拟 IP 字符串（格式例如 "10.0.0.x"）。
+     *
+     * @throws IllegalArgumentException 当 `realDstIp` 为空或仅空白时抛出。
+     * @throws IllegalArgumentException 当遍历整个可用地址空间仍无法找到未被占用的虚拟 IP 时抛出（表示 IP 池耗尽）。
+     */
     override fun getOrAllocateVirtualIp(
         realDstIp: String,
         virtualIpPool: MutableMap<String, String>,

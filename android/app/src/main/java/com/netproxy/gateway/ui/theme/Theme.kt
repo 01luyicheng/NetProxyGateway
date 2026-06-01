@@ -112,6 +112,16 @@ val LocalStatusColors = staticCompositionLocalOf {
     )
 }
 
+/**
+ * 为应用提供 Material 3 颜色方案与语义状态色，并根据主题更新系统状态栏外观。
+ *
+ * 根据 `darkTheme` 和 `dynamicColor` 选择合适的 `ColorScheme`，构建与当前主题匹配的 `StatusColors`，
+ * 将其通过 `LocalStatusColors` 下发到组合树中，并在非编辑模式下同步设置窗口的状态栏颜色与亮暗样式。
+ *
+ * @param darkTheme 当为 `true` 时使用深色主题，否则使用浅色主题。
+ * @param dynamicColor 在 Android 12 及以上设备上为 `true` 时启用系统动态配色。
+ * @param content 需要被该主题包裹的组合内容。
+ */
 @Composable
 fun NetProxyGatewayTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),

@@ -44,20 +44,40 @@ class PooledSocks5Connection(
     val inUse = AtomicBoolean(false)
     val useCount = AtomicInteger(0)
 
+    /**
+     * 标记连接为正在使用。
+     *
+     * 将 lastUsedAt 更新为当前时间，递增 useCount，并将 inUse 置为 `true`。
+     */
     fun markUsed() {
         lastUsedAt.set(System.currentTimeMillis())
         useCount.incrementAndGet()
         inUse.set(true)
     }
 
+    /**
+     * 将此连接标记为已归还，使其可被复用。
+     *
+     * 将内部的 `inUse` 标志设为 `false`，表明连接不再被占用。
+     */
     fun markReturned() {
         inUse.set(false)
     }
 
+    /**
+     * 检查封装的 Socket 是否处于可用状态。
+     *
+     * @return `true` 如果 socket 已连接、未关闭且输入/输出未被关闭，`false` 否则。
+     */
     fun isValid(): Boolean {
         return socket.isConnected && !socket.isClosed && !socket.isInputShutdown && !socket.isOutputShutdown
     }
 
+    /**
+     * 关闭封装的底层 Socket。
+     *
+     * 尝试关闭底层 socket；如果关闭过程中发生异常，方法会捕获异常并记录调试信息，不会向上抛出异常。
+     */
     fun close() {
         try {
             socket.close()
@@ -119,12 +139,10 @@ class Socks5ConnectionPool(
     }
 
     /**
-     * 获取或创建 SOCKS5 连接
+     * 从连接池获取目标地址的可用 SOCKS5 连接；若无可用连接则尝试创建新连接。
      *
-     * @param destinationIp 目标 IP 地址
-     * @param destinationPort 目标端口
-     * @param protectSocket 可选的 socket 保护函数（用于 VPN 场景）
-     * @return 可用的 SOCKS5 连接，使用完毕后必须调用 returnConnection 归还
+     * @param protectSocket 可选的 socket 保护函数（例如用于 VPN 场景），在建立底层 Socket 后调用以应用平台/环境特定的保护。
+     * @return 已获取并标记为“使用中”的 `PooledSocks5Connection`，使用完毕必须调用 `returnConnection` 归还；在池已关闭或无法创建连接时返回 `null`。
      */
     fun borrowConnection(
         destinationIp: String,
@@ -182,7 +200,12 @@ class Socks5ConnectionPool(
     }
 
     /**
-     * 归还连接回连接池
+     * 将已使用的连接归还到连接池或根据条件关闭并移除。
+     *
+     * 在写锁内检查池是否已关闭、连接是否仍被跟踪以及连接有效性；对有效且未超出单目的地最大连接数的连接将被放回对应目的地的可用队列，
+     * 否则从池中移除并在锁外关闭底层 socket。归还过程中可能会修改池的连接计数与映射。
+     *
+     * @param connection 要归还的 PooledSocks5Connection 实例；该方法可能会关闭此连接的底层 socket。
      */
     fun returnConnection(connection: PooledSocks5Connection) {
         if (isShutdown.get()) {
@@ -237,7 +260,14 @@ class Socks5ConnectionPool(
     }
 
     /**
-     * 创建新的SOCKS5连接
+     * 为指定目标创建并在连接池中注册一个新的 SOCKS5 连接。
+     *
+     * 在成功时会从凭据提供器获取认证信息、建立到代理的 SOCKS5 连接并将其封装为 PooledSocks5Connection 并纳入池的跟踪；在任何失败情况下不建立连接并返回 null。
+     *
+     * @param destinationIp 目标主机的 IP 或主机名。
+     * @param destinationPort 目标端口。
+     * @param protectSocket 可选的回调，用于在套接字连接代理前对 Socket 进行额外处理（例如设置路由/保护），可为 null。
+     * @return 已建立并注册的 PooledSocks5Connection 实例，创建失败时为 `null`。
      */
     private fun createNewConnection(
         destinationIp: String,
@@ -288,6 +318,11 @@ class Socks5ConnectionPool(
         }
     }
 
+    /**
+     * 尝试为连接池预留一个连接名额（以原子方式增加计数）。
+     *
+     * @return `true` 如果成功预留了一个名额，`false` 如果已达到配置的最大连接数。
+     */
     private fun tryReserveConnectionSlot(): Boolean {
         while (true) {
             val current = totalConnections.get()
@@ -301,7 +336,16 @@ class Socks5ConnectionPool(
     }
 
     /**
-     * 创建SOCKS5 Socket并进行完整握手
+     * 建立到本地 SOCKS5 代理的 TCP 连接并完成完整的 SOCKS5 身份验证与 CONNECT 请求，使返回的 socket 直接可用于与目标地址通信。
+     *
+     * 在连接到代理之前会调用可选的 `protectSocket` 回调（例如用于绑定或设置额外 socket 选项），然后以配置的超时连接代理并设置 `soTimeout` 与 `tcpNoDelay`，随后执行用户名/密码认证与 CONNECT 握手以连接到指定的目标地址。
+     *
+     * @param destinationIp 目标主机的 IP 地址或可解析的主机名，用于 SOCKS5 CONNECT 请求。
+     * @param destinationPort 目标主机的端口，用于 SOCKS5 CONNECT 请求。
+     * @param username 用于 SOCKS5 账号密码认证的用户名。
+     * @param password 用于 SOCKS5 账号密码认证的密码。
+     * @param protectSocket 可选回调，在 socket 建立但尚未连接前调用以对 socket 做特殊处理（例如绑定或 file-descriptor 保护）。
+     * @return 已经完成 SOCKS5 握手并连接到指定目标的 `Socket` 实例。
      */
     private fun createSocks5Socket(
         destinationIp: String,
@@ -341,7 +385,19 @@ class Socks5ConnectionPool(
     }
 
     /**
-     * 执行SOCKS5握手
+     * 执行完整的 SOCKS5 握手（含用户名/密码认证）并发起对目标地址的 CONNECT 请求。
+     *
+     * 该方法向代理发送方法协商、认证数据和 CONNECT 请求，并校验代理返回的响应；在任一步骤失败时抛出异常。
+     *
+     * @param input  从代理读取响应的输入流
+     * @param output 向代理发送请求的输出流
+     * @param username SOCKS5 用户名（UTF-8，长度不超过 255 字节）
+     * @param password SOCKS5 密码（UTF-8，长度不超过 255 字节）
+     * @param destinationIp 目标主机的 IP 字符串（将通过 InetAddress 解析为字节形式）
+     * @param destinationPort 目标主机端口（0-65535）
+     *
+     * @throws IllegalArgumentException 当方法协商或认证结果不符合预期，或用户名/密码长度超过允许范围时抛出
+     * @throws IllegalStateException 当读取响应时遇到超时、意外 EOF 或收到不支持的地址类型（ATYP）时抛出
      */
     private fun performSocks5Handshake(
         input: java.io.InputStream,
@@ -408,10 +464,29 @@ class Socks5ConnectionPool(
         readFully(input, boundAddressAndPort)
     }
 
+    /**
+     * 从输入流中读取数据直到填满指定的字节数组。
+     *
+     * 在读取到意外 EOF 或发生读取超时时会抛出 IllegalStateException。
+     *
+     * @param input 要读取的输入流。
+     * @param target 要填充的目标字节数组。
+     */
     private fun readFully(input: java.io.InputStream, target: ByteArray) {
         readFully(input, target, 0, target.size)
     }
 
+    /**
+     * 从输入流读取指定长度的字节并填充到目标数组的指定区间，直到读取到所需字节数。
+     *
+     * @param input 要读取的输入流。
+     * @param target 用于写入读取字节的目标数组。
+     * @param offset 在目标数组中开始写入的起始索引（inclusive）。
+     * @param length 要读取并写入的字节数。
+     *
+     * @throws IllegalArgumentException 当 offset 或 length 越界时抛出。
+     * @throws IllegalStateException 当在读取过程中发生 socket 超时或在到达所需字节数之前遇到流结束（EOF）时抛出。
+     */
     private fun readFully(input: java.io.InputStream, target: ByteArray, offset: Int, length: Int) {
         require(offset >= 0 && length >= 0 && offset + length <= target.size) {
             "Invalid read bounds: offset=$offset, length=$length, targetSize=${target.size}"
@@ -450,7 +525,9 @@ class Socks5ConnectionPool(
     }
 
     /**
-     * 清理空闲超时的连接
+     * 清理超过 idleTimeoutMs 的空闲连接并从池中移除它们。
+     *
+     * 在写锁保护下遍历所有连接，选出未被使用且上次使用时间距今超过配置空闲超时的连接，从可用队列与全量跟踪映射中移除并更新总连接计数；在写锁外关闭对应的 socket 并在发生实际清理时记录调试日志。
      */
     private fun cleanupIdleConnections() {
         val now = System.currentTimeMillis()
@@ -484,7 +561,9 @@ class Socks5ConnectionPool(
     }
 
     /**
-     * 启动清理线程
+     * 启动一个守护清理线程，周期性调用 `cleanupIdleConnections` 清理超过空闲超时的连接直到池被关闭。
+     *
+     * 线程名为 "Socks5ConnectionPool-Cleanup"；在被中断或检测到池已关闭时退出；非中断异常将被记录并继续循环。 
      */
     private fun startCleanupThread() {
         cleanupThread = Thread({
@@ -505,7 +584,10 @@ class Socks5ConnectionPool(
     }
 
     /**
-     * 关闭连接池
+     * 关闭连接池并释放所有资源。
+     *
+     * 中止后台清理线程，关闭并移除池中所有跟踪的连接、清空可用连接队列与目的地映射，并将总连接计数重置为 0。
+     * 调用为幂等操作：仅第一次有效，后续调用无副作用。
      */
     fun shutdown() {
         if (isShutdown.compareAndSet(false, true)) {
@@ -523,7 +605,13 @@ class Socks5ConnectionPool(
     }
 
     /**
-     * 获取连接池统计信息
+     * 获取当前连接池的统计信息。
+     *
+     * @return 包含以下指标的 `ConnectionPoolStats`：
+     * - `totalConnections`：池中被跟踪的连接总数（包括空闲与在用）。
+     * - `availableConnections`：当前未被使用的连接数。
+     * - `inUseConnections`：当前正在使用的连接数。
+     * - `destinationCount`：按目的地（destinationIp:destinationPort）分组的数量。
      */
     fun getStats(): ConnectionPoolStats {
         return poolLock.read {
