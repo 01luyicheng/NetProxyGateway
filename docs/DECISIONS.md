@@ -299,4 +299,4 @@ private fun connectUsingLegacyConfig(ssid: String, password: String?, securityTy
 - [TECH_DEBT.md](./TECH_DEBT.md) - 技术债务清单
 - [BLOCKERS.md](./BLOCKERS.md) - 阻塞问题清单
 - [KNOWN_LIMITATIONS.md](./KNOWN_LIMITATIONS.md) - 已知限制清单
-- [AGENTS.md](../AGENTS.md) - AI 代理执行契约
+- [CLAUDE.md](../CLAUDE.md) - AI 代理执行契约（AGENTS.md 是其符号链接）

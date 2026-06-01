@@ -49,6 +49,7 @@ services:
     environment:
       - SOCKS5_ADDR=0.0.0.0:1080
       - API_ENDPOINT=http://api:8080
+      - TUNNEL_ENDPOINT=ws://tunnel:8443
       - INTERNAL_API_KEY=${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
       # TLS 配置（可选）
       - ENABLE_TLS=${SOCKS5_ENABLE_TLS:-false}
@@ -59,6 +60,7 @@ services:
       - ./certs:/app/certs:ro
     depends_on:
       - api
+      - tunnel
     restart: unless-stopped
     networks:
       - netproxy

@@ -1784,7 +1784,8 @@ class VpnServiceTest {
 
         assertFalse(result)
         assertFalse(activeConnections.containsKey(sessionKey))
-        verify(exactly = 1) { mockPool.returnConnection(pooledConnection) }
+        // N86: 过期/无效会话的连接应直接关闭，而非归还连接池
+        verify(exactly = 0) { mockPool.returnConnection(pooledConnection) }
         verify(exactly = 0) { mockOutput.write(any<ByteArray>(), any(), any()) }
     }
 

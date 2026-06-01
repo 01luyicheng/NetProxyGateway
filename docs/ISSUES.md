@@ -777,3 +777,18 @@
   3. 统一风险等级格式为`**风险**: **等级**`
   4. 为旧问题补全提交哈希（如已知）
 
+### N86: Stale SOCKS5连接不应归还到连接池
+- **状态**: 已修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt`
+  - `cleanupStaleConnections()` L569
+  - `forwardViaSocks5` L485（正常路径）
+  - `forwardViaSocks5` L515（新会话创建冲突时）
+  - `forwardViaSocks5` catch 块 L532（转发异常后）
+  - `processTcpReturn` L641（通过 `removeSessionAndCloseConnection`）
+  - `stopVpn()` L1138-L1141（VPN停止时）
+- **关联修改**: `PooledSocks5Connection.close()` 新增 `inUse.set(false)` 防止连接池计数泄漏；`cleanupIdleConnections` 增加 `!conn.isValid()` 检查确保已关闭连接及时清理
+- **问题描述**: `ConnectionSession` 与 `PooledSocks5Connection` 的生命周期绑定存在设计缺陷。当 VPN 会话因超时或异常被清理时，`PooledSocks5Connection` 上可能残留未消费的数据或处于不确定的 TCP 状态。将其 `returnConnection()` 回池会导致后续借用者读取到脏数据，造成流量混淆。连接池的复用语义（同一 dstIp:dstPort 可复用）与 VPN 会话语义（每个五元组独立字节流）不匹配。
+- **风险**: **高**。可能导致跨会话的流量混淆和数据泄漏。
+- **修复方案**: 所有从 `activeConnections` 移除的过期/无效会话，其 `pooledConnection` 直接关闭（`close()`）而非归还到连接池（`returnConnection()`）。`PooledSocks5Connection.close()` 中设置 `inUse=false`，`cleanupIdleConnections` 增加 `!isValid()` 检查，确保连接池的 `allConnections` 和 `totalConnections` 状态及时同步。
+
+

@@ -24,7 +24,7 @@
 - **非 TLS 模式** (开发测试): `tcp://your-broker-address:1883`
 
 **客户端 ID 格式**：
-```
+```text
 NetProxyGateway_{deviceId}
 ```
 
@@ -80,7 +80,7 @@ private const val MAX_RECONNECT_DELAY = 60000L // 60 秒
 
 ### 1.4 认证流程
 
-```
+```text
 1. Android 客户端 → API 服务：请求配对码
    POST /api/pair
    Body: { "device_id": "device-uuid" }
@@ -390,7 +390,7 @@ SOCKS5_TLS_KEY=/path/to/key.key
 | 0x02 | USERNAME/PASSWORD | 用户名/密码认证（**已支持**） |
 
 **认证流程**：
-```
+```text
 客户端 → 服务端：方法协商
   [0x05, 0x01, 0x02]
   版本=5, 方法数=1, 方法=0x02(用户名/密码)
@@ -437,7 +437,7 @@ SOCKS5_TLS_KEY=/path/to/key.key
 ### 3.5 CONNECT 命令流程
 
 **请求格式**：
-```
+```text
 +----+-----+-------+------+----------+----------+
 |VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
 +----+-----+-------+------+----------+----------+
@@ -446,7 +446,7 @@ SOCKS5_TLS_KEY=/path/to/key.key
 ```
 
 **响应格式**：
-```
+```text
 +----+-----+-------+------+----------+----------+
 |VER | REP |  RSV  | ATYP | BND.ADDR | BND.PORT |
 +----+-----+-------+------+----------+----------+
@@ -678,7 +678,7 @@ Content-Type: application/json
 ```
 
 **有效状态转换**：
-```
+```text
 pending → connected | expired
 connected → disconnected | expired
 disconnected → (无)
@@ -807,7 +807,7 @@ TUNNEL_TLS_KEY=/path/to/key.key
 ### 5.2 连接建立
 
 **WebSocket URL 格式**：
-```
+```text
 ws://{tunnel_endpoint}/tunnel?device_id={device_id}&token={session_token}
 ```
 
@@ -951,7 +951,7 @@ ws://{tunnel_endpoint}/tunnel?device_id={device_id}&token={session_token}
 ### 5.7 流连接管理
 
 **流 ID 格式**：
-```
+```text
 {device_id}-{timestamp_nano}
 ```
 示例：`device-uuid-1712131200000000000`

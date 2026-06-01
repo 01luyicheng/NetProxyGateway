@@ -23,33 +23,41 @@ help:
 	@echo ""
 	@echo "通用目标:"
 	@echo "  all                    运行 Android 和 Go 的完整构建与测试"
+	@echo "  test                   运行 Android 和 Go 测试"
 	@echo "  clean                  清理构建产物"
 
 # ---------------------------------------------------------------------------
 # Android
 # ---------------------------------------------------------------------------
 
-GRADLEW := android\gradlew.bat
+# Cross-platform Gradle wrapper: use .bat on Windows, shell script elsewhere
+# Windows 下通过 cd 进入 android 目录后执行 gradlew.bat，避免 -p 参数在 MinGW Make + PowerShell 环境下被误解析
+ifeq ($(OS),Windows_NT)
+GRADLEW := gradlew.bat
+ANDROID_DIR := android
+else
+GRADLEW := ./gradlew
+ANDROID_DIR := android
+endif
+
 # 移除 --no-daemon，启用 Daemon 大幅提升增量构建速度
 # 添加 --build-cache 和 --parallel 确保缓存和并行编译生效
 GRADLE_FLAGS := --stacktrace --build-cache --parallel
 
 android-build:
-	$(GRADLEW) -p android assembleDebug $(GRADLE_FLAGS)
+	cd $(ANDROID_DIR) && $(GRADLEW) assembleDebug $(GRADLE_FLAGS)
 
 android-test:
-	$(GRADLEW) -p android :app:testDebugUnitTest $(GRADLE_FLAGS)
+	cd $(ANDROID_DIR) && $(GRADLEW) :app:testDebugUnitTest $(GRADLE_FLAGS)
 
 android-lint:
-	$(GRADLEW) -p android lintDebug $(GRADLE_FLAGS)
+	cd $(ANDROID_DIR) && $(GRADLEW) lintDebug $(GRADLE_FLAGS)
 
 android-coverage:
-	$(GRADLEW) -p android jacocoTestReport $(GRADLE_FLAGS)
+	cd $(ANDROID_DIR) && $(GRADLEW) jacocoTestReport $(GRADLE_FLAGS)
 
 android-dep-check:
-	$(GRADLEW) -p android dependencyCheckAnalyze $(GRADLE_FLAGS)
-
-android-all: android-build android-test android-lint android-coverage
+	cd $(ANDROID_DIR) && $(GRADLEW) dependencyCheckAnalyze $(GRADLE_FLAGS)
 
 # ---------------------------------------------------------------------------
 # Go Server
@@ -58,24 +66,22 @@ android-all: android-build android-test android-lint android-coverage
 GO_COMPONENTS := api socks5-proxy tunnel
 
 go-build:
-	@for %%c in ($(GO_COMPONENTS)) do ( \
-		echo Building server/%%c ... && \
-		cd server/%%c && go build -v ./... && cd ../.. \
-	)
+	@for component in $(GO_COMPONENTS); do \
+		echo "Building server/$$component ..." && \
+		cd server/$$component && go build -v ./... && cd ../.. || exit 1; \
+	done
 
 go-test:
-	@for %%c in ($(GO_COMPONENTS)) do ( \
-		echo Testing server/%%c ... && \
-		cd server/%%c && go test -v -coverprofile=coverage.out ./... && cd ../.. \
-	)
+	@for component in $(GO_COMPONENTS); do \
+		echo "Testing server/$$component ..." && \
+		cd server/$$component && go test -v -coverprofile=coverage.out ./... && cd ../.. || exit 1; \
+	done
 
 go-vuln:
-	@for %%c in ($(GO_COMPONENTS)) do ( \
-		echo Scanning server/%%c ... && \
-		cd server/%%c && govulncheck ./... && cd ../.. \
-	)
-
-go-all: go-build go-test go-vuln
+	@for component in $(GO_COMPONENTS); do \
+		echo "Scanning server/$$component ..." && \
+		cd server/$$component && govulncheck ./... && cd ../.. || exit 1; \
+	done
 
 # ---------------------------------------------------------------------------
 # Docker
@@ -94,10 +100,23 @@ docker-build:
 # Combined
 # ---------------------------------------------------------------------------
 
+android-all: android-build android-test android-lint android-coverage
+	@echo "Android 完整检查完成"
+
+go-all: go-build go-test go-vuln
+	@echo "Go 完整检查完成"
+
 all: android-all go-all
 
+test: android-test go-test
+
 clean:
-	$(GRADLEW) -p android clean $(GRADLE_FLAGS)
-	@for %%c in ($(GO_COMPONENTS)) do ( \
-		cd server/%%c && go clean && cd ../.. \
-	)
+	cd $(ANDROID_DIR) && $(GRADLEW) clean $(GRADLE_FLAGS)
+	@for component in $(GO_COMPONENTS); do \
+		cd server/$$component && go clean && cd ../.. || exit 1; \
+	done
+
+.PHONY: android-build android-test android-lint android-coverage android-dep-check android-all
+.PHONY: go-build go-test go-vuln go-all
+.PHONY: docker-up docker-down docker-build
+.PHONY: all test clean

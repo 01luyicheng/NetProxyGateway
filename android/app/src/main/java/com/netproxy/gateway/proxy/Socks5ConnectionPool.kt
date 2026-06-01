@@ -59,6 +59,8 @@ class PooledSocks5Connection(
     }
 
     fun close() {
+        // N86: 标记为不在使用中，让连接池的 cleanupIdleConnections 能够清理此连接
+        inUse.set(false)
         try {
             socket.close()
         } catch (e: Exception) {
@@ -459,7 +461,7 @@ class Socks5ConnectionPool(
         // Keep selection and removal in one write lock window to avoid stale decisions.
         poolLock.write {
             allConnections.keys.forEach { conn ->
-                if (!conn.inUse.get() && (now - conn.lastUsedAt.get() > config.idleTimeoutMs)) {
+                if (!conn.inUse.get() && (!conn.isValid() || (now - conn.lastUsedAt.get() > config.idleTimeoutMs))) {
                     toRemove.add(conn)
                 }
             }

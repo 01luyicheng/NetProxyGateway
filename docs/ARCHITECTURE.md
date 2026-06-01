@@ -1184,7 +1184,7 @@ TLS_KEY=/app/certs/server.key
 - [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) - 已知限制
 - [NETWORK_ROUTING.md](NETWORK_ROUTING.md) - 网络路由分析
 - [BLOCKERS.md](BLOCKERS.md) - 阻塞问题
-- [AGENTS.md](../AGENTS.md) - AI 代理执行契约
+- [CLAUDE.md](../CLAUDE.md) - AI 代理执行契约（AGENTS.md 是其符号链接）
 
 ---
 
