@@ -1810,11 +1810,25 @@ class VpnServiceTest {
         val mockPool = mockk<Socks5ConnectionPool>(relaxed = true)
         setPrivateField(service, "socks5ConnectionPool", mockPool)
 
-        val session = createSessionForReflection(service, "10.0.0.2", "10.0.0.100", pooledConnection)
+        val mockOutput = mockk<FileOutputStream>(relaxed = true)
+        setPrivateField(service, "vpnOutputStream", mockOutput)
+
+        // Create session with expired lastActivity (60s ago, beyond 30s timeout)
+        val session = createSessionWithLastActivity(
+            service, "10.0.0.2", "10.0.0.100", pooledConnection,
+            System.currentTimeMillis() - 60_000
+        )
+
+        // Verify session fields are set correctly
         val sessionClass = getSessionClass(service)
-        val lastActivityField = sessionClass.getDeclaredField("lastActivity")
-        lastActivityField.isAccessible = true
-        lastActivityField.set(session, System.currentTimeMillis() - 60_000)
+        val pcField = sessionClass.getDeclaredField("pooledConnection")
+        pcField.isAccessible = true
+        assertNotNull("pooledConnection should be set", pcField.get(session))
+        val laField = sessionClass.getDeclaredField("lastActivity")
+        laField.isAccessible = true
+        val actualLa = laField.getLong(session)
+        assertTrue("lastActivity should be at least 30s ago, was ${System.currentTimeMillis() - actualLa}ms ago",
+            System.currentTimeMillis() - actualLa > 30_000)
 
         val sessionKey = "10.0.0.2:12345-192.168.1.1:443"
         val activeConnections = getPrivateField(service, "activeConnections") as ConcurrentHashMap<String, Any>
@@ -1822,9 +1836,9 @@ class VpnServiceTest {
 
         invokeCleanupStaleConnections(service)
 
-        assertFalse(activeConnections.containsKey(sessionKey))
+        assertFalse("Session should be removed from activeConnections", activeConnections.containsKey(sessionKey))
         verify(exactly = 0) { mockPool.returnConnection(any()) }
-        verify(atLeast = 1) { mockSocket.close() }
+        verify(atLeast = 1) { mockPool.discardConnection(pooledConnection) }
     }
 
     @Test
@@ -1858,7 +1872,7 @@ class VpnServiceTest {
 
         assertFalse(activeConnections.containsKey(sessionKey))
         verify(exactly = 0) { mockPool.returnConnection(any()) }
-        verify(atLeast = 1) { mockSocket.close() }
+        verify(atLeast = 1) { mockPool.discardConnection(invalidConnection) }
     }
 
     @Test
@@ -1879,6 +1893,10 @@ class VpnServiceTest {
         every { mockPool.borrowConnection(any(), any(), any()) } returns mockConn
         setPrivateField(service, "socks5ConnectionPool", mockPool)
 
+        // Mock virtualIpAllocator to avoid UninitializedPropertyAccessException
+        val mockAllocator = mockk<VirtualIpAllocator>(relaxed = true)
+        setPrivateField(service, "virtualIpAllocator", mockAllocator)
+
         val conflictSession = createSessionForReflection(service, "10.0.0.2", "10.0.0.100", null)
         val conflictKey = "10.0.0.2:12345-192.168.1.1:443"
 
@@ -1892,7 +1910,7 @@ class VpnServiceTest {
         invokeForwardViaSocks5(service, packet, packet.size, "192.168.1.1")
 
         verify(exactly = 0) { mockPool.returnConnection(any()) }
-        verify(atLeast = 1) { mockConn.close() }
+        verify(atLeast = 1) { mockPool.discardConnection(mockConn) }
     }
 
     // ==================== 帮助方法 ====================
@@ -1902,6 +1920,16 @@ class VpnServiceTest {
         srcIp: String,
         virtualSrcIp: String,
         pooledConnection: PooledSocks5Connection?
+    ): Any {
+        return createSessionWithLastActivity(service, srcIp, virtualSrcIp, pooledConnection, System.currentTimeMillis())
+    }
+
+    private fun createSessionWithLastActivity(
+        service: GatewayVpnService,
+        srcIp: String,
+        virtualSrcIp: String,
+        pooledConnection: PooledSocks5Connection?,
+        lastActivity: Long
     ): Any {
         val sessionClass = getSessionClass(service)
         val constructor = sessionClass.declaredConstructors.first { it.parameterTypes.size == 9 }
@@ -1915,7 +1943,7 @@ class VpnServiceTest {
             pooledConnection,
             virtualSrcIp,
             System.currentTimeMillis(),
-            System.currentTimeMillis()
+            lastActivity
         )
     }
 
