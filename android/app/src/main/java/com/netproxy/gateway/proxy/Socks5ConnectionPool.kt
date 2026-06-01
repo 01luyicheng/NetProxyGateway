@@ -239,6 +239,19 @@ class Socks5ConnectionPool(
     }
 
     /**
+     * 丢弃连接：从池中移除跟踪并关闭 socket。
+     * 用于连接因 N86 原因（过期/无效/异常）不应归还到池中的场景。
+     */
+    fun discardConnection(connection: PooledSocks5Connection) {
+        val destKey = "${connection.destinationIp}:${connection.destinationPort}"
+        poolLock.write {
+            availableConnections[destKey]?.remove(connection)
+            removeConnection(connection)
+        }
+        connection.close()
+    }
+
+    /**
      * 创建新的SOCKS5连接
      */
     private fun createNewConnection(

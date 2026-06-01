@@ -481,8 +481,8 @@ class GatewayVpnService : AndroidVpnService() {
                     existingSession.updateActivity()
                     existingSession
                 } else {
-                    // 连接无效，直接关闭，不应归还到连接池（N86）
-                    existingSession.pooledConnection?.close()
+                    // 连接无效，丢弃连接，不应归还到连接池（N86）
+                    existingSession.pooledConnection?.let { pool.discardConnection(it) }
                     null
                 }
             }
@@ -512,7 +512,7 @@ class GatewayVpnService : AndroidVpnService() {
                     val existing = activeConnections.putIfAbsent(connectionKey, newSession)
                     sessionToUse = if (existing != null) {
                         // 其他线程已创建会话，关闭我们借用的连接（N86）
-                        conn.close()
+                        pool.discardConnection(conn)
                         existing
                     } else {
                         logDebug("Borrowed connection from pool: ${redactConnectionKey(connectionKey)} -> virtualIP: ${redactIp(virtualSrcIp)}")
@@ -529,7 +529,7 @@ class GatewayVpnService : AndroidVpnService() {
             }
         } catch (e: Exception) {
             logger.warn("Forward via SOCKS5 failed for ${redactConnectionKey(connectionKey)}", e)
-            activeConnections.remove(connectionKey)?.pooledConnection?.close()
+            activeConnections.remove(connectionKey)?.pooledConnection?.let { pool.discardConnection(it) }
         }
     }
 
@@ -566,7 +566,7 @@ class GatewayVpnService : AndroidVpnService() {
                 if (isExpired) {
                     try {
                         // 过期会话直接关闭连接，不应归还到连接池（N86）
-                        existingSession.pooledConnection?.close()
+                        existingSession.pooledConnection?.let { pool?.discardConnection(it) }
                         logger.debug("Closed stale connection: ${redactConnectionKey(key)}")
                     } catch (e: Exception) {
                         logger.warn("Failed to close stale connection", e)
@@ -638,7 +638,7 @@ class GatewayVpnService : AndroidVpnService() {
         var removed = false
         activeConnections.computeIfPresent(sessionKey) { _, existing ->
             if (existing === session) {
-                existing.pooledConnection?.close()
+                existing.pooledConnection?.let { socks5ConnectionPool?.discardConnection(it) }
                 removed = true
                 null
             } else existing

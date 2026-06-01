@@ -1789,6 +1789,112 @@ class VpnServiceTest {
         verify(exactly = 0) { mockOutput.write(any<ByteArray>(), any(), any()) }
     }
 
+    // ==================== N86 补充测试 ====================
+
+    @Test
+    fun n86_cleanupStaleConnections_expiredSession_callsCloseNotReturnConnection() {
+        val service = GatewayVpnService()
+        val mockSocket = mockk<Socket>(relaxed = true)
+        every { mockSocket.isClosed } returns false
+        every { mockSocket.isConnected } returns true
+        every { mockSocket.isInputShutdown } returns false
+        every { mockSocket.isOutputShutdown } returns false
+
+        val pooledConnection = PooledSocks5Connection(
+            socket = mockSocket,
+            destinationIp = "192.168.1.1",
+            destinationPort = 443
+        )
+        pooledConnection.markUsed()
+
+        val mockPool = mockk<Socks5ConnectionPool>(relaxed = true)
+        setPrivateField(service, "socks5ConnectionPool", mockPool)
+
+        val session = createSessionForReflection(service, "10.0.0.2", "10.0.0.100", pooledConnection)
+        val sessionClass = getSessionClass(service)
+        val lastActivityField = sessionClass.getDeclaredField("lastActivity")
+        lastActivityField.isAccessible = true
+        lastActivityField.set(session, System.currentTimeMillis() - 60_000)
+
+        val sessionKey = "10.0.0.2:12345-192.168.1.1:443"
+        val activeConnections = getPrivateField(service, "activeConnections") as ConcurrentHashMap<String, Any>
+        activeConnections[sessionKey] = session
+
+        invokeCleanupStaleConnections(service)
+
+        assertFalse(activeConnections.containsKey(sessionKey))
+        verify(exactly = 0) { mockPool.returnConnection(any()) }
+        verify(atLeast = 1) { mockSocket.close() }
+    }
+
+    @Test
+    fun n86_forwardViaSocks5_computeIfPresent_invalidConnection_callsCloseNotReturnConnection() {
+        val service = GatewayVpnService()
+
+        val mockSocket = mockk<Socket>(relaxed = true)
+        every { mockSocket.isClosed } returns false
+        every { mockSocket.isConnected } returns false
+        every { mockSocket.isInputShutdown } returns true
+        every { mockSocket.isOutputShutdown } returns true
+
+        val invalidConnection = PooledSocks5Connection(
+            socket = mockSocket,
+            destinationIp = "192.168.1.1",
+            destinationPort = 443
+        )
+
+        val mockPool = mockk<Socks5ConnectionPool>(relaxed = true)
+        every { mockPool.borrowConnection(any(), any(), any()) } returns null
+        setPrivateField(service, "socks5ConnectionPool", mockPool)
+
+        // Seed activeConnections with a session that has an invalid connection
+        val session = createSessionForReflection(service, "10.0.0.2", "10.0.0.100", invalidConnection)
+        val sessionKey = "10.0.0.2:12345-192.168.1.1:443"
+        val activeConnections = getPrivateField(service, "activeConnections") as ConcurrentHashMap<String, Any>
+        activeConnections[sessionKey] = session
+
+        val packet = createValidTcpPacket()
+        invokeForwardViaSocks5(service, packet, packet.size, "192.168.1.1")
+
+        assertFalse(activeConnections.containsKey(sessionKey))
+        verify(exactly = 0) { mockPool.returnConnection(any()) }
+        verify(atLeast = 1) { mockSocket.close() }
+    }
+
+    @Test
+    fun n86_forwardViaSocks5_putIfAbsentConflict_callsCloseNotReturnConnection() {
+        val service = GatewayVpnService()
+
+        val mockSocket = mockk<Socket>(relaxed = true)
+        every { mockSocket.isClosed } returns false
+        every { mockSocket.isConnected } returns true
+        every { mockSocket.isInputShutdown } returns false
+        every { mockSocket.isOutputShutdown } returns false
+
+        val mockConn = mockk<PooledSocks5Connection>(relaxed = true)
+        every { mockConn.socket } returns mockSocket
+        every { mockConn.isValid() } returns true
+
+        val mockPool = mockk<Socks5ConnectionPool>(relaxed = true)
+        every { mockPool.borrowConnection(any(), any(), any()) } returns mockConn
+        setPrivateField(service, "socks5ConnectionPool", mockPool)
+
+        val conflictSession = createSessionForReflection(service, "10.0.0.2", "10.0.0.100", null)
+        val conflictKey = "10.0.0.2:12345-192.168.1.1:443"
+
+        val conflictMap = ConflictActiveConnections().apply {
+            this.conflictKey = conflictKey
+            this.conflictSession = conflictSession
+        }
+        setPrivateField(service, "activeConnections", conflictMap)
+
+        val packet = createValidTcpPacket()
+        invokeForwardViaSocks5(service, packet, packet.size, "192.168.1.1")
+
+        verify(exactly = 0) { mockPool.returnConnection(any()) }
+        verify(atLeast = 1) { mockConn.close() }
+    }
+
     // ==================== 帮助方法 ====================
 
     private fun createSessionForReflection(
@@ -1845,6 +1951,90 @@ class VpnServiceTest {
         return method.invoke(service, session, sessionKey) as Boolean
     }
 
+    private fun invokeCleanupStaleConnections(service: GatewayVpnService) {
+        val method = service.javaClass.getDeclaredMethod("cleanupStaleConnections")
+        method.isAccessible = true
+        method.invoke(service)
+    }
+
+    private fun invokeForwardViaSocks5(
+        service: GatewayVpnService,
+        packet: ByteArray,
+        length: Int,
+        destinationIp: String
+    ) {
+        val method = service.javaClass.getDeclaredMethod(
+            "forwardViaSocks5",
+            ByteArray::class.java,
+            Int::class.javaPrimitiveType,
+            String::class.java
+        )
+        method.isAccessible = true
+        method.invoke(service, packet, length, destinationIp)
+    }
+
+    private fun createValidTcpPacket(): ByteArray {
+        val packet = ByteArray(60)
+        // IP header (20 bytes)
+        packet[0] = 0x45  // IPv4, IHL=5
+        packet[1] = 0x00
+        packet[2] = 0x00
+        packet[3] = 0x3C  // Total length = 60
+        packet[4] = 0x00
+        packet[5] = 0x00
+        packet[6] = 0x40  // DF flag
+        packet[7] = 0x00
+        packet[8] = 0x40  // TTL = 64
+        packet[9] = 0x06  // Protocol = TCP
+        packet[10] = 0x00 // Checksum placeholder
+        packet[11] = 0x00
+        // Source IP: 10.0.0.2
+        packet[12] = 0x0A
+        packet[13] = 0x00
+        packet[14] = 0x00
+        packet[15] = 0x02
+        // Dest IP: 192.168.1.1
+        packet[16] = 0xC0.toByte()
+        packet[17] = 0xA8.toByte()
+        packet[18] = 0x01
+        packet[19] = 0x01
+        // TCP header (20 bytes)
+        // Source port: 12345
+        packet[20] = 0x30.toByte()
+        packet[21] = 0x39.toByte()
+        // Dest port: 443
+        packet[22] = 0x01.toByte()
+        packet[23] = 0xBB.toByte()
+        // Seq number
+        packet[24] = 0x00
+        packet[25] = 0x00
+        packet[26] = 0x00
+        packet[27] = 0x01
+        // Ack number
+        packet[28] = 0x00
+        packet[29] = 0x00
+        packet[30] = 0x00
+        packet[31] = 0x00
+        // Data offset = 5, Reserved = 0
+        packet[32] = 0x50
+        // Flags: PSH+ACK
+        packet[33] = 0x18
+        // Window size
+        packet[34] = 0x20.toByte()
+        packet[35] = 0x00
+        // Checksum placeholder
+        packet[36] = 0x00
+        packet[37] = 0x00
+        // Urgent pointer
+        packet[38] = 0x00
+        packet[39] = 0x00
+        // Payload: 20 bytes
+        for (i in 40 until 60) {
+            packet[i] = (i % 256).toByte()
+        }
+        return packet
+    }
+
     private fun setPrivateField(target: Any, fieldName: String, value: Any?) {
         val field = target.javaClass.getDeclaredField(fieldName)
         field.isAccessible = true
@@ -1878,6 +2068,24 @@ class VpnServiceTest {
         fun updateActivity() {
             lastActivity = System.currentTimeMillis()
             pooledConnection?.markUsed()
+        }
+    }
+
+    /**
+     * 用于测试 putIfAbsent 冲突的自定义 ConcurrentHashMap
+     * 在 putIfAbsent 被调用时模拟竞态条件：另一个线程已添加了条目
+     */
+    private class ConflictActiveConnections : ConcurrentHashMap<String, Any>() {
+        var conflictKey: String? = null
+        var conflictSession: Any? = null
+
+        override fun putIfAbsent(key: String, value: Any): Any? {
+            if (key == conflictKey && conflictSession != null) {
+                // 模拟竞态：另一个线程已在 computeIfPresent 和 putIfAbsent 之间添加了条目
+                super.put(key, conflictSession!!)
+                return conflictSession
+            }
+            return super.putIfAbsent(key, value)
         }
     }
 

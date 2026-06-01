@@ -344,4 +344,24 @@ class Socks5ConnectionPoolTest {
             credentialProvider = { null }
         )
     }
+
+    @Test
+    fun n86_pooledConnection_close_setsInUseFalse() {
+        val socket = mockValidSocket()
+        val connection = PooledSocks5Connection(
+            socket = socket,
+            destinationIp = "10.0.0.1",
+            destinationPort = 443
+        )
+
+        // Mark as in use first
+        connection.markUsed()
+        assertTrue(connection.inUse.get())
+
+        // Close should set inUse to false
+        connection.close()
+
+        assertFalse(connection.inUse.get())
+        verify(atLeast = 1) { socket.close() }
+    }
 }
