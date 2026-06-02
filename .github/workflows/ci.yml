@@ -1,10 +1,13 @@
 name: CI
 
 on:
-  push:
-    branches: [main, dev]
   pull_request:
     branches: [main, dev]
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
@@ -99,6 +102,14 @@ jobs:
           name: android-dependency-check-report
           path: android/app/build/reports/dependency-check-report.html
 
+      # Commit lint as a step (not a separate job) to save runner startup time
+      - name: Check commit messages
+        if: github.event_name == 'pull_request'
+        uses: wagoid/commitlint-github-action@v6
+        with:
+          configFile: .commitlintrc.json
+        continue-on-error: true
+
   go-build:
     name: Go Server Build
     runs-on: ubuntu-latest
@@ -148,20 +159,3 @@ jobs:
         with:
           name: go-coverage-${{ matrix.component }}
           path: server/${{ matrix.component }}/coverage.out
-
-  commit-lint:
-    name: Commit Message Lint
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - name: Check commit messages
-        uses: wagoid/commitlint-github-action@v6
-        with:
-          configFile: .commitlintrc.json
-        continue-on-error: true
