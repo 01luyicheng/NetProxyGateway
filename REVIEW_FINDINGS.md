@@ -74,20 +74,19 @@
 - **验证**: 代码确认cleanupStaleConnections使用removeIf；竞态场景分析成立
 - **建议**: 将`cleanupStaleConnections`改为`computeIfPresent`或`compute`模式，与`forwardViaSocks5`统一
 
-### P8: N27残余问题 - returnConnection和borrowConnection仍有锁内close
+### P8: N27残余问题 - returnConnection和borrowConnection仍有锁内close [已修复]
 - **相关提交**: `f5dfde4` - fix: move socket.close() out of write lock
 - **文件**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt`
-- **描述**: `cleanupIdleConnections`已将close移出write锁（先锁内收集+移除，再锁外close），但`returnConnection()`在L194、L200、L205（通过removeConnection）、L223（通过removeConnection）仍在write锁内close。`borrowConnection()`在L167也在write锁内close。`removeConnection()`辅助方法本身在调用者持有的锁内执行close。
-- **验证**: 代码确认returnConnection和borrowConnection中仍有锁内close
-- **建议**: 统一采用cleanupIdleConnections的两阶段模式（锁内集合操作+锁外close）
+- **描述**: ~~`cleanupIdleConnections`已将close移出write锁（先锁内收集+移除，再锁外close），但`returnConnection()`在L194、L200、L205（通过removeConnection）、L223（通过removeConnection）仍在write锁内close。`borrowConnection()`在L167也在write锁内close。`removeConnection()`辅助方法本身在调用者持有的锁内执行close。~~
+- **修复**: `returnConnection()` 和 `borrowConnection()` 统一采用 `cleanupIdleConnections` 的两阶段模式（锁内集合操作+锁外close），`removeConnection()` 拆分为仅跟踪移除，调用者负责锁外关闭
+- **验证**: 代码确认所有 close() 均在写锁外执行
 
 ### P9: 重复提交
 - **初始假设**: `b18d832`和`1930572`是完全相同的提交；`b2256ff`和`41e7468`是完全相同的提交
 - **验证结果**: 不成立。git diff显示这些提交之间存在差异（主要是CLAUDE.md中Root检测行的差异）。它们不是完全相同的重复提交，而是不同的提交对各自做了类似的修改。
 - **结论**: 问题不成立，从关注列表中移除
 
-### P10: connectionLost回调遗留竞态（低优先级）
+### P10: connectionLost回调遗留竞态（低优先级） [已修复]
 - **文件**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt`
-- **描述**: `connectionLost`回调运行在Paho内部线程中。场景：网络断开导致Paho触发connectionLost，回调通过开头的shouldStayConnected检查后，用户同时调用disconnect()。disconnect()设置shouldStayConnected=false和_connectionState=Disconnected，但connectionLost继续执行设置_connectionState=Error，导致Error状态覆盖Disconnected。两个线程对`_connectionState`的写操作没有任何同步保护。
-- **验证**: 代码确认connectionLost在Paho线程执行，disconnect在调用者线程执行，两者无同步保护
-- **建议**: 在connectionLost中设置_errorState前增加二次shouldStayConnected检查，或将_connectionState修改纳入synchronized保护
+- **描述**: ~~`connectionLost`回调运行在Paho内部线程中。场景：网络断开导致Paho触发connectionLost，回调通过开头的shouldStayConnected检查后，用户同时调用disconnect()。disconnect()设置shouldStayConnected=false和_connectionState=Disconnected，但connectionLost继续执行设置_connectionState=Error，导致Error状态覆盖Disconnected。两个线程对`_connectionState`的写操作没有任何同步保护。~~
+- **验证**: 当前代码已在 `connectionLost` 中使用 `synchronized(this@MqttConnectionManager)` + 双重检查 (`shouldStayConnected`/`generation`)，与 `disconnect()` 互斥，竞态已消除

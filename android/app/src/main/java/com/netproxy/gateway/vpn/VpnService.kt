@@ -481,8 +481,8 @@ class GatewayVpnService : AndroidVpnService() {
                     existingSession.updateActivity()
                     existingSession
                 } else {
-                    // 连接无效，在compute块内标记为null，后续清理
-                    existingSession.pooledConnection?.let { pool.returnConnection(it) }
+                    // 连接无效，丢弃连接，不应归还到连接池（N86）
+                    existingSession.pooledConnection?.let { pool.discardConnection(it) }
                     null
                 }
             }
@@ -511,8 +511,8 @@ class GatewayVpnService : AndroidVpnService() {
                     // putIfAbsent确保不会覆盖其他线程刚创建的会话
                     val existing = activeConnections.putIfAbsent(connectionKey, newSession)
                     sessionToUse = if (existing != null) {
-                        // 其他线程已创建会话，归还我们借用的连接
-                        pool.returnConnection(conn)
+                        // 其他线程已创建会话，关闭我们借用的连接（N86）
+                        pool.discardConnection(conn)
                         existing
                     } else {
                         logDebug("Borrowed connection from pool: ${redactConnectionKey(connectionKey)} -> virtualIP: ${redactIp(virtualSrcIp)}")
@@ -529,7 +529,7 @@ class GatewayVpnService : AndroidVpnService() {
             }
         } catch (e: Exception) {
             logger.warn("Forward via SOCKS5 failed for ${redactConnectionKey(connectionKey)}", e)
-            activeConnections.remove(connectionKey)?.pooledConnection?.let { pool.returnConnection(it) }
+            activeConnections.remove(connectionKey)?.pooledConnection?.let { pool.discardConnection(it) }
         }
     }
 
@@ -565,11 +565,11 @@ class GatewayVpnService : AndroidVpnService() {
                 val isExpired = now - existingSession.lastActivity > CONNECTION_TIMEOUT_MS
                 if (isExpired) {
                     try {
-                        // 原子块内归还连接到连接池，确保"检查-归还-移除"三步一致
-                        existingSession.pooledConnection?.let { pool?.returnConnection(it) }
-                        logger.debug("Returned stale connection to pool: ${redactConnectionKey(key)}")
+                        // 过期会话直接关闭连接，不应归还到连接池（N86）
+                        existingSession.pooledConnection?.let { pool?.discardConnection(it) }
+                        logger.debug("Closed stale connection: ${redactConnectionKey(key)}")
                     } catch (e: Exception) {
-                        logger.warn("Failed to return stale connection to pool", e)
+                        logger.warn("Failed to close stale connection", e)
                     }
                     null // 返回null以移除该entry
                 } else {
@@ -631,14 +631,14 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     /**
-     * 原子移除session并归还连接池（仅当session仍是当前值时）
+     * 原子移除session并关闭连接（仅当session仍是当前值时）
      * @return true if the entry was present, matched, and removed; false otherwise
      */
-    private fun removeSessionAndReturnConnection(sessionKey: String, session: ConnectionSession): Boolean {
+    private fun removeSessionAndCloseConnection(sessionKey: String, session: ConnectionSession): Boolean {
         var removed = false
         activeConnections.computeIfPresent(sessionKey) { _, existing ->
             if (existing === session) {
-                existing.pooledConnection?.let { socks5ConnectionPool?.returnConnection(it) }
+                existing.pooledConnection?.let { socks5ConnectionPool?.discardConnection(it) }
                 removed = true
                 null
             } else existing
@@ -655,8 +655,8 @@ class GatewayVpnService : AndroidVpnService() {
         val pooledConn = session.pooledConnection ?: return false
         if (!pooledConn.isValid()) {
             // P12: isValid()已包含socket.isClosed检查，移除冗余条件
-            // 连接无效，原子移除并归还到连接池（仅当session仍是当前值时）
-            removeSessionAndReturnConnection(sessionKey, session)
+            // 连接无效，原子移除并关闭连接（仅当session仍是当前值时）
+            removeSessionAndCloseConnection(sessionKey, session)
             return false
         }
 
@@ -672,13 +672,13 @@ class GatewayVpnService : AndroidVpnService() {
                     val packetLen = constructReturnPacket(buffer, session, read)
                     if (packetLen <= 0) {
                         logger.warn("Drop invalid TCP return packet for ${redactConnectionKey(sessionKey)}")
-                        removeSessionAndReturnConnection(sessionKey, session)
+                        removeSessionAndCloseConnection(sessionKey, session)
                         return false
                     }
                     // 注入TUN
                     if (!injectPacket(buffer, packetLen)) {
                         logger.warn("Failed to inject TCP return packet for ${redactConnectionKey(sessionKey)}, closing session")
-                        removeSessionAndReturnConnection(sessionKey, session)
+                        removeSessionAndCloseConnection(sessionKey, session)
                         return false
                     }
                     session.updateActivity()
@@ -688,8 +688,8 @@ class GatewayVpnService : AndroidVpnService() {
             return false
         } catch (e: Exception) {
             logger.warn("TCP return traffic error for ${redactConnectionKey(sessionKey)}: ${e.message}")
-            // P13: 原子移除并归还，仅当session仍是当前值时
-            removeSessionAndReturnConnection(sessionKey, session)
+            // P13: 原子移除并关闭连接，仅当session仍是当前值时
+            removeSessionAndCloseConnection(sessionKey, session)
             return false
         }
     }
@@ -1135,26 +1135,12 @@ class GatewayVpnService : AndroidVpnService() {
             logger.warn("Failed to close VPN interface", e)
         }
 
-        // 归还所有活跃会话中的连接池连接
-        val pool = socks5ConnectionPool
-        if (pool != null) {
-            activeConnections.values.forEach { session ->
-                try {
-                    session.pooledConnection?.let { connection ->
-                        pool.returnConnection(connection)
-                    }
-                } catch (e: Exception) {
-                    logger.warn("Failed to return connection for session ${redactIp(session.srcIp)}:${session.srcPort}", e)
-                }
-            }
-        } else {
-            // 连接池已不存在，直接关闭所有连接
-            activeConnections.values.forEach { session ->
-                try {
-                    session.pooledConnection?.close()
-                } catch (e: Exception) {
-                    logger.warn("Failed to close connection for session ${redactIp(session.srcIp)}:${session.srcPort}", e)
-                }
+        // VPN停止时直接关闭所有活跃会话的连接（N86：过期/无效会话不应归还连接池）
+        activeConnections.values.forEach { session ->
+            try {
+                session.pooledConnection?.close()
+            } catch (e: Exception) {
+                logger.warn("Failed to close connection for session ${redactIp(session.srcIp)}:${session.srcPort}", e)
             }
         }
         activeConnections.clear()

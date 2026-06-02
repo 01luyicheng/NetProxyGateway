@@ -191,6 +191,10 @@ func (t *TunnelConn) Close() {
 }
 
 // WritePing sends a WebSocket ping control message with the specified deadline.
+// connMu prevents racing with Close(): without the lock, Close() could set t.closed
+// and close the underlying connection between WritePing's nil-check and the
+// WriteControl call, causing a use-after-close panic. WriteControl is safe to
+// call concurrently with WriteMessage per gorilla/websocket docs.
 func (t *TunnelConn) WritePing(deadline time.Time) error {
 	t.connMu.Lock()
 	defer t.connMu.Unlock()
@@ -274,6 +278,10 @@ func (m *TunnelManager) Register(deviceID string, conn *websocket.Conn) *TunnelC
 }
 
 // Unregister unregisters a tunnel for a device.
+// The optional tunnel parameter enables an identity check: the entry is
+// removed only if the map still holds the same *TunnelConn object.  This
+// prevents a concurrently registered replacement tunnel from being closed
+// and deleted by mistake.
 func (m *TunnelManager) Unregister(deviceID string, tunnel *TunnelConn) {
 	removed := false
 
@@ -446,6 +454,9 @@ func (m *TunnelManager) cleanupDeadTunnelsOnce() {
 	for deviceID, tunnel := range m.tunnels {
 		if !tunnel.IsAlive(m.config.HeartbeatTimeout) {
 			log.Printf("Cleaning up dead tunnel for device: %s", deviceID)
+			// Identity check: only remove if the tunnel in the map is still
+			// the same object we observed.  Without this, a concurrently
+			// registered replacement tunnel could be deleted by mistake.
 			if current, ok := m.tunnels[deviceID]; ok && current == tunnel {
 				deadTunnels = append(deadTunnels, tunnel)
 				deadIDs = append(deadIDs, deviceID)
@@ -846,6 +857,9 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 
 // Run starts the tunnel server.
 func (s *Server) Run() error {
+	// wg.Add(1) must happen before the goroutine launch (not inside it);
+	// otherwise Stop() could observe wg.Wait() == 0 before the goroutine
+	// has called wg.Add(1), causing WaitGroup reuse panic.
 	s.manager.wg.Add(1)
 	go s.manager.cleanupDeadTunnels()
 
