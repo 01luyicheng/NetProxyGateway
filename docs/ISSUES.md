@@ -329,8 +329,8 @@
 ### H15: VpnService测试直接实例化Android Service [待修复]
 - **状态**: 待修复
 - **提交哈希**: d01ddd1
-- **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt` (L1697, L1718, L1752, L1793)
-- **问题描述**: 测试代码直接实例化 `GatewayVpnService()`，违反Android组件生命周期规范。`VpnService`必须通过系统创建并调用`onCreate()`后才能使用。直接实例化可能导致依赖未初始化、Hilt注入失败。
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt` (L1697, L1718, L1752, L1796, L1846, L1880)
+- **问题描述**: 测试代码直接实例化 `GatewayVpnService()`，违反Android组件生命周期规范。`VpnService`必须通过系统创建并调用`onCreate()`后才能使用。直接实例化可能导致依赖未初始化、Hilt注入失败。N86 新增测试（L1796, L1846, L1880）延续了此反模式。
 - **风险**: 高。测试不可靠，与实际运行时不一致，可能产生假阳性/假阴性结果。
 - **修复难度**: 中。需要引入/调整 Robolectric + Hilt 测试基座，或将纯逻辑下沉为可直接单测的无 Android 组件类
 
@@ -779,6 +779,7 @@
 
 ### N86: Stale SOCKS5连接不应归还到连接池
 - **状态**: 已修复
+- **提交哈希**: `4ab337d`（WIP：初始修复）；`b0a86f5`（新增 discardConnection API）；`93fccd9`（P2 域名修复）
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt`
   - `cleanupStaleConnections()` L569
   - `forwardViaSocks5` L485（正常路径）

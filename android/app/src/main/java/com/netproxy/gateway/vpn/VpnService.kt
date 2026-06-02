@@ -1135,12 +1135,13 @@ class GatewayVpnService : AndroidVpnService() {
             logger.warn("Failed to close VPN interface", e)
         }
 
-        // VPN停止时直接关闭所有活跃会话的连接（N86：过期/无效会话不应归还连接池）
+        // VPN停止时丢弃所有活跃会话的连接（N86：过期/无效会话不应归还连接池）
+        val pool = socks5ConnectionPool
         activeConnections.values.forEach { session ->
             try {
-                session.pooledConnection?.close()
+                session.pooledConnection?.let { pool?.discardConnection(it) }
             } catch (e: Exception) {
-                logger.warn("Failed to close connection for session ${redactIp(session.srcIp)}:${session.srcPort}", e)
+                logger.warn("Failed to discard connection for session ${redactIp(session.srcIp)}:${session.srcPort}", e)
             }
         }
         activeConnections.clear()
