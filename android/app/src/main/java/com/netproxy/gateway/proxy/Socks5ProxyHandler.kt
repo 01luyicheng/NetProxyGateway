@@ -126,9 +126,12 @@ class Socks5ProxyHandler(
             return IpAddressUtils.isPrivateIpv4Rfc1918(host)
         }
 
-        // Reject domain names (SOCKS5 ATYP=0x03). The proxy is restricted to
-        // RFC1918 private IP addresses only; clients must resolve names externally.
-        return false
+        // Accept domain names (SOCKS5 ATYP=0x03). DNS resolution is deferred to
+        // the underlying connector (Netty Bootstrap.connect), which performs
+        // non-blocking resolution. This proxy connects to a local SOCKS5 server
+        // that handles the actual target connection, so IP validation is left
+        // to the downstream server.
+        return true
     }
 
     private fun isPrivateIpv6Address(ip: String): Boolean {
