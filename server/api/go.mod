@@ -6,7 +6,10 @@ require (
 	github.com/gin-gonic/gin v1.9.1
 	github.com/golang-jwt/jwt/v5 v5.2.0
 	github.com/mattn/go-sqlite3 v1.14.37
+	github.com/netproxy/shared/ratelimit v0.0.0
 )
+
+replace github.com/netproxy/shared/ratelimit => ../shared/ratelimit
 
 require (
 	github.com/bytedance/sonic v1.9.1 // indirect

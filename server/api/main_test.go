@@ -15,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/netproxy/shared/ratelimit"
 )
 
 func issueAuthToken(t *testing.T, secret []byte, claims jwt.MapClaims) string {
@@ -74,8 +75,8 @@ func newPairingTestServer(t *testing.T) *Server {
 	})
 
 	return &Server{
-		db:            db,
-		loginAttempts: make(map[string]*LoginAttempt),
+		db:          db,
+		rateLimiter: ratelimit.NewRateLimiterWithDefaults(),
 	}
 }
 
@@ -541,70 +542,6 @@ func TestAuthMiddlewareRejectsInvalidSignature(t *testing.T) {
 	}
 }
 
-func TestCleanupLoginAttemptsRemovesExpiredFailedEntry(t *testing.T) {
-	now := time.Now()
-	clientIP := "192.168.0.10"
-
-	server := &Server{
-		loginAttempts: map[string]*LoginAttempt{
-			clientIP: {
-				Count:   3,
-				LastTry: now.Add(-6 * time.Minute),
-			},
-		},
-	}
-
-	server.cleanupLoginAttempts(now)
-
-	if _, exists := server.loginAttempts[clientIP]; exists {
-		t.Fatalf("expected expired failed entry to be removed")
-	}
-}
-
-func TestCleanupLoginAttemptsKeepsEntryWithinBlockWindow(t *testing.T) {
-	now := time.Now()
-	clientIP := "192.168.0.11"
-
-	server := &Server{
-		loginAttempts: map[string]*LoginAttempt{
-			clientIP: {
-				Count:      MaxFailedAttempts,
-				LastTry:    now.Add(-1 * time.Minute),
-				Blocked:    true,
-				BlockUntil: now.Add(3 * time.Minute),
-			},
-		},
-	}
-
-	server.cleanupLoginAttempts(now)
-
-	if _, exists := server.loginAttempts[clientIP]; !exists {
-		t.Fatalf("expected blocked entry in active block window to be kept")
-	}
-}
-
-func TestCleanupLoginAttemptsRemovesExpiredBlockedEntry(t *testing.T) {
-	now := time.Now()
-	clientIP := "192.168.0.12"
-
-	server := &Server{
-		loginAttempts: map[string]*LoginAttempt{
-			clientIP: {
-				Count:      MaxFailedAttempts,
-				LastTry:    now.Add(-10 * time.Minute),
-				Blocked:    true,
-				BlockUntil: now.Add(-1 * time.Minute),
-			},
-		},
-	}
-
-	server.cleanupLoginAttempts(now)
-
-	if _, exists := server.loginAttempts[clientIP]; exists {
-		t.Fatalf("expected expired blocked entry to be removed")
-	}
-}
-
 func TestServerCloseStopsCleanupWorkers(t *testing.T) {
 	db, err := sql.Open("sqlite3", "file::memory:?cache=shared")
 	if err != nil {
@@ -616,10 +553,9 @@ func TestServerCloseStopsCleanupWorkers(t *testing.T) {
 	}
 
 	server := &Server{
-		db:                           db,
-		loginAttempts:                make(map[string]*LoginAttempt),
-		cleanupSessionsInterval:      10 * time.Millisecond,
-		cleanupLoginAttemptsInterval: 10 * time.Millisecond,
+		db:                      db,
+		rateLimiter:             ratelimit.NewRateLimiterWithDefaults(),
+		cleanupSessionsInterval: 10 * time.Millisecond,
 	}
 	server.startCleanupWorkers()
 

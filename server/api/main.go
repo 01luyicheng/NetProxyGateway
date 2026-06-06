@@ -17,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	sqlite3 "github.com/mattn/go-sqlite3"
+	"github.com/netproxy/shared/ratelimit"
 )
 
 // Constants
@@ -91,30 +92,19 @@ type DeviceStatus struct {
 	TunnelAddr string    `json:"tunnel_addr,omitempty"`
 }
 
-// LoginAttempt tracks login attempts for rate limiting.
-type LoginAttempt struct {
-	Count      int
-	LastTry    time.Time
-	Blocked    bool
-	BlockUntil time.Time
-}
-
 // Server is the API server.
 type Server struct {
 	db                   *sql.DB
 	pairingCodeGenerator func() (string, error)
 
-	// In-memory cache for login rate limiting (not persisted)
-	loginAttempts   map[string]*LoginAttempt // ip -> attempts
-	loginAttemptsMu sync.RWMutex
+	rateLimiter *ratelimit.RateLimiter
 
 	jwtSecret      []byte
 	internalAPIKey []byte
 
-	cleanupStop                  chan struct{}
-	cleanupWorkers               sync.WaitGroup
-	cleanupSessionsInterval      time.Duration
-	cleanupLoginAttemptsInterval time.Duration
+	cleanupStop             chan struct{}
+	cleanupWorkers          sync.WaitGroup
+	cleanupSessionsInterval time.Duration
 }
 
 // handleBindError handles request binding errors uniformly.
@@ -203,7 +193,7 @@ func NewServer() (*Server, error) {
 	return &Server{
 		db:                   db,
 		pairingCodeGenerator: generateCode,
-		loginAttempts:        make(map[string]*LoginAttempt),
+		rateLimiter:          ratelimit.NewRateLimiterWithDefaults(),
 		jwtSecret:            []byte(jwtSecret),
 		internalAPIKey:       []byte(internalAPIKey),
 	}, nil
@@ -265,6 +255,10 @@ func initSchema(db *sql.DB) error {
 
 // Close closes server resources.
 func (s *Server) Close() error {
+	if s.rateLimiter != nil {
+		s.rateLimiter.Stop()
+	}
+
 	if s.cleanupStop != nil {
 		close(s.cleanupStop)
 		s.cleanupWorkers.Wait()
@@ -355,82 +349,6 @@ func generateSessionToken() (string, error) {
 	return generateSecureRandomString(32)
 }
 
-// checkRateLimit checks rate limiting for the given client IP.
-func (s *Server) checkRateLimit(clientIP string) bool {
-	s.loginAttemptsMu.Lock()
-	defer s.loginAttemptsMu.Unlock()
-
-	attempt, ok := s.loginAttempts[clientIP]
-	if !ok {
-		s.loginAttempts[clientIP] = &LoginAttempt{
-			Count:   1,
-			LastTry: time.Now(),
-		}
-		return true
-	}
-
-	// Check if currently blocked
-	if attempt.Blocked && time.Now().Before(attempt.BlockUntil) {
-		return false
-	}
-
-	// Reset block status if block period has expired
-	if attempt.Blocked && time.Now().After(attempt.BlockUntil) {
-		attempt.Blocked = false
-		attempt.Count = 0
-	}
-
-	// Check if should block
-	if attempt.Count >= MaxFailedAttempts && time.Since(attempt.LastTry) < 5*time.Minute {
-		attempt.Blocked = true
-		attempt.BlockUntil = time.Now().Add(BlockDuration)
-		return false
-	}
-
-	// Reset count if more than 5 minutes have passed
-	if time.Since(attempt.LastTry) > 5*time.Minute {
-		attempt.Count = 0
-	}
-
-	attempt.Count++
-	attempt.LastTry = time.Now()
-	return true
-}
-
-// recordSuccess records a successful login attempt, clearing rate limit state.
-func (s *Server) recordSuccess(clientIP string) {
-	s.loginAttemptsMu.Lock()
-	defer s.loginAttemptsMu.Unlock()
-	delete(s.loginAttempts, clientIP)
-}
-
-// cleanupLoginAttempts removes stale login attempt records.
-func (s *Server) cleanupLoginAttempts(now time.Time) {
-	const staleLoginAttemptTTL = 5 * time.Minute
-
-	s.loginAttemptsMu.Lock()
-	defer s.loginAttemptsMu.Unlock()
-
-	for clientIP, attempt := range s.loginAttempts {
-		if attempt == nil {
-			delete(s.loginAttempts, clientIP)
-			continue
-		}
-
-		// Keep records within the block window; delete after block expires.
-		if attempt.Blocked {
-			if !now.Before(attempt.BlockUntil) {
-				delete(s.loginAttempts, clientIP)
-			}
-			continue
-		}
-
-		if now.Sub(attempt.LastTry) > staleLoginAttemptTTL {
-			delete(s.loginAttempts, clientIP)
-		}
-	}
-}
-
 // startCleanupWorkers starts the background cleanup goroutines.
 func (s *Server) startCleanupWorkers() {
 	if s.cleanupStop != nil {
@@ -438,31 +356,9 @@ func (s *Server) startCleanupWorkers() {
 	}
 
 	s.cleanupStop = make(chan struct{})
-	s.cleanupWorkers.Add(2)
+	s.cleanupWorkers.Add(1)
 
 	go s.cleanupExpiredSessions(s.cleanupStop)
-	go s.cleanupExpiredLoginAttempts(s.cleanupStop)
-}
-
-// cleanupExpiredLoginAttempts periodically cleans up expired login attempt records.
-func (s *Server) cleanupExpiredLoginAttempts(stop <-chan struct{}) {
-	interval := s.cleanupLoginAttemptsInterval
-	if interval <= 0 {
-		interval = 5 * time.Minute
-	}
-
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	defer s.cleanupWorkers.Done()
-
-	for {
-		select {
-		case <-stop:
-			return
-		case <-ticker.C:
-			s.cleanupLoginAttempts(time.Now())
-		}
-	}
 }
 
 // cleanupExpiredSessions periodically cleans up expired pairing sessions and session tokens.
@@ -829,7 +725,7 @@ func (s *Server) createPairingSession(c *gin.Context) {
 	clientIP := c.ClientIP()
 
 	// Check rate limiting
-	if !s.checkRateLimit(clientIP) {
+	if !s.rateLimiter.Allow(clientIP) {
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": ErrRateLimitExceeded.Error()})
 		return
 	}
@@ -875,7 +771,7 @@ func (s *Server) createPairingSession(c *gin.Context) {
 		}
 
 		// Record successful attempt
-		s.recordSuccess(clientIP)
+		s.rateLimiter.Success(clientIP)
 
 		c.JSON(http.StatusCreated, session)
 		return
@@ -1154,7 +1050,7 @@ func (s *Server) login(c *gin.Context) {
 	clientIP := c.ClientIP()
 
 	// Check rate limiting
-	if !s.checkRateLimit(clientIP) {
+	if !s.rateLimiter.Allow(clientIP) {
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": ErrRateLimit.Error()})
 		return
 	}
@@ -1193,7 +1089,7 @@ func (s *Server) login(c *gin.Context) {
 	}
 
 	// Record successful attempt
-	s.recordSuccess(clientIP)
+	s.rateLimiter.Success(clientIP)
 
 	c.JSON(http.StatusOK, gin.H{
 		"token": tokenString,

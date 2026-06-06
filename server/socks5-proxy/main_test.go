@@ -601,7 +601,7 @@ func TestHandleDataFullDataChanDoesNotBlock(t *testing.T) {
 	}
 }
 
-func TestHandleDataFullDataChanClosesAndRemovesStream(t *testing.T) {
+func TestHandleDataFullDataChanDropsPacketKeepsStream(t *testing.T) {
 	tc := &TunnelClient{
 		streams: make(map[string]*StreamConn),
 	}
@@ -644,22 +644,23 @@ func TestHandleDataFullDataChanClosesAndRemovesStream(t *testing.T) {
 		t.Fatal("handleData should not block when DataChan is full")
 	}
 
-	if atomic.LoadInt32(&stream.Closed) != 1 {
-		t.Fatal("stream should be closed when DataChan is full")
+	// 新行为：DataChan 满时丢弃数据包，不关闭 stream
+	if atomic.LoadInt32(&stream.Closed) != 0 {
+		t.Fatal("stream should NOT be closed when DataChan is full")
 	}
 
 	select {
 	case <-stream.CloseChan:
+		t.Fatal("stream CloseChan should NOT be closed when DataChan is full")
 	default:
-		t.Fatal("stream CloseChan should be closed when DataChan is full")
 	}
 
 	tc.mu.RLock()
 	_, exists := tc.streams[streamID]
 	tc.mu.RUnlock()
 
-	if exists {
-		t.Fatal("stream should be removed from tc.streams when DataChan is full")
+	if !exists {
+		t.Fatal("stream should remain in tc.streams when DataChan is full")
 	}
 }
 
