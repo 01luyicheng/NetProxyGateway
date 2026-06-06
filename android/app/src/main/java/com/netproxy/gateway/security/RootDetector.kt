@@ -222,7 +222,6 @@ object RootDetector {
                 }
             } finally {
                 process.destroyForcibly()
-                process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             }
         } catch (e: Exception) {
             false
@@ -269,7 +268,6 @@ object RootDetector {
                     }
                 } finally {
                     process.destroyForcibly()
-                    process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                 }
             } catch (e: Exception) {
                 // 忽略异常
@@ -349,7 +347,6 @@ object RootDetector {
                     }
                 } finally {
                     process.destroyForcibly()
-                    process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                 }
             } catch (e: Exception) {
                 // 忽略异常
@@ -400,7 +397,6 @@ object RootDetector {
                 }
             } finally {
                 process.destroyForcibly()
-                process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             }
         } catch (e: Exception) {
             false

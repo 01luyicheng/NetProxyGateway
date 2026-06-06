@@ -90,10 +90,6 @@ object DebugDetector {
             detectedMethods.add("timing-attack")
         }
 
-        if (antiPtrace()) {
-            detectedMethods.add("anti-ptrace")
-        }
-
         if (checkMemoryBreakpoints()) {
             detectedMethods.add("memory-breakpoints")
         }
@@ -215,7 +211,6 @@ object DebugDetector {
                 false
             } finally {
                 process.destroyForcibly()
-                process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             }
         } catch (e: Exception) {
             false
@@ -290,7 +285,6 @@ object DebugDetector {
                     }
                 } finally {
                     process.destroyForcibly()
-                    process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                 }
             } catch (e: Exception) {
                 // 忽略异常
@@ -319,7 +313,6 @@ object DebugDetector {
                 false
             } finally {
                 jdwpProcess.destroyForcibly()
-                jdwpProcess.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             }
         } catch (e: Exception) {
             false
@@ -366,7 +359,6 @@ object DebugDetector {
                 false
             } finally {
                 process.destroyForcibly()
-                process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             }
         } catch (e: Exception) {
             false

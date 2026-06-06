@@ -24,6 +24,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/netproxy/shared/httpclient"
+	"github.com/netproxy/shared/ratelimit"
 	"github.com/netproxy/shared/stringutil"
 )
 // SOCKS5 protocol constants
@@ -69,12 +70,6 @@ const (
 	streamCloseWriteLimit = 2 * time.Second
 	streamWriteLimit      = 5 * time.Second
 
-	// Rate limiter constants
-	rateLimitMaxAttempts     = 5
-	rateLimitWindow          = 5 * time.Minute
-	rateLimitBlockDuration   = 15 * time.Minute
-	rateLimitCleanupInterval = 10 * time.Minute
-	rateLimitStaleAttemptTTL = 30 * time.Minute
 )
 
 var streamIDGenerator = generateRandomStreamID
@@ -176,121 +171,6 @@ func (s *APISessionStore) validateWithAPI(deviceID, token string) (bool, error) 
 	return result.Valid, nil
 }
 
-// RateLimiter is a login rate limiter.
-type RateLimiter struct {
-	attempts     map[string]*LoginAttempt
-	mu           sync.RWMutex
-	stopCh       chan struct{}
-	restartCount int32
-}
-
-// LoginAttempt tracks login attempts for rate limiting.
-type LoginAttempt struct {
-	Count      int
-	LastTry    time.Time
-	Blocked    bool
-	BlockUntil time.Time
-}
-
-// NewRateLimiter creates a new rate limiter.
-func NewRateLimiter() *RateLimiter {
-	rl := &RateLimiter{
-		attempts: make(map[string]*LoginAttempt),
-		stopCh:   make(chan struct{}),
-	}
-	go rl.cleanupLoop()
-	return rl
-}
-
-// Stop stops the rate limiter's cleanup goroutine.
-func (rl *RateLimiter) Stop() {
-	close(rl.stopCh)
-}
-
-// Allow checks if a login attempt is allowed.
-func (rl *RateLimiter) Allow(key string) bool {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-
-	attempt, ok := rl.attempts[key]
-	if !ok {
-		rl.attempts[key] = &LoginAttempt{
-			Count:   1,
-			LastTry: time.Now(),
-		}
-		return true
-	}
-
-	if attempt.Blocked && time.Now().Before(attempt.BlockUntil) {
-		return false
-	}
-
-	if attempt.Blocked && time.Now().After(attempt.BlockUntil) {
-		attempt.Blocked = false
-		attempt.Count = 0
-	}
-
-	if attempt.Count >= rateLimitMaxAttempts && time.Since(attempt.LastTry) < rateLimitWindow {
-		attempt.Blocked = true
-		attempt.BlockUntil = time.Now().Add(rateLimitBlockDuration)
-		log.Printf("Rate limit exceeded for %s, blocked for %v", key, rateLimitBlockDuration)
-		return false
-	}
-
-	if time.Since(attempt.LastTry) > rateLimitWindow {
-		attempt.Count = 0
-	}
-
-	attempt.Count++
-	attempt.LastTry = time.Now()
-	return true
-}
-
-// Success resets the rate limit counter on successful login.
-func (rl *RateLimiter) Success(key string) {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	delete(rl.attempts, key)
-}
-
-// cleanupLoop periodically removes stale attempt records.
-func (rl *RateLimiter) cleanupLoop() {
-	const maxRestarts = 3
-
-	defer func() {
-		if r := recover(); r != nil {
-			count := atomic.AddInt32(&rl.restartCount, 1)
-			if count <= maxRestarts {
-				log.Printf("Panic in RateLimiter.cleanupLoop, restarting (%d/%d): %v", count, maxRestarts, r)
-				go rl.cleanupLoop()
-			} else {
-				log.Printf("Panic in RateLimiter.cleanupLoop, max restarts (%d) exceeded, not restarting: %v", maxRestarts, r)
-			}
-		}
-	}()
-
-	ticker := time.NewTicker(rateLimitCleanupInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			func() {
-				rl.mu.Lock()
-				defer rl.mu.Unlock()
-				now := time.Now()
-				for key, attempt := range rl.attempts {
-					if now.Sub(attempt.LastTry) > rateLimitStaleAttemptTTL {
-						delete(rl.attempts, key)
-					}
-				}
-			}()
-		case <-rl.stopCh:
-			return
-		}
-	}
-}
-
 // IPFilter filters allowed destination IPs.
 type IPFilter struct {
 	allowedCIDRs []string
@@ -352,7 +232,7 @@ type StreamConn struct {
 }
 
 const (
-	defaultDataChanSize = 100
+	defaultDataChanSize = 256
 	defaultBufferSize   = 64 * 1024
 )
 
@@ -1025,8 +905,14 @@ func (tc *TunnelClient) handleData(data json.RawMessage) {
 	}
 
 	if err := stream.WriteToDataChan(resp.Data); err != nil {
-		log.Printf("Failed to write to DataChan for stream %s: %v, closing stream", resp.StreamID, err)
-		tc.cleanupStream(resp.StreamID, stream)
+		if errors.Is(err, ErrDataChannelFull) {
+			// DataChan 满时丢弃数据包而非关闭 stream，避免高带宽场景下连接抖动。
+			// 有界 channel 保证不会无限堆积；增大 defaultDataChanSize 减少丢弃频率。
+			log.Printf("DataChan full for stream %s, dropping packet (size=%d)", resp.StreamID, len(resp.Data))
+		} else {
+			log.Printf("Failed to write to DataChan for stream %s: %v, closing stream", resp.StreamID, err)
+			tc.cleanupStream(resp.StreamID, stream)
+		}
 	}
 }
 
@@ -1220,7 +1106,7 @@ type TunnelDialer interface {
 type SOCKS5Server struct {
 	config       *Config
 	sessionStore SessionStore
-	rateLimiter  *RateLimiter
+	rateLimiter  *ratelimit.RateLimiter
 	ipFilter     *IPFilter
 	tunnelClient TunnelDialer
 	listener     net.Listener
@@ -1232,7 +1118,7 @@ func NewSOCKS5Server(config *Config) *SOCKS5Server {
 	return &SOCKS5Server{
 		config:       config,
 		sessionStore: NewAPISessionStore(config.APIEndpoint, config.InternalAPIKey),
-		rateLimiter:  NewRateLimiter(),
+		rateLimiter:  ratelimit.NewRateLimiterWithDefaults(),
 		ipFilter:     NewIPFilter(),
 		tunnelClient: NewTunnelClient(config.TunnelEndpoint),
 	}
@@ -1249,7 +1135,7 @@ func NewSOCKS5ServerWithDialer(config *Config, dialer TunnelDialer) (*SOCKS5Serv
 	return &SOCKS5Server{
 		config:       config,
 		sessionStore: NewAPISessionStore(config.APIEndpoint, config.InternalAPIKey),
-		rateLimiter:  NewRateLimiter(),
+		rateLimiter:  ratelimit.NewRateLimiterWithDefaults(),
 		ipFilter:     NewIPFilter(),
 		tunnelClient: dialer,
 	}, nil

@@ -1,7 +1,5 @@
 package com.netproxy.gateway.vpn
 
-import kotlin.math.min
-
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.DatagramPacket
@@ -9,7 +7,6 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
-import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -36,8 +33,8 @@ import androidx.core.app.NotificationCompat
 import com.netproxy.gateway.BuildConfig
 import com.netproxy.gateway.R
 import com.netproxy.gateway.connection.AuthSessionStore
+import com.netproxy.gateway.connection.MqttConnectionManager
 import com.netproxy.gateway.i18n.AppLocale
-import com.netproxy.gateway.proxy.PooledSocks5Connection
 import com.netproxy.gateway.proxy.Socks5ConnectionPool
 import com.netproxy.gateway.proxy.Socks5ConnectionPoolConfig
 import com.netproxy.gateway.proxy.Socks5ProxyService
@@ -47,11 +44,13 @@ import com.netproxy.gateway.utils.IpAddressUtils
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 enum class VpnState {
@@ -104,28 +103,6 @@ class GatewayVpnService : AndroidVpnService() {
         private const val PROTOCOL_TCP = 6
         private const val PROTOCOL_UDP = 17
 
-        // IP header constants
-        private const val IP_VERSION_IHL = 0x45
-        private const val IP_FLAG_DF = 0x40
-        private const val IP_DEFAULT_TTL = 64
-        private const val IP_HEADER_LEN = 20
-
-        // TCP header constants
-        private const val TCP_HEADER_LEN = 20
-        private const val TCP_DATA_OFFSET = (5 shl 4)
-        private const val TCP_FLAGS_PSH_ACK = 0x18
-        private const val TCP_WINDOW_SIZE = 8192
-
-        // 内网 IP 段（通过 WiFi 直连）
-        // 10.0.0.0/8 - 私有 A 类
-        // 172.16.0.0/12 - 私有 B 类
-        // 192.168.0.0/16 - 私有 C 类
-        private val PRIVATE_IP_RANGES = listOf(
-            "10.0.0.0" to 8,
-            "172.16.0.0" to 12,
-            "192.168.0.0" to 16
-        )
-
         // DNS 服务器（通过 WiFi）
         private val DNS_SERVERS = listOf(
             "8.8.8.8", "8.8.4.4",
@@ -144,6 +121,9 @@ class GatewayVpnService : AndroidVpnService() {
     lateinit var authSessionStore: AuthSessionStore
 
     @Inject
+    lateinit var mqttConnectionManager: MqttConnectionManager
+
+    @Inject
     lateinit var virtualIpAllocator: VirtualIpAllocator
 
     private var vpnInterface: ParcelFileDescriptor? = null
@@ -151,8 +131,12 @@ class GatewayVpnService : AndroidVpnService() {
     // SOCKS5连接池
     private var socks5ConnectionPool: Socks5ConnectionPool? = null
 
-    // 活跃的代理连接映射（四元组 -> 连接会话）- 现在存储借用自连接池的连接
-    private val activeConnections = ConcurrentHashMap<String, ConnectionSession>()
+    // 数据包处理器（纯逻辑，与 Service 生命周期无关）
+    private val packetProcessor = VpnPacketProcessor()
+
+    // 连接会话管理器（管理活跃连接、连接池、回包处理）
+    private lateinit var sessionManager: ConnectionSessionManager
+
     // TUN读取缓冲区
     private val packetBuffer = ByteArray(PACKET_BUFFER_SIZE)
 
@@ -245,11 +229,23 @@ class GatewayVpnService : AndroidVpnService() {
                 // 初始化SOCKS5连接池
                 initializeConnectionPool()
 
+                // 初始化连接会话管理器
+                sessionManager = ConnectionSessionManager(
+                    packetProcessor = packetProcessor,
+                    connectionTimeoutMs = CONNECTION_TIMEOUT_MS,
+                    packetBufferSize = PACKET_BUFFER_SIZE
+                )
+                sessionManager.socks5ConnectionPool = socks5ConnectionPool
+
                 // 初始化TUN输出流用于回包注入
                 vpnOutputStream = FileOutputStream(vpnInterface!!.fileDescriptor)
+                sessionManager.vpnOutputStream = vpnOutputStream
 
                 // 所有资源就绪后再更新状态为 RUNNING
                 _status.value = VpnStatus(state = VpnState.RUNNING)
+
+                // N80: 注册 MQTT disconnect 消息监听
+                registerDisconnectListener()
 
                 // 启动TUN读取协程
                 serviceScope?.launch {
@@ -304,9 +300,9 @@ class GatewayVpnService : AndroidVpnService() {
         if (length <= 0) return
 
         // 解析 IP 包获取目标地址
-        val destinationIp = parseDestinationIp(packet, length) ?: return
-        val protocol = parseProtocol(packet)
-        val destinationPort = parseDestinationPort(packet, length)
+        val destinationIp = packetProcessor.parseDestinationIp(packet, length) ?: return
+        val protocol = packetProcessor.parseProtocol(packet)
+        val destinationPort = packetProcessor.parseDestinationPort(packet, length)
 
         // 根据目标地址、协议和端口判断流量类型
         val routeType = determineRouteType(destinationIp, protocol, destinationPort)
@@ -327,28 +323,9 @@ class GatewayVpnService : AndroidVpnService() {
             }
             RouteType.PROXY -> {
                 // 外网流量：通过本地 SOCKS5 代理转发
-                forwardViaSocks5(packet, length, destinationIp)
+                sessionManager.forwardViaSocks5(packet, length, destinationIp) { protect(it) }
             }
         }
-    }
-
-    /**
-     * 解析 IP 包中的目标 IP 地址
-     */
-    private fun parseDestinationIp(packet: ByteArray, length: Int): String? {
-        if (length < 20) return null
-
-        // 检查 IP 版本 (IPv4 = 4)
-        val version = (packet[0].toInt() shr 4) and 0x0F
-        if (version != 4) return null // 仅支持 IPv4
-
-        // IP 头长度
-        val headerLength = (packet[0].toInt() and 0x0F) * 4
-        if (length < headerLength || length < 20) return null
-
-        // 目标 IP 在第 16-19 字节
-        val dstIp = "${packet[16].toInt() and 0xFF}.${packet[17].toInt() and 0xFF}.${packet[18].toInt() and 0xFF}.${packet[19].toInt() and 0xFF}"
-        return dstIp
     }
 
     /**
@@ -422,10 +399,19 @@ class GatewayVpnService : AndroidVpnService() {
      * 注意：protect() 只保证不走 VPN，不保证一定走 WiFi。
      * 在多网络并存或厂商网络加速场景下，系统可能将流量路由到其他网卡。
      */
+    private fun extractTransportPayload(packet: ByteArray, length: Int): ByteArray {
+        val info = packetProcessor.extractTransportPayloadInfo(packet, length)
+        return if (info != null) {
+            packet.copyOfRange(info.first, info.first + info.second)
+        } else {
+            EMPTY_BYTE_ARRAY
+        }
+    }
+
     private fun forwardViaWifi(packet: ByteArray, length: Int, destinationIp: String) {
         try {
-            val protocol = parseProtocol(packet)
-            val destinationPort = parseDestinationPort(packet, length) ?: return
+            val protocol = packetProcessor.parseProtocol(packet)
+            val destinationPort = packetProcessor.parseDestinationPort(packet, length) ?: return
             val payload = extractTransportPayload(packet, length)
 
             when (protocol) {
@@ -455,151 +441,55 @@ class GatewayVpnService : AndroidVpnService() {
         }
     }
 
-    /**
-     * 通过本地 SOCKS5 代理转发（使用连接池复用SOCKS5连接）
-     */
-    private fun forwardViaSocks5(packet: ByteArray, length: Int, destinationIp: String) {
-        val destinationPort = parseDestinationPort(packet, length) ?: return
-        val protocol = parseProtocol(packet)
-        val payloadInfo = extractTransportPayloadInfo(packet, length) ?: return
-        val srcIp = parseSourceIp(packet, length) ?: return
-        val srcPort = parseSourcePort(packet, length) ?: return
-
-        val pool = socks5ConnectionPool
-        if (pool == null) {
-            logMissingSession(destinationIp)
-            return
-        }
-
-        // 使用四元组作为会话key
-        val connectionKey = "$srcIp:$srcPort-$destinationIp:$destinationPort"
-
-        try {
-            // 使用computeIfPresent原子检查并更新现有会话
-            var sessionToUse: ConnectionSession? = activeConnections.computeIfPresent(connectionKey) { _, existingSession ->
-                if (existingSession.pooledConnection?.isValid() == true) {
-                    existingSession.updateActivity()
-                    existingSession
-                } else {
-                    // 连接无效，丢弃连接，不应归还到连接池（N86）
-                    existingSession.pooledConnection?.let { pool.discardConnection(it) }
-                    null
-                }
-            }
-
-            // 如果没有有效会话，创建新会话
-            if (sessionToUse == null) {
-                val conn = pool.borrowConnection(
-                    destinationIp = destinationIp,
-                    destinationPort = destinationPort,
-                    protectSocket = { protect(it) }
-                )
-
-                if (conn != null) {
-                    val virtualSrcIp = getOrAllocateVirtualIp(destinationIp)
-                    val newSession = ConnectionSession(
-                        srcIp = srcIp,
-                        srcPort = srcPort,
-                        dstIp = destinationIp,
-                        dstPort = destinationPort,
-                        protocol = protocol,
-                        pooledConnection = conn,
-                        virtualSrcIp = virtualSrcIp
-                    )
-                    newSession.updateActivity()
-
-                    // putIfAbsent确保不会覆盖其他线程刚创建的会话
-                    val existing = activeConnections.putIfAbsent(connectionKey, newSession)
-                    sessionToUse = if (existing != null) {
-                        // 其他线程已创建会话，关闭我们借用的连接（N86）
-                        pool.discardConnection(conn)
-                        existing
-                    } else {
-                        logDebug("Borrowed connection from pool: ${redactConnectionKey(connectionKey)} -> virtualIP: ${redactIp(virtualSrcIp)}")
-                        newSession
-                    }
-                } else {
-                    logger.warn("Failed to borrow connection from pool for ${redactConnectionKey(connectionKey)}")
-                }
-            }
-
-            sessionToUse?.pooledConnection?.let { pooledConn ->
-                pooledConn.socket.getOutputStream()?.write(packet, payloadInfo.first, payloadInfo.second)
-                pooledConn.socket.getOutputStream()?.flush()
-            }
-        } catch (e: Exception) {
-            logger.warn("Forward via SOCKS5 failed for ${redactConnectionKey(connectionKey)}", e)
-            activeConnections.remove(connectionKey)?.pooledConnection?.let { pool.discardConnection(it) }
-        }
-    }
-
-    /**
-     * 解析源IP地址
-     */
-    private fun parseSourceIp(packet: ByteArray, length: Int): String? {
-        if (length < 20) return null
-        val version = (packet[0].toInt() shr 4) and 0x0F
-        if (version != 4) return null
-        // 源IP在第12-15字节
-        return "${packet[12].toInt() and 0xFF}.${packet[13].toInt() and 0xFF}.${packet[14].toInt() and 0xFF}.${packet[15].toInt() and 0xFF}"
-    }
-
-    /**
-     * 解析源端口
-     */
-    private fun parseSourcePort(packet: ByteArray, length: Int): Int? {
-        if (length < 20) return null
-        val headerLength = (packet[0].toInt() and 0x0F) * 4
-        if (length < headerLength + 2) return null
-        // 源端口在传输层头的前2字节
-        return ((packet[headerLength].toInt() and 0xFF) shl 8) or (packet[headerLength + 1].toInt() and 0xFF)
-    }
-
     private fun cleanupStaleConnections() {
-        val now = System.currentTimeMillis()
-        val pool = socks5ConnectionPool
-
-        // 使用ConcurrentHashMap的computeIfPresent原子操作，避免与forwardViaSocks5的竞态
-        activeConnections.forEach { (key, session) ->
-            activeConnections.computeIfPresent(key) { _, existingSession ->
-                val isExpired = now - existingSession.lastActivity > CONNECTION_TIMEOUT_MS
-                if (isExpired) {
-                    try {
-                        // 过期会话直接关闭连接，不应归还到连接池（N86）
-                        existingSession.pooledConnection?.let { pool?.discardConnection(it) }
-                        logger.debug("Closed stale connection: ${redactConnectionKey(key)}")
-                    } catch (e: Exception) {
-                        logger.warn("Failed to close stale connection", e)
-                    }
-                    null // 返回null以移除该entry
-                } else {
-                    existingSession // 未过期，保留
-                }
-            }
+        if (::sessionManager.isInitialized) {
+            sessionManager.cleanupStaleConnections()
         }
     }
 
     /**
      * 处理回包（从远程服务器读取响应并注入TUN）
-     * 使用平滑指数退避算法减少空闲时的CPU轮询
+     * N57 修复：将串行遍历改为并行协程处理，每个连接独立协程，避免单个连接 I/O 阻塞影响其他连接。
+     * 使用 SupervisorJob + async 实现并行，单个连接异常不会取消其他连接。
+     * 使用平滑指数退避算法减少空闲时的CPU轮询。
      */
     private suspend fun processReturnTraffic() {
         var idleRounds = 0
         while (_status.value.state == VpnState.RUNNING) {
             try {
-                var hadData = false
                 // 创建快照避免遍历期间 map 修改导致视图不一致（P20 / C33）
-                val snapshot = activeConnections.entries.toList()
-                snapshot.forEach { (key, session) ->
-                    // C33: 快照后验证session仍是当前活跃值，避免竞态下操作已归还的socket
-                    val stillActive = activeConnections[key] === session
-                    if (!stillActive) return@forEach
-                    if (session.protocol == PROTOCOL_TCP) {
-                        hadData = processTcpReturn(session, key) || hadData
-                    } else if (session.protocol == PROTOCOL_UDP) {
-                        processUdpReturn(session, key)
-                    }
+                val snapshot = if (::sessionManager.isInitialized) {
+                    sessionManager.getActiveConnectionsSnapshot()
+                } else emptyList()
+
+                if (snapshot.isEmpty()) {
+                    idleRounds = (idleRounds + 1).coerceAtMost(31)
+                    val idleDelay = calculateIdleDelay(idleRounds)
+                    kotlinx.coroutines.delay(idleDelay)
+                    continue
                 }
+
+                // N57: 并行处理每个连接的回包
+                val hadData = coroutineScope {
+                    val jobs = snapshot.map { (key, session) ->
+                        async(Dispatchers.IO) {
+                            // C33: 快照后验证session仍是当前活跃值，避免竞态下操作已归还的socket
+                            val stillActive = sessionManager.getActiveConnectionsSnapshot().any { it.first == key && it.second === session }
+                            if (!stillActive) return@async false
+
+                            when (session.protocol) {
+                                PROTOCOL_TCP -> sessionManager.processTcpReturn(session, key)
+                                PROTOCOL_UDP -> {
+                                    processUdpReturn(session, key)
+                                    false // UDP 当前实现不返回是否有数据
+                                }
+                                else -> false
+                            }
+                        }
+                    }
+                    jobs.awaitAll().any { it }
+                }
+
                 if (hadData) {
                     idleRounds = 0
                 } else {
@@ -631,70 +521,6 @@ class GatewayVpnService : AndroidVpnService() {
     }
 
     /**
-     * 原子移除session并关闭连接（仅当session仍是当前值时）
-     * @return true if the entry was present, matched, and removed; false otherwise
-     */
-    private fun removeSessionAndCloseConnection(sessionKey: String, session: ConnectionSession): Boolean {
-        var removed = false
-        activeConnections.computeIfPresent(sessionKey) { _, existing ->
-            if (existing === session) {
-                existing.pooledConnection?.let { socks5ConnectionPool?.discardConnection(it) }
-                removed = true
-                null
-            } else existing
-        }
-        return removed
-    }
-
-    /**
-     * 处理TCP回包
-     */
-    private fun processTcpReturn(session: ConnectionSession, sessionKey: String): Boolean {
-        // C33: 验证session仍是当前活跃值，防止快照后session被并发移除/替换
-        if (activeConnections[sessionKey] !== session) return false
-        val pooledConn = session.pooledConnection ?: return false
-        if (!pooledConn.isValid()) {
-            // P12: isValid()已包含socket.isClosed检查，移除冗余条件
-            // 连接无效，原子移除并关闭连接（仅当session仍是当前值时）
-            removeSessionAndCloseConnection(sessionKey, session)
-            return false
-        }
-
-        try {
-            val input = pooledConn.socket.getInputStream()
-            val available = input.available()
-            if (available > 0) {
-                val buffer = ByteArray(PACKET_BUFFER_SIZE)
-                val payloadOffset = 40 // 20-byte IP header + 20-byte TCP header
-                val read = input.read(buffer, payloadOffset, minOf(available, buffer.size - payloadOffset))
-                if (read > 0) {
-                    // 构造回包IP头+TCP头
-                    val packetLen = constructReturnPacket(buffer, session, read)
-                    if (packetLen <= 0) {
-                        logger.warn("Drop invalid TCP return packet for ${redactConnectionKey(sessionKey)}")
-                        removeSessionAndCloseConnection(sessionKey, session)
-                        return false
-                    }
-                    // 注入TUN
-                    if (!injectPacket(buffer, packetLen)) {
-                        logger.warn("Failed to inject TCP return packet for ${redactConnectionKey(sessionKey)}, closing session")
-                        removeSessionAndCloseConnection(sessionKey, session)
-                        return false
-                    }
-                    session.updateActivity()
-                    return true
-                }
-            }
-            return false
-        } catch (e: Exception) {
-            logger.warn("TCP return traffic error for ${redactConnectionKey(sessionKey)}: ${e.message}")
-            // P13: 原子移除并关闭连接，仅当session仍是当前值时
-            removeSessionAndCloseConnection(sessionKey, session)
-            return false
-        }
-    }
-
-    /**
      * 处理UDP回包
      */
     private fun processUdpReturn(session: ConnectionSession, sessionKey: String) {
@@ -703,247 +529,9 @@ class GatewayVpnService : AndroidVpnService() {
         // 简化实现：UDP通常在forwardViaWifi中直接处理
     }
 
-    /**
-     * 构造回包（IP头 + TCP头 + payload）
-     * @return 完整包长度
-     */
-    private fun constructReturnPacket(buffer: ByteArray, session: ConnectionSession, payloadLen: Int): Int {
-        val ipHeaderLen = IP_HEADER_LEN
-        val tcpHeaderLen = TCP_HEADER_LEN
-        if (payloadLen < 0) {
-            return 0
-        }
-        val maxPayloadLen = buffer.size - ipHeaderLen - tcpHeaderLen
-        if (payloadLen > maxPayloadLen) {
-            return 0
-        }
-        val totalLen = ipHeaderLen + tcpHeaderLen + payloadLen
-        if (totalLen > buffer.size) {
-            return 0
-        }
-
-        val srcIpParts = parseIpv4Parts(session.virtualSrcIp) ?: return 0
-        val dstIpParts = parseIpv4Parts(session.srcIp) ?: return 0
-
-        // 构造IP头（从虚拟源IP到原始源IP）
-        buffer[0] = IP_VERSION_IHL.toByte() // IPv4, IHL=5
-        buffer[1] = 0 // DSCP/ECN
-        buffer[2] = (totalLen shr 8).toByte()
-        buffer[3] = (totalLen and 0xFF).toByte()
-        buffer[4] = 0 // Identification
-        buffer[5] = 0
-        buffer[6] = IP_FLAG_DF.toByte() // DF标志
-        buffer[7] = 0
-        buffer[8] = IP_DEFAULT_TTL.toByte() // TTL
-        buffer[9] = session.protocol.toByte()
-        buffer[10] = 0 // Header checksum (稍后计算)
-        buffer[11] = 0
-
-        // 源IP（虚拟IP）
-        buffer[12] = srcIpParts[0].toByte()
-        buffer[13] = srcIpParts[1].toByte()
-        buffer[14] = srcIpParts[2].toByte()
-        buffer[15] = srcIpParts[3].toByte()
-
-        // 目标IP（原始源IP）
-        buffer[16] = dstIpParts[0].toByte()
-        buffer[17] = dstIpParts[1].toByte()
-        buffer[18] = dstIpParts[2].toByte()
-        buffer[19] = dstIpParts[3].toByte()
-
-        // 计算IP头校验和
-        val ipChecksum = calculateChecksum(buffer, 0, ipHeaderLen)
-        buffer[10] = (ipChecksum shr 8).toByte()
-        buffer[11] = (ipChecksum and 0xFF).toByte()
-
-        // 构造TCP头
-        buffer[20] = (session.dstPort shr 8).toByte() // 源端口（原始目标端口）
-        buffer[21] = (session.dstPort and 0xFF).toByte()
-        buffer[22] = (session.srcPort shr 8).toByte() // 目标端口（原始源端口）
-        buffer[23] = (session.srcPort and 0xFF).toByte()
-        buffer[24] = 0 // Seq number (简化)
-        buffer[25] = 0
-        buffer[26] = 0
-        buffer[27] = 0
-        buffer[28] = 0 // Ack number
-        buffer[29] = 0
-        buffer[30] = 0
-        buffer[31] = 0
-        buffer[32] = TCP_DATA_OFFSET.toByte() // Data offset = 5
-        buffer[33] = TCP_FLAGS_PSH_ACK.toByte() // PSH + ACK
-        buffer[34] = (TCP_WINDOW_SIZE shr 8).toByte() // Window size
-        buffer[35] = (TCP_WINDOW_SIZE and 0xFF).toByte()
-        buffer[36] = 0 // TCP checksum (稍后计算)
-        buffer[37] = 0
-        buffer[38] = 0 // Urgent pointer
-        buffer[39] = 0
-
-        // 计算TCP校验和（伪头 + TCP头 + payload）
-        val tcpChecksum = calculateTcpChecksum(buffer, srcIpParts, dstIpParts, session.protocol, tcpHeaderLen, payloadLen)
-        buffer[36] = (tcpChecksum shr 8).toByte()
-        buffer[37] = (tcpChecksum and 0xFF).toByte()
-
-        return totalLen
-    }
-
-    private fun parseIpv4Parts(ip: String): List<Int>? {
-        val parts = ip.split(".")
-        if (parts.size != 4) {
-            return null
-        }
-        return parts.map { part ->
-            val value = part.toIntOrNull() ?: return null
-            if (value !in 0..255) {
-                return null
-            }
-            value
-        }
-    }
-
-    /**
-     * 计算IP校验和
-     */
-    private fun calculateChecksum(data: ByteArray, offset: Int, length: Int): Int {
-        var sum = 0
-        var i = offset
-        while (i < offset + length - 1) {
-            sum += ((data[i].toInt() and 0xFF) shl 8) or (data[i + 1].toInt() and 0xFF)
-            i += 2
-        }
-        if (i < offset + length) {
-            sum += (data[i].toInt() and 0xFF) shl 8
-        }
-        while (sum shr 16 != 0) {
-            sum = (sum and 0xFFFF) + (sum shr 16)
-        }
-        return sum.inv() and 0xFFFF
-    }
-
-    /**
-     * 计算TCP校验和（包含伪头）
-     */
-    private fun calculateTcpChecksum(
-        buffer: ByteArray,
-        srcIp: List<Int>,
-        dstIp: List<Int>,
-        protocol: Int,
-        tcpHeaderLen: Int,
-        payloadLen: Int
-    ): Int {
-        var sum = 0
-
-        // 伪头
-        sum += (srcIp[0] shl 8) or srcIp[1]
-        sum += (srcIp[2] shl 8) or srcIp[3]
-        sum += (dstIp[0] shl 8) or dstIp[1]
-        sum += (dstIp[2] shl 8) or dstIp[3]
-        sum += protocol
-        sum += tcpHeaderLen + payloadLen
-
-        // TCP头和payload
-        for (i in 20 until 20 + tcpHeaderLen + payloadLen step 2) {
-            if (i + 1 < buffer.size) {
-                sum += ((buffer[i].toInt() and 0xFF) shl 8) or (buffer[i + 1].toInt() and 0xFF)
-            } else {
-                sum += (buffer[i].toInt() and 0xFF) shl 8
-            }
-        }
-
-        while (sum shr 16 != 0) {
-            sum = (sum and 0xFFFF) + (sum shr 16)
-        }
-        return sum.inv() and 0xFFFF
-    }
-
-    /**
-     * 注入包到TUN接口
-     */
-    private fun injectPacket(packet: ByteArray, length: Int): Boolean {
-        return try {
-            val stream = vpnOutputStream
-            if (stream == null) {
-                logger.warn("vpnOutputStream is null, cannot inject packet")
-                false
-            } else {
-                stream.write(packet, 0, length)
-                stream.flush()
-                true
-            }
-        } catch (e: Exception) {
-            logger.error("Failed to inject packet to TUN", e)
-            false
-        }
-    }
-
-    /**
-     * 获取或分配虚拟 IP
-     */
-    private fun getOrAllocateVirtualIp(realDstIp: String): String {
-        return virtualIpAllocator.getOrAllocateVirtualIp(
-            realDstIp = realDstIp,
-            virtualIpPool = virtualIpPool,
-            reverseIpMap = reverseIpMap,
-            nextVirtualIp = nextVirtualIp,
-            onPoolReset = { logger.error("Virtual IP pool exhausted! Resetting pool.") },
-            onNewAllocation = { allocatedIp, dstIp -> logDebug("Allocated virtual IP ${redactIp(allocatedIp)} for ${redactIp(dstIp)}") }
-        )
-    }
-
-    private fun logMissingSession(destinationIp: String) {
-        val nowMs = System.currentTimeMillis()
-        val lastMs = lastMissingSessionLogAt.get()
-        if (nowMs - lastMs >= SESSION_MISSING_LOG_INTERVAL_MS &&
-            lastMissingSessionLogAt.compareAndSet(lastMs, nowMs)
-        ) {
-            logger.warn("Skip SOCKS5 forward: missing auth session for ${redactIp(destinationIp)}")
-        }
-    }
-
     private fun logDebug(message: String) {
         if (BuildConfig.DEBUG) {
             logger.debug(message)
-        }
-    }
-
-    private fun parseProtocol(packet: ByteArray): Int {
-        return packet[9].toInt() and 0xFF
-    }
-
-    private fun parseDestinationPort(packet: ByteArray, length: Int): Int? {
-        if (length < 20) return null
-        val headerLength = (packet[0].toInt() and 0x0F) * 4
-        if (length < headerLength + 4) return null
-        return ((packet[headerLength + 2].toInt() and 0xFF) shl 8) or (packet[headerLength + 3].toInt() and 0xFF)
-    }
-
-    /**
-     * 提取传输层payload，返回payload在packet中的起始位置和长度（避免创建新数组）
-     * @return Pair<起始位置, 长度>，如果无payload返回null
-     */
-    private fun extractTransportPayloadInfo(packet: ByteArray, length: Int): Pair<Int, Int>? {
-        if (length < 20) return null
-        val ipHeaderLength = (packet[0].toInt() and 0x0F) * 4
-        val protocol = parseProtocol(packet)
-        val transportHeaderLength = when (protocol) {
-            PROTOCOL_TCP -> {
-                if (length < ipHeaderLength + 13) return null
-                ((packet[ipHeaderLength + 12].toInt() shr 4) and 0x0F) * 4
-            }
-            PROTOCOL_UDP -> 8
-            else -> 0
-        }
-        val payloadStart = ipHeaderLength + transportHeaderLength
-        if (payloadStart >= length) return null
-        return Pair(payloadStart, length - payloadStart)
-    }
-
-    @Deprecated("使用 extractTransportPayloadInfo 避免数组拷贝", ReplaceWith("extractTransportPayloadInfo(packet, length)"))
-    private fun extractTransportPayload(packet: ByteArray, length: Int): ByteArray {
-        val info = extractTransportPayloadInfo(packet, length)
-        return if (info != null) {
-            packet.copyOfRange(info.first, info.first + info.second)
-        } else {
-            EMPTY_BYTE_ARRAY
         }
     }
 
@@ -955,26 +543,6 @@ class GatewayVpnService : AndroidVpnService() {
         DNS,           // DNS - WiFi
         CLOUD_SERVER,  // 云服务器 - 蜂窝（排除）
         PROXY          // 其他 - SOCKS5 代理
-    }
-
-    /**
-     * 连接会话（完整四元组映射）- 使用连接池管理SOCKS5连接
-     */
-    private data class ConnectionSession(
-        val srcIp: String,
-        val srcPort: Int,
-        val dstIp: String,
-        val dstPort: Int,
-        val protocol: Int, // 6=TCP, 17=UDP
-        val pooledConnection: PooledSocks5Connection?, // 来自连接池的连接
-        val virtualSrcIp: String, // 虚拟源IP（用于回包）
-        val createdAt: Long = System.currentTimeMillis(),
-        var lastActivity: Long = System.currentTimeMillis()
-    ) {
-        fun updateActivity() {
-            lastActivity = System.currentTimeMillis()
-            pooledConnection?.markUsed()
-        }
     }
 
     /**
@@ -991,6 +559,27 @@ class GatewayVpnService : AndroidVpnService() {
     private fun startProxyService() {
         val intent = Intent(this, Socks5ProxyService::class.java)
         startForegroundService(intent)
+    }
+
+    /**
+     * N80: 注册 MQTT disconnect 消息监听
+     * 订阅 device/$deviceId/control 主题，处理 SOCKS5-Proxy 发来的 disconnect 消息
+     */
+    private fun registerDisconnectListener() {
+        try {
+            val deviceId = authSessionStore.getCurrentSession()?.deviceId ?: return
+            mqttConnectionManager.subscribe(
+                topic = "device/$deviceId/control",
+                qos = 0
+            ) { payload ->
+                if (::sessionManager.isInitialized) {
+                    sessionManager.handleDisconnectMessage(payload)
+                }
+            }
+            logger.debug("N80: Registered disconnect listener for device/$deviceId/control")
+        } catch (e: Exception) {
+            logger.warn("N80: Failed to register disconnect listener", e)
+        }
     }
 
     private fun createNotificationChannel() {
@@ -1136,15 +725,9 @@ class GatewayVpnService : AndroidVpnService() {
         }
 
         // VPN停止时丢弃所有活跃会话的连接（N86：过期/无效会话不应归还连接池）
-        val pool = socks5ConnectionPool
-        activeConnections.values.forEach { session ->
-            try {
-                session.pooledConnection?.let { pool?.discardConnection(it) }
-            } catch (e: Exception) {
-                logger.warn("Failed to discard connection for session ${redactIp(session.srcIp)}:${session.srcPort}", e)
-            }
+        if (::sessionManager.isInitialized) {
+            sessionManager.clearAllConnections()
         }
-        activeConnections.clear()
 
         // 关闭连接池
         try {

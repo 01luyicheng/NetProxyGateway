@@ -311,7 +311,6 @@ object EmulatorDetector {
                     }
                 } finally {
                     process.destroyForcibly()
-                    process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                 }
             } catch (e: Exception) {
                 // 忽略异常

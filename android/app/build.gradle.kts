@@ -34,6 +34,15 @@ val validateReleaseConfig by tasks.registering {
         if (plainUrl.isNullOrBlank()) {
             throw GradleException("MQTT_BROKER_URL_PLAIN_RELEASE must be configured for release builds. Set it in gradle.properties or via -P flag.")
         }
+        // C1 修复：构建时静态检查，防止 release 构建误启用信任所有证书
+        val trustAllCerts = providers.gradleProperty("MQTT_TRUST_ALL_CERTS").orNull
+        if (trustAllCerts == "true") {
+            throw GradleException(
+                "SECURITY VIOLATION: MQTT_TRUST_ALL_CERTS=true is not allowed in release builds. " +
+                "This would bypass all TLS certificate validation and is insecure. " +
+                "Remove the property or set it to false."
+            )
+        }
     }
 }
 

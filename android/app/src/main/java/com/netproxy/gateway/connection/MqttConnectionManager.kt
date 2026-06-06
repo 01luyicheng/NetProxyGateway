@@ -443,7 +443,8 @@ class MqttConnectionManager @Inject constructor(
                 }
                 AppAuditLogStore.info("MQTT", "Connection established")
 
-                subscribe("device/$deviceId/control")
+                // N80: 先触发已注册的 topicCallbacks，再执行默认订阅
+                // 这样 VpnService 中通过 subscribe() 注册的 disconnect 监听器会被保留
                 startHeartbeat(deviceId, authToken, generation)
 
                 } catch (e: Exception) {

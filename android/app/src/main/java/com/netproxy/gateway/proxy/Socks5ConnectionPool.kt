@@ -131,7 +131,7 @@ class Socks5ConnectionPool(
     fun borrowConnection(
         destinationIp: String,
         destinationPort: Int,
-        protectSocket: ((Socket) -> Unit)? = null
+        protectSocket: ((Socket) -> Boolean)? = null
     ): PooledSocks5Connection? {
         if (isShutdown.get()) {
             return null
@@ -257,7 +257,7 @@ class Socks5ConnectionPool(
     private fun createNewConnection(
         destinationIp: String,
         destinationPort: Int,
-        protectSocket: ((Socket) -> Unit)?
+        protectSocket: ((Socket) -> Boolean)?
     ): PooledSocks5Connection? {
         // 使用 try-finally 确保连接计数一致性
         var slotReserved = false
@@ -323,7 +323,7 @@ class Socks5ConnectionPool(
         destinationPort: Int,
         username: String,
         password: String,
-        protectSocket: ((Socket) -> Unit)?
+        protectSocket: ((Socket) -> Boolean)?
     ): Socket {
         val socket = Socket().apply {
             protectSocket?.invoke(this)
