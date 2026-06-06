@@ -63,6 +63,9 @@ const (
 
 	// Reserved field
 	rsvReserved = 0x00 // Reserved field in SOCKS5 reply
+
+	// IPv4 placeholder bytes for reply (0.0.0.0:0)
+	ipv4ReplyPlaceholder = 0x00
 )
 
 const (
@@ -1287,7 +1290,7 @@ func (s *SOCKS5Server) handleAuth(conn net.Conn, reader *bufio.Reader, clientIP 
 	if err != nil {
 		return "", "", err
 	}
-	if version != 0x01 {
+	if version != authSubVersion {
 		return "", "", fmt.Errorf("unsupported auth version: %d", version)
 	}
 
@@ -1316,13 +1319,13 @@ func (s *SOCKS5Server) handleAuth(conn net.Conn, reader *bufio.Reader, clientIP 
 
 	valid, err := s.sessionStore.ValidateToken(deviceID, token)
 	if err != nil || !valid {
-		if _, werr := conn.Write([]byte{0x01, repGeneralFailure}); werr != nil {
+		if _, werr := conn.Write([]byte{authSubVersion, repGeneralFailure}); werr != nil {
 			log.Printf("Failed to write auth failure response: %v", werr)
 		}
-		return "", "", fmt.Errorf("authentication failed")
+		return "", "", fmt.Errorf("authentication failed: invalid credentials")
 	}
 
-	if _, err := conn.Write([]byte{0x01, repSucceeded}); err != nil {
+	if _, err := conn.Write([]byte{authSubVersion, repSucceeded}); err != nil {
 		log.Printf("Failed to write auth success response: %v", err)
 		return "", "", fmt.Errorf("failed to write auth success response: %w", err)
 	}
@@ -1426,7 +1429,7 @@ func (s *SOCKS5Server) handleRequest(conn net.Conn, deviceID string, token strin
 
 // sendReply sends a SOCKS5 reply.
 func (s *SOCKS5Server) sendReply(conn net.Conn, rep byte) {
-	reply := []byte{socks5Version, rep, rsvReserved, atypIPv4, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	reply := []byte{socks5Version, rep, rsvReserved, atypIPv4, ipv4ReplyPlaceholder, ipv4ReplyPlaceholder, ipv4ReplyPlaceholder, ipv4ReplyPlaceholder, ipv4ReplyPlaceholder, ipv4ReplyPlaceholder}
 	if _, err := conn.Write(reply); err != nil {
 		log.Printf("Failed to send SOCKS5 reply 0x%02x: %v", rep, err)
 	}

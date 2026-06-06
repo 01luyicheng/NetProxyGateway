@@ -187,7 +187,7 @@ class GatewayVpnService : AndroidVpnService() {
 
         // 如果正在停止，等待停止完成后再启动
         if (isStopping.get()) {
-            logger.warn("Cannot start VPN while stopping")
+            logger.warn("action: startVpn, status: rejected, reason: VPN is currently stopping")
             return
         }
 
@@ -433,11 +433,11 @@ class GatewayVpnService : AndroidVpnService() {
                     }
                 }
                 else -> {
-                    logDebug("Skip unsupported protocol=$protocol for WiFi route")
+                    logDebug("action: forwardViaWifi, status: skipped, reason: unsupported protocol, protocol: $protocol")
                 }
             }
         } catch (e: Exception) {
-            logger.warn("Forward via WiFi failed for ${redactIp(destinationIp)}", e)
+            logger.warn("action: forwardViaWifi, status: failed, destination: ${redactIp(destinationIp)}", e)
         }
     }
 
@@ -576,9 +576,9 @@ class GatewayVpnService : AndroidVpnService() {
                     sessionManager.handleDisconnectMessage(payload)
                 }
             }
-            logger.debug("N80: Registered disconnect listener for device/$deviceId/control")
+            logger.debug("action: registerDisconnectListener, status: success, device: $deviceId")
         } catch (e: Exception) {
-            logger.warn("N80: Failed to register disconnect listener", e)
+            logger.warn("action: registerDisconnectListener, status: failed", e)
         }
     }
 
@@ -756,7 +756,7 @@ class GatewayVpnService : AndroidVpnService() {
 
         if (stopVpnNotCalled) {
             // stopVpn() 没有被调用过（如系统强制回收服务），需要兜底清理资源
-            logger.warn("onDestroy() called without stopVpn(), performing cleanup")
+            logger.warn("action: onDestroy, status: cleanup, reason: stopVpn was not called")
             // 更新状态为 STOPPED
             _status.value = VpnStatus(state = VpnState.STOPPED)
             // 停止代理服务

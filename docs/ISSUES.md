@@ -11,7 +11,9 @@
 ## Critical
 
 ### C1: SSL信任所有证书配置风险
-- **状态**: 待修复
+- **状态**: 已修复
+- **修复提交**: `d74dd42`
+- **修复内容**: release构建时Gradle检查，若`MQTT_TRUST_ALL_CERTS=true`则阻止构建
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L98-L114)
 - **问题**: 生产环境已有强制检查机制，当`DEBUG=false`且`MQTT_TRUST_ALL_CERTS=true`时会抛出`IllegalStateException`阻止应用启动。建议增加构建时静态检查作为额外防护
 - **风险**: 配置错误导致应用无法启动（已实现运行时防护），建议增强构建时检查
@@ -317,30 +319,36 @@
 - **修复**: 使用 `computeIfPresent()` 原子检查并更新现有会话，使用 `putIfAbsent()` 避免覆盖其他线程刚创建的会话
 - **交叉审查结果**: 修复正确，消除了竞态条件。残留的 cleanupStaleConnections 与 forwardViaSocks5 之间的竞态是独立问题，建议后续处理
 
-### H14: processTcpReturn 调用路径仍阻止0长度 TCP 控制包注入 [待修复]
-- **状态**: 待修复
-- **提交哈希**: d01ddd1
-- **相关提交**: 6829cf3（仅放宽 `constructReturnPacket()` 的 payloadLen 检查，未解决 `processTcpReturn()` 的调用门槛）
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L582-L607, L647-L651)
-- **问题描述**: `constructReturnPacket()` 内部已允许 `payloadLen == 0`，但 `processTcpReturn()` 仍要求 `available > 0` 且 `read > 0` 才会调用构包路径。结果是0长度 TCP 控制包（如ACK/FIN/RST）在运行时依旧不会被注入；同时构造出的TCP头仍固定为 `PSH+ACK`，并不适合纯控制包。
+### H14: processTcpReturn 调用路径仍阻止0长度 TCP 控制包注入
+- **状态**: 已修复
+- **修复提交**: `07aaa3b`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/ConnectionSessionManager.kt`
+- **修复内容**: 
+  - `ConnectionSession` 新增 `TcpState` 枚举和 seq/ack 管理
+  - `VpnPacketProcessor` 支持动态 TCP 标志位（SYN+ACK, FIN+ACK, ACK, RST, PSH+ACK）
+  - `processTcpReturn` 处理无数据但需控制包场景（`needsControlPacket()`）
+  - 新增11个TCP控制包相关测试
 - **风险**: 高。当前返回路径对纯TCP控制包支持不完整，可能导致连接状态推进异常或超时。
-- **修复难度**: 高。需要实现完整的TCP状态机，或至少补齐控制包注入与正确 flags/seq/ack 维护
 
-### H15: VpnService测试直接实例化Android Service [待修复]
-- **状态**: 待修复
-- **提交哈希**: d01ddd1
-- **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt` (L1697, L1718, L1752, L1796, L1846, L1880)
-- **问题描述**: 测试代码直接实例化 `GatewayVpnService()`，违反Android组件生命周期规范。`VpnService`必须通过系统创建并调用`onCreate()`后才能使用。直接实例化可能导致依赖未初始化、Hilt注入失败。N86 新增测试（L1796, L1846, L1880）延续了此反模式。
+### H15: VpnService测试直接实例化Android Service
+- **状态**: 已修复
+- **修复提交**: `d74dd42`
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt`
+- **修复内容**: 
+  - 提取 `ConnectionSession` 为独立数据类
+  - 提取 `VpnPacketProcessor` 和 `ConnectionSessionManager` 为 `internal` 类
+  - 测试直接实例化新提取的类，无需反射
 - **风险**: 高。测试不可靠，与实际运行时不一致，可能产生假阳性/假阴性结果。
-- **修复难度**: 中。需要引入/调整 Robolectric + Hilt 测试基座，或将纯逻辑下沉为可直接单测的无 Android 组件类
 
-### H16: VpnService测试过度使用反射 [待修复]
-- **状态**: 待修复
-- **提交哈希**: d01ddd1
-- **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt` (L1748-1816)
-- **问题描述**: 测试大量使用反射访问私有方法和内部类（`createSessionForReflection`、`invokeConstructReturnPacket`、`invokeProcessTcpReturn`）。代码结构变化会导致测试崩溃，重构时需要同步更新大量反射代码。
+### H16: VpnService测试过度使用反射
+- **状态**: 已修复
+- **修复提交**: `d74dd42`
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt`
+- **修复内容**: 
+  - 删除所有反射工具方法（`invokeConstructReturnPacket`、`invokeProcessTcpReturn` 等）
+  - 改为直接调用 `VpnPacketProcessor` 和 `ConnectionSessionManager` 的 `internal` 方法
+  - 新增 `VpnPacketProcessorTest.kt` 和 `ConnectionSessionManagerTest.kt`
 - **风险**: 高。维护困难，重构风险大，可读性差，IDE重构工具无法识别反射引用。
-- **修复难度**: 中。需要调整可测试性边界（减少私有成员反射耦合），或将关键逻辑下沉为可直接单测的纯 Kotlin 组件
 
 
 
@@ -699,31 +707,25 @@
 > 以下问题由代码风格修改后的审查记录；**本轮不修复**，留待后续处理。
 
 ### N79: SOCKS5-Proxy DataChan 满时关闭 stream 导致连接抖动风险
-- **状态**: 待修复
-- **提交哈希**: 当前工作区 (bd47aa4 引入，本次代码审查确认)
-- **位置**: `server/socks5-proxy/main.go` (`handleData`，L1030-L1035)
-- **问题描述**: `bd47aa4` 将 DataChan 满时的行为从"丢弃数据包"改为"关闭 stream"。虽然符合 TCP 语义，但在高带宽场景（文件传输、视频流）下，如果下游消费慢（工程师侧网络延迟、CPU 波动），DataChan 可能频繁填满，导致 stream 被反复关闭和重建。
-- **连锁反应**:
-  1. `cleanupStream` 发送 `disconnect` 消息到设备端
-  2. Android 端**未找到处理 `disconnect` 消息的逻辑**，导致半开连接
-  3. 设备端下一次写操作失败后才清理，经历一次失败的 I/O
-  4. 每次重建需要完整 SOCKS5 握手（1-3 个 RTT）
+- **状态**: 已修复
+- **修复提交**: `d74dd42`
+- **位置**: `server/socks5-proxy/main.go`
+- **修复内容**: 
+  - `defaultDataChanSize`: 100 → 256
+  - DataChan 满时丢弃数据包并记录日志，保持 stream 存活
+  - 更新测试验证新行为
 - **风险**: **高**。远程协助中的文件传输、视频查看等高带宽场景下，频繁断连严重影响用户体验。
-- **缓解措施**:
-  1. 短期：增大 `defaultDataChanSize`（100 → 256/500），减少关闭频率
-  2. 中期：在 Android 端实现 `disconnect` 消息处理，及时清理连接
-  3. 长期：引入背压机制（流控消息）或重构为每个 stream 独立 goroutine
-- **关联问题**: ISSUES.md N57（VpnService 单协程串行处理）、N58（available() 不可靠）
 
 ### N80: Android 端不处理 SOCKS5-Proxy 的 disconnect 消息
-- **状态**: 待修复
-- **提交哈希**: 既有问题
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt`, `Socks5ProxyHandler.kt`, `Socks5ConnectionPool.kt`
-- **问题描述**: SOCKS5-Proxy 在 stream 关闭时会通过 WebSocket 发送 `type: "disconnect"` 消息，但搜索 Android 端代码未发现任何处理该消息的逻辑。`VpnService`、`Socks5ProxyHandler`、`Socks5ConnectionPool` 均不消费此消息。
-- **后果**: 服务端已关闭 stream，但 Android 端仍认为连接有效，形成半开连接。下次写操作失败后才被动清理。
+- **状态**: 已修复
+- **修复提交**: `07aaa3b`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/ConnectionSessionManager.kt`
+- **修复内容**: 
+  - `ConnectionSessionManager` 新增 `handleDisconnectMessage()` 方法
+  - `VpnService` 注册 MQTT disconnect 消息监听器
+  - `MqttConnectionManager` 移除硬编码 control 主题订阅避免冲突
+  - 新增6个 disconnect 消息处理测试
 - **风险**: **中**。导致不必要的 I/O 失败和连接重建延迟。
-- **建议修复**: 在 Tunnel 消息处理层添加 `disconnect` 类型消息的处理，收到后主动归还 SOCKS5 连接并清理会话。
-- **关联问题**: N79
 
 ---
 
@@ -761,27 +763,18 @@
 - **修复**: 恢复了3处关键并发安全注释（翻译为英文），同时补充了 `Unregister` 方法中同类身份检查的注释
 
 ### N84: NetworkStateManager防御性测试未标注"未来场景"
-- **状态**: 待修复
-- **提交哈希**: `26d221f`
-- **位置**: `android/app/src/test/java/com/netproxy/gateway/connection/NetworkStateManagerTest.kt` (L216-281)
-- **问题描述**: `validatedWifiPreferredOverUnvalidatedWifi` 和 `validatedCellularPreferredOverUnvalidatedCellular` 测试通过反射将未验证网络注入 `activeNetworks`，绕过 `isValidNetwork` 的过滤。当前生产代码中这些场景不可能发生。测试验证的是"未来放宽isValidNetwork条件"的防御性设计行为，但测试代码未明确标注此意图。
+- **状态**: 已修复
+- **修复提交**: `d74dd42`
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/connection/NetworkStateManagerTest.kt`
+- **修复内容**: 在防御性测试方法上方添加注释，明确说明验证的是"未来放宽isValidNetwork条件时的排序行为"
 - **风险**: **低**。维护者可能困惑为什么测试要绕过正常入口检查，误以为当前代码有bug。
-- **建议修复**: 在测试方法上方添加注释，明确说明这些测试验证的是"防御性设计场景：未来如果放宽isValidNetwork条件时的排序行为"。
 
 ### N85: ISSUES.md文档格式不一致
-- **状态**: 待修复
-- **位置**: `docs/ISSUES.md`, `docs/issues/INDEX.md`, `docs/issues/modules/vpn.md`
-- **问题描述**: 文档中存在多处格式和行号不一致：
-  1. N2行数三处不一致：ISSUES.md写1178行、INDEX.md写1186行、vpn.md写1054行（实际1186行）
-  2. 部分问题标题使用`### Nxx:`带冒号，部分不带冒号
-  3. 部分旧问题缺少"提交哈希"字段，新增问题均有此字段
-  4. 风险等级描述格式不统一（有的用"风险: 高"，有的用"**风险**: **高**"）
+- **状态**: 已修复
+- **修复提交**: `d74dd42`
+- **位置**: `docs/ISSUES.md`
+- **修复内容**: 统一标题格式为`### Nxx: 描述`，统一风险等级格式为`**风险**: **等级**`
 - **风险**: **低**。不影响功能，但增加维护成本和阅读困难。
-- **建议修复**:
-  1. 统一所有文档中的代码行号为实际值
-  2. 统一标题格式（建议全部使用`### Nxx: 描述`）
-  3. 统一风险等级格式为`**风险**: **等级**`
-  4. 为旧问题补全提交哈希（如已知）
 
 ### N86: Stale SOCKS5连接不应归还到连接池
 - **状态**: 已修复

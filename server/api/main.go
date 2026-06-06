@@ -323,21 +323,31 @@ func generateUniquePairingCode(
 
 // generateSecureRandomString generates a cryptographically secure random string for sensitive use cases like API keys.
 // Uses rejection sampling to avoid modulo bias and ensure uniform distribution.
+// Optimized: pre-allocates buffers and batch reads random bytes to reduce system calls.
 func generateSecureRandomString(length int) (string, error) {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	const charsetLen = 62
 	const threshold = 256 - (256 % charsetLen)
+	// Batch size: read multiple bytes at once to amortize crypto/rand.Read syscall overhead.
+	// Each byte has ~75% acceptance probability (threshold/256 ≈ 0.987 for charsetLen=62),
+	// so a batch of 4x length provides enough valid bytes with high probability.
+	const batchMultiplier = 4
 
 	result := make([]byte, length)
-	for i := 0; i < length; i++ {
-		for {
-			b := make([]byte, 1)
-			if _, err := rand.Read(b); err != nil {
-				return "", fmt.Errorf("crypto/rand.Read failed: %w", err)
-			}
-			if int(b[0]) < threshold {
-				result[i] = charset[int(b[0])%charsetLen]
-				break
+	batch := make([]byte, length*batchMultiplier)
+	pos := 0
+
+	for pos < length {
+		if _, err := rand.Read(batch); err != nil {
+			return "", fmt.Errorf("crypto/rand.Read failed: %w", err)
+		}
+		for _, b := range batch {
+			if int(b) < threshold {
+				result[pos] = charset[int(b)%charsetLen]
+				pos++
+				if pos == length {
+					break
+				}
 			}
 		}
 	}
