@@ -255,6 +255,8 @@ func (m *TunnelManager) Stop() {
 	select {
 	case <-done:
 	case <-time.After(30 * time.Second):
+		// 超时后记录日志但不阻塞关闭流程
+		// 此时等待 wg.Wait() 的 goroutine 会泄漏，但进程即将退出，无实际影响
 		log.Printf("TunnelManager.Stop: timeout waiting for goroutines to finish")
 	}
 }
@@ -272,6 +274,7 @@ func (m *TunnelManager) Register(deviceID string, conn *websocket.Conn) *TunnelC
 
 	log.Printf("Tunnel registered for device: %s", deviceID)
 
+	m.wg.Add(1)
 	go m.notifyDeviceStatus(deviceID, "online", "")
 
 	return tunnel
@@ -299,6 +302,7 @@ func (m *TunnelManager) Unregister(deviceID string, tunnel *TunnelConn) {
 
 	log.Printf("Tunnel unregistered for device: %s", deviceID)
 
+	m.wg.Add(1)
 	go m.notifyDeviceStatus(deviceID, "offline", "")
 }
 
@@ -315,70 +319,48 @@ func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string) 
 	m.stopMu.Lock()
 	if m.stopped {
 		m.stopMu.Unlock()
+		m.wg.Done()
 		return
 	}
-	m.wg.Add(1)
 	m.stopMu.Unlock()
 
-	go func() {
-		defer m.wg.Done()
-		payload := map[string]string{
-			"device_id":   deviceID,
-			"status":      status,
-			"tunnel_addr": tunnelAddr,
-		}
+	defer m.wg.Done()
+	payload := map[string]string{
+		"device_id":   deviceID,
+		"status":      status,
+		"tunnel_addr": tunnelAddr,
+	}
 
-		data, err := json.Marshal(payload)
+	data, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("Failed to marshal device status payload: %v", err)
+		return
+	}
+
+	for attempt := 1; attempt <= defaultNotifyStatusMaxAttempts; attempt++ {
+		select {
+		case <-m.ctx.Done():
+			return
+		default:
+		}
+		req, err := http.NewRequestWithContext(
+			m.ctx,
+			http.MethodPost,
+			m.config.APIEndpoint+"/api/device/status",
+			bytes.NewReader(data),
+		)
 		if err != nil {
-			log.Printf("Failed to marshal device status payload: %v", err)
+			log.Printf("Failed to build device status request: %v", err)
 			return
 		}
+		req.Header.Set("Content-Type", "application/json")
+		if m.config.InternalAPIKey != "" {
+			req.Header.Set("X-Internal-API-Key", m.config.InternalAPIKey)
+		}
 
-		for attempt := 1; attempt <= defaultNotifyStatusMaxAttempts; attempt++ {
-			select {
-			case <-m.ctx.Done():
-				return
-			default:
-			}
-
-			req, err := http.NewRequestWithContext(
-				m.ctx,
-				http.MethodPost,
-				m.config.APIEndpoint+"/api/device/status",
-				bytes.NewReader(data),
-			)
-			if err != nil {
-				log.Printf("Failed to build device status request: %v", err)
-				return
-			}
-			req.Header.Set("Content-Type", "application/json")
-			if m.config.InternalAPIKey != "" {
-				req.Header.Set("X-Internal-API-Key", m.config.InternalAPIKey)
-			}
-
-			resp, err := m.httpClient.Do(req)
-			if err != nil {
-				if attempt < defaultNotifyStatusMaxAttempts {
-					select {
-					case <-m.ctx.Done():
-						return
-					case <-time.After(notifyStatusBackoff(attempt)):
-						continue
-					}
-				}
-				log.Printf("Failed to notify device status after %d attempts: %v", attempt, err)
-				return
-			}
-
-			statusCode := resp.StatusCode
-			_, _ = io.Copy(io.Discard, resp.Body)
-			_ = resp.Body.Close()
-
-			if statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices {
-				return
-			}
-
-			if shouldRetryNotifyStatusCode(statusCode) && attempt < defaultNotifyStatusMaxAttempts {
+		resp, err := m.httpClient.Do(req)
+		if err != nil {
+			if attempt < defaultNotifyStatusMaxAttempts {
 				select {
 				case <-m.ctx.Done():
 					return
@@ -386,15 +368,34 @@ func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string) 
 					continue
 				}
 			}
-
-			if shouldRetryNotifyStatusCode(statusCode) {
-				log.Printf("Failed to notify device status after %d attempts: status code %d", attempt, statusCode)
-			} else {
-				log.Printf("Failed to notify device status: status code %d", statusCode)
-			}
+			log.Printf("Failed to notify device status after %d attempts: %v", attempt, err)
 			return
 		}
-	}()
+
+		statusCode := resp.StatusCode
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+
+		if statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices {
+			return
+		}
+
+		if shouldRetryNotifyStatusCode(statusCode) && attempt < defaultNotifyStatusMaxAttempts {
+			select {
+			case <-m.ctx.Done():
+				return
+			case <-time.After(notifyStatusBackoff(attempt)):
+				continue
+			}
+		}
+
+		if shouldRetryNotifyStatusCode(statusCode) {
+			log.Printf("Failed to notify device status after %d attempts: status code %d", attempt, statusCode)
+		} else {
+			log.Printf("Failed to notify device status: status code %d", statusCode)
+		}
+		return
+	}
 }
 
 func notifyStatusBackoff(attempt int) time.Duration {
@@ -468,6 +469,7 @@ func (m *TunnelManager) cleanupDeadTunnelsOnce() {
 
 	for i, tunnel := range deadTunnels {
 		tunnel.Close()
+		m.wg.Add(1)
 		go m.notifyDeviceStatus(deadIDs[i], "offline", "")
 	}
 }
