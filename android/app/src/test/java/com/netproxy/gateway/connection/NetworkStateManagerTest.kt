@@ -182,41 +182,60 @@ class NetworkStateManagerTest {
     }
 
     @Test
-<<<<<<< HEAD
-    fun getBestNetworkState_validatedNetworkPreferredOverUnvalidated() {
-=======
     fun getBestNetworkState_withUnvalidatedNetwork_returnsUnvalidatedState() {
->>>>>>> 595d7d5 (fix(network): sync syncActiveNetworks with callback logic and add unvalidated network tests)
         val manager = NetworkStateManager(context)
         val activeNetworksField = NetworkStateManager::class.java.getDeclaredField("activeNetworks")
         activeNetworksField.isAccessible = true
         @Suppress("UNCHECKED_CAST")
         val activeNetworks = activeNetworksField.get(manager) as ConcurrentHashMap<Network, NetworkCapabilities>
-<<<<<<< HEAD
-
-        val unvalidatedWifi = capabilities(
+        activeNetworks[wifiNetwork] = capabilities(
             transport = NetworkCapabilities.TRANSPORT_WIFI,
             validated = false,
             internet = true
         )
-        val validatedCellular = capabilities(
+
+        val state = manager.getBestNetworkState()
+
+        assertTrue(state.isConnected)
+        assertFalse(state.isValidated)
+        assertEquals(NetworkType.Wifi, state.networkType)
+        assertEquals(wifiNetwork, state.network)
+    }
+
+    @Test
+    fun getBestNetworkState_withMixedValidation_prefersValidatedHigherPriority() {
+        val wifiCapabilities = capabilities(
+            transport = NetworkCapabilities.TRANSPORT_WIFI,
+            validated = false,
+            internet = true
+        )
+        val cellularCapabilities = capabilities(
             transport = NetworkCapabilities.TRANSPORT_CELLULAR,
             validated = true,
             internet = true
         )
 
-        activeNetworks[wifiNetwork] = unvalidatedWifi
-        activeNetworks[cellularNetwork] = validatedCellular
+        val manager = NetworkStateManager(context)
+        val activeNetworksField = NetworkStateManager::class.java.getDeclaredField("activeNetworks")
+        activeNetworksField.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val activeNetworks = activeNetworksField.get(manager) as ConcurrentHashMap<Network, NetworkCapabilities>
+        activeNetworks[wifiNetwork] = wifiCapabilities
+        activeNetworks[cellularNetwork] = cellularCapabilities
 
         val state = manager.getBestNetworkState()
 
-        // Validated cellular should win over unvalidated WiFi
         assertTrue(state.isConnected)
         assertTrue(state.isValidated)
         assertEquals(NetworkType.Cellular, state.networkType)
         assertEquals(cellularNetwork, state.network)
     }
 
+    /**
+     * 防御性设计场景：未来如果放宽 isValidNetwork 条件时的排序行为。
+     * 当前生产代码中，未验证网络不会进入 activeNetworks（回调会过滤 validated 状态）。
+     * 此测试通过反射直接注入未验证网络，验证排序逻辑在防御性设计下的正确性。
+     */
     @Test
     fun getBestNetworkState_validatedWifiPreferredOverUnvalidatedWifi() {
         val validatedWifi = mockk<Network>(relaxed = true)
@@ -234,15 +253,11 @@ class NetworkStateManagerTest {
             internet = true
         )
         val unvalidatedWifiCapabilities = capabilities(
-=======
-        activeNetworks[wifiNetwork] = capabilities(
->>>>>>> 595d7d5 (fix(network): sync syncActiveNetworks with callback logic and add unvalidated network tests)
             transport = NetworkCapabilities.TRANSPORT_WIFI,
             validated = false,
             internet = true
         )
 
-<<<<<<< HEAD
         activeNetworks[unvalidatedWifi] = unvalidatedWifiCapabilities
         activeNetworks[validatedWifi] = validatedWifiCapabilities
 
@@ -255,39 +270,21 @@ class NetworkStateManagerTest {
         assertEquals(validatedWifi, state.network)
     }
 
+    /**
+     * 防御性设计场景：未来如果放宽 isValidNetwork 条件时的排序行为。
+     * 当前生产代码中，未验证网络不会进入 activeNetworks（回调会过滤 validated 状态）。
+     * 此测试通过反射直接注入未验证网络，验证排序逻辑在防御性设计下的正确性。
+     */
     @Test
     fun getBestNetworkState_validatedCellularPreferredOverUnvalidatedCellular() {
         val validatedCellular = mockk<Network>(relaxed = true)
         val unvalidatedCellular = mockk<Network>(relaxed = true)
-=======
-        val state = manager.getBestNetworkState()
-
-        assertTrue(state.isConnected)
-        assertFalse(state.isValidated)
-        assertEquals(NetworkType.Wifi, state.networkType)
-        assertEquals(wifiNetwork, state.network)
-    }
-
-    @Test
-    fun getBestNetworkState_withMixedValidation_prefersHigherPriority() {
-        val wifiCapabilities = capabilities(
-            transport = NetworkCapabilities.TRANSPORT_WIFI,
-            validated = false,
-            internet = true
-        )
-        val cellularCapabilities = capabilities(
-            transport = NetworkCapabilities.TRANSPORT_CELLULAR,
-            validated = true,
-            internet = true
-        )
->>>>>>> 595d7d5 (fix(network): sync syncActiveNetworks with callback logic and add unvalidated network tests)
 
         val manager = NetworkStateManager(context)
         val activeNetworksField = NetworkStateManager::class.java.getDeclaredField("activeNetworks")
         activeNetworksField.isAccessible = true
         @Suppress("UNCHECKED_CAST")
         val activeNetworks = activeNetworksField.get(manager) as ConcurrentHashMap<Network, NetworkCapabilities>
-<<<<<<< HEAD
 
         val validatedCellularCapabilities = capabilities(
             transport = NetworkCapabilities.TRANSPORT_CELLULAR,
@@ -310,17 +307,6 @@ class NetworkStateManagerTest {
         assertTrue(state.isValidated)
         assertEquals(NetworkType.Cellular, state.networkType)
         assertEquals(validatedCellular, state.network)
-=======
-        activeNetworks[wifiNetwork] = wifiCapabilities
-        activeNetworks[cellularNetwork] = cellularCapabilities
-
-        val state = manager.getBestNetworkState()
-
-        assertTrue(state.isConnected)
-        assertFalse(state.isValidated)
-        assertEquals(NetworkType.Wifi, state.networkType)
-        assertEquals(wifiNetwork, state.network)
->>>>>>> 595d7d5 (fix(network): sync syncActiveNetworks with callback logic and add unvalidated network tests)
     }
 
     private fun capabilities(
