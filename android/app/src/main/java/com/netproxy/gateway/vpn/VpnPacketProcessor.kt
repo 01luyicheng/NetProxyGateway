@@ -16,7 +16,6 @@ internal class VpnPacketProcessor {
 
         private const val TCP_HEADER_LEN = 20
         private const val TCP_DATA_OFFSET = (5 shl 4)
-        private const val TCP_FLAGS_PSH_ACK = 0x18
         private const val TCP_WINDOW_SIZE = 8192
 
         private const val UDP_HEADER_LEN = 8
@@ -100,9 +99,16 @@ internal class VpnPacketProcessor {
 
     /**
      * 构造回包（IP头 + TCP头 + payload）
+     * H14: 支持 0 长度控制包，使用会话中的 seq/ack 和 TCP 状态标志位
+     * @param tcpFlags 显式指定 TCP 标志位；为 0 时根据 session.tcpState 自动解析
      * @return 完整包长度
      */
-    fun constructReturnPacket(buffer: ByteArray, session: ConnectionSession, payloadLen: Int): Int {
+    fun constructReturnPacket(
+        buffer: ByteArray,
+        session: ConnectionSession,
+        payloadLen: Int,
+        tcpFlags: Int = 0
+    ): Int {
         val ipHeaderLen = IP_HEADER_LEN
         val tcpHeaderLen = TCP_HEADER_LEN
         if (payloadLen < 0) {
@@ -119,6 +125,9 @@ internal class VpnPacketProcessor {
 
         val srcIpParts = parseIpv4Parts(session.virtualSrcIp) ?: return 0
         val dstIpParts = parseIpv4Parts(session.srcIp) ?: return 0
+
+        // 确定 TCP 标志位
+        val flags = if (tcpFlags != 0) tcpFlags else session.resolveTcpFlags()
 
         // 构造IP头（从虚拟源IP到原始源IP）
         buffer[0] = IP_VERSION_IHL.toByte() // IPv4, IHL=5
@@ -156,16 +165,23 @@ internal class VpnPacketProcessor {
         buffer[21] = (session.dstPort and 0xFF).toByte()
         buffer[22] = (session.srcPort shr 8).toByte() // 目标端口（原始源端口）
         buffer[23] = (session.srcPort and 0xFF).toByte()
-        buffer[24] = 0 // Seq number (简化)
-        buffer[25] = 0
-        buffer[26] = 0
-        buffer[27] = 0
-        buffer[28] = 0 // Ack number
-        buffer[29] = 0
-        buffer[30] = 0
-        buffer[31] = 0
+
+        // Seq number（使用会话中的 seqNum）
+        val seq = session.seqNum
+        buffer[24] = (seq shr 24).toByte()
+        buffer[25] = (seq shr 16).toByte()
+        buffer[26] = (seq shr 8).toByte()
+        buffer[27] = (seq and 0xFF).toByte()
+
+        // Ack number（使用会话中的 ackNum）
+        val ack = session.ackNum
+        buffer[28] = (ack shr 24).toByte()
+        buffer[29] = (ack shr 16).toByte()
+        buffer[30] = (ack shr 8).toByte()
+        buffer[31] = (ack and 0xFF).toByte()
+
         buffer[32] = TCP_DATA_OFFSET.toByte() // Data offset = 5
-        buffer[33] = TCP_FLAGS_PSH_ACK.toByte() // PSH + ACK
+        buffer[33] = flags.toByte()
         buffer[34] = (TCP_WINDOW_SIZE shr 8).toByte() // Window size
         buffer[35] = (TCP_WINDOW_SIZE and 0xFF).toByte()
         buffer[36] = 0 // TCP checksum (稍后计算)

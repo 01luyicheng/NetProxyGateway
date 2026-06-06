@@ -33,6 +33,7 @@ import androidx.core.app.NotificationCompat
 import com.netproxy.gateway.BuildConfig
 import com.netproxy.gateway.R
 import com.netproxy.gateway.connection.AuthSessionStore
+import com.netproxy.gateway.connection.MqttConnectionManager
 import com.netproxy.gateway.i18n.AppLocale
 import com.netproxy.gateway.proxy.Socks5ConnectionPool
 import com.netproxy.gateway.proxy.Socks5ConnectionPoolConfig
@@ -43,7 +44,10 @@ import com.netproxy.gateway.utils.IpAddressUtils
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -115,6 +119,9 @@ class GatewayVpnService : AndroidVpnService() {
 
     @Inject
     lateinit var authSessionStore: AuthSessionStore
+
+    @Inject
+    lateinit var mqttConnectionManager: MqttConnectionManager
 
     @Inject
     lateinit var virtualIpAllocator: VirtualIpAllocator
@@ -236,6 +243,9 @@ class GatewayVpnService : AndroidVpnService() {
 
                 // 所有资源就绪后再更新状态为 RUNNING
                 _status.value = VpnStatus(state = VpnState.RUNNING)
+
+                // N80: 注册 MQTT disconnect 消息监听
+                registerDisconnectListener()
 
                 // 启动TUN读取协程
                 serviceScope?.launch {
@@ -439,27 +449,47 @@ class GatewayVpnService : AndroidVpnService() {
 
     /**
      * 处理回包（从远程服务器读取响应并注入TUN）
-     * 使用平滑指数退避算法减少空闲时的CPU轮询
+     * N57 修复：将串行遍历改为并行协程处理，每个连接独立协程，避免单个连接 I/O 阻塞影响其他连接。
+     * 使用 SupervisorJob + async 实现并行，单个连接异常不会取消其他连接。
+     * 使用平滑指数退避算法减少空闲时的CPU轮询。
      */
     private suspend fun processReturnTraffic() {
         var idleRounds = 0
         while (_status.value.state == VpnState.RUNNING) {
             try {
-                var hadData = false
                 // 创建快照避免遍历期间 map 修改导致视图不一致（P20 / C33）
                 val snapshot = if (::sessionManager.isInitialized) {
                     sessionManager.getActiveConnectionsSnapshot()
                 } else emptyList()
-                snapshot.forEach { (key, session) ->
-                    // C33: 快照后验证session仍是当前活跃值，避免竞态下操作已归还的socket
-                    val stillActive = sessionManager.getActiveConnectionsSnapshot().any { it.first == key && it.second === session }
-                    if (!stillActive) return@forEach
-                    if (session.protocol == PROTOCOL_TCP) {
-                        hadData = sessionManager.processTcpReturn(session, key) || hadData
-                    } else if (session.protocol == PROTOCOL_UDP) {
-                        processUdpReturn(session, key)
-                    }
+
+                if (snapshot.isEmpty()) {
+                    idleRounds = (idleRounds + 1).coerceAtMost(31)
+                    val idleDelay = calculateIdleDelay(idleRounds)
+                    kotlinx.coroutines.delay(idleDelay)
+                    continue
                 }
+
+                // N57: 并行处理每个连接的回包
+                val hadData = coroutineScope {
+                    val jobs = snapshot.map { (key, session) ->
+                        async(Dispatchers.IO) {
+                            // C33: 快照后验证session仍是当前活跃值，避免竞态下操作已归还的socket
+                            val stillActive = sessionManager.getActiveConnectionsSnapshot().any { it.first == key && it.second === session }
+                            if (!stillActive) return@async false
+
+                            when (session.protocol) {
+                                PROTOCOL_TCP -> sessionManager.processTcpReturn(session, key)
+                                PROTOCOL_UDP -> {
+                                    processUdpReturn(session, key)
+                                    false // UDP 当前实现不返回是否有数据
+                                }
+                                else -> false
+                            }
+                        }
+                    }
+                    jobs.awaitAll().any { it }
+                }
+
                 if (hadData) {
                     idleRounds = 0
                 } else {
@@ -529,6 +559,27 @@ class GatewayVpnService : AndroidVpnService() {
     private fun startProxyService() {
         val intent = Intent(this, Socks5ProxyService::class.java)
         startForegroundService(intent)
+    }
+
+    /**
+     * N80: 注册 MQTT disconnect 消息监听
+     * 订阅 device/$deviceId/control 主题，处理 SOCKS5-Proxy 发来的 disconnect 消息
+     */
+    private fun registerDisconnectListener() {
+        try {
+            val deviceId = authSessionStore.getCurrentSession()?.deviceId ?: return
+            mqttConnectionManager.subscribe(
+                topic = "device/$deviceId/control",
+                qos = 0
+            ) { payload ->
+                if (::sessionManager.isInitialized) {
+                    sessionManager.handleDisconnectMessage(payload)
+                }
+            }
+            logger.debug("N80: Registered disconnect listener for device/$deviceId/control")
+        } catch (e: Exception) {
+            logger.warn("N80: Failed to register disconnect listener", e)
+        }
     }
 
     private fun createNotificationChannel() {

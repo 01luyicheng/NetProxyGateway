@@ -565,21 +565,27 @@
 - **关联问题**: TECH_DEBT.md C79
 
 ### N57: VpnService processReturnTraffic 单协程串行处理模型导致回包处理停滞
-- **状态**: 待修复
+- **状态**: 已修复
 - **提交哈希**: d01ddd1
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L536-L562, L593-L598)
-- **问题描述**: `processReturnTraffic` 使用单协程串行遍历所有活跃连接（`activeConnections.forEach`），对每个连接同步调用 `processTcpReturn`。虽然 `input.available()` 检查可降低阻塞概率，但 `available()` 返回的是估计值，在 `available()` 和 `read()` 之间数据量可能变化。当 `available() > 0` 时 `read()` 通常不阻塞，但极端情况下（如连接被对端 RST）可能阻塞最多 `soTimeout`（30秒）。任何一个连接的 I/O 阻塞都会导致所有后续连接的回包处理停滞。
-- **风险**: 中。高延迟或慢速上游连接场景下，单个连接的阻塞可导致其他连接回包延迟
-- **修复难度**: 高。需要将串行处理改为并行处理（如每个连接独立协程），或使用 NIO 非阻塞 I/O
-- **关联问题**: ISSUES.md H14, TECH_DEBT.md C78
+- **修复提交**: (当前工作区)
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (processReturnTraffic), `android/app/src/main/java/com/netproxy/gateway/vpn/ConnectionSessionManager.kt` (injectPacket)
+- **问题描述**: ~~`processReturnTraffic` 使用单协程串行遍历所有活跃连接（`activeConnections.forEach`），对每个连接同步调用 `processTcpReturn`。~~ 已改为使用 `coroutineScope { async(Dispatchers.IO) }` 并行处理每个连接的回包，单个连接 I/O 阻塞不再影响其他连接。`injectPacket()` 添加 `synchronized(stream)` 保证多协程并发写入 TUN 的线程安全。
+- **修复方式**:
+  1. `VpnService.processReturnTraffic()`: 串行 `snapshot.forEach` 改为 `coroutineScope { snapshot.map { async(Dispatchers.IO) { ... } }.awaitAll() }`
+  2. `ConnectionSessionManager.injectPacket()`: `stream.write()` 和 `stream.flush()` 包裹在 `synchronized(stream)` 内
+- **关联问题**: ISSUES.md N58, TECH_DEBT.md C78, TECH_DEBT.md C80
 
 ### N58: VpnService processTcpReturn 依赖 InputStream.available() 不可靠
-- **状态**: 待修复
+- **状态**: 已修复
 - **提交哈希**: d01ddd1
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (processTcpReturn 中 available() 检查处)
-- **问题描述**: `processTcpReturn` 使用 `input.available() > 0` 判断是否有回包数据可读。`available()` 返回的是估计值而非保证值，可能返回 0 但实际有数据已到达（尤其在网络延迟或 TCP 窗口滑动场景）。若 `available()` 返回 0，当前实现会跳过该连接的读取，导致回包被延迟到下一轮循环，增加延迟。
-- **风险**: 中。极端网络条件下回包延迟增加，影响实时性要求高的应用
-- **修复难度**: 中。需要引入非阻塞 I/O 或 select/poll 机制替代 available() 估计值判断
+- **修复提交**: (当前工作区)
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/ConnectionSessionManager.kt` (processTcpReturn)
+- **问题描述**: ~~`processTcpReturn` 使用 `input.available() > 0` 判断是否有回包数据可读。~~ `available()` 返回的是估计值，可能返回 0 但实际有数据已到达。已移除 `available()` 检查，改为直接尝试读取：将 socket 超时设为 1ms，无数据时 `read()` 立即抛出 `SocketTimeoutException`，有数据则正常读取并构造回包。
+- **修复方式**:
+  1. 移除 `input.available() > 0` 判断
+  2. 读取前设置 `socket.soTimeout = 1`
+  3. 捕获 `SocketTimeoutException` 作为无数据的正常返回路径
+  4. `finally` 块恢复原始 `soTimeout`
 - **关联问题**: N57
 
 ---

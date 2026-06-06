@@ -6,6 +6,10 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.unmockkAll
 import io.mockk.verify
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -17,7 +21,9 @@ import org.junit.Test
 import java.io.ByteArrayInputStream
 import java.io.FileOutputStream
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * ConnectionSessionManager 单元测试
@@ -392,6 +398,213 @@ class ConnectionSessionManagerTest {
         assertFalse(activeConnections.containsKey(sessionKey))
     }
 
+    // ==================== H14: 0 长度控制包注入测试 ====================
+
+    @Test
+    fun processTcpReturn_zeroLengthControlPacket_injectsPacket() {
+        val mockSocket = mockk<Socket>(relaxed = true)
+        every { mockSocket.isClosed } returns false
+        every { mockSocket.isConnected } returns true
+        every { mockSocket.isInputShutdown } returns false
+        every { mockSocket.isOutputShutdown } returns false
+        every { mockSocket.soTimeout } returns 0
+        every { mockSocket.setSoTimeout(any()) } returns Unit
+
+        // 模拟无数据可读（立即超时）
+        val mockInput = ByteArrayInputStream(byteArrayOf())
+        every { mockSocket.getInputStream() } returns mockInput
+
+        val pooledConnection = PooledSocks5Connection(
+            socket = mockSocket,
+            destinationIp = "192.168.1.1",
+            destinationPort = 443
+        )
+
+        val sessionKey = "10.0.0.2:12345-192.168.1.1:443"
+        val activeConnections = ConcurrentHashMap<String, ConnectionSession>()
+        val session = ConnectionSession(
+            srcIp = "10.0.0.2",
+            srcPort = 12345,
+            dstIp = "192.168.1.1",
+            dstPort = 443,
+            protocol = 6,
+            pooledConnection = pooledConnection,
+            virtualSrcIp = "10.0.0.100",
+            pendingControlFlags = TcpFlags.FIN_ACK
+        )
+        activeConnections[sessionKey] = session
+
+        val mockPool = mockk<Socks5ConnectionPool>(relaxed = true)
+        val mockOutput = mockk<FileOutputStream>(relaxed = true)
+
+        manager = ConnectionSessionManager(
+            packetProcessor = packetProcessor,
+            activeConnections = activeConnections
+        )
+        manager.socks5ConnectionPool = mockPool
+        manager.vpnOutputStream = mockOutput
+
+        val result = manager.processTcpReturn(session, sessionKey)
+
+        assertTrue(result)
+        verify { mockOutput.write(any<ByteArray>(), 0, 40) }
+        assertFalse(session.needsControlPacket()) // 控制标志应已被消费
+    }
+
+    @Test
+    fun processTcpReturn_zeroLengthAck_injectsAckPacket() {
+        val mockSocket = mockk<Socket>(relaxed = true)
+        every { mockSocket.isClosed } returns false
+        every { mockSocket.isConnected } returns true
+        every { mockSocket.isInputShutdown } returns false
+        every { mockSocket.isOutputShutdown } returns false
+        every { mockSocket.soTimeout } returns 0
+        every { mockSocket.setSoTimeout(any()) } returns Unit
+
+        val mockInput = ByteArrayInputStream(byteArrayOf())
+        every { mockSocket.getInputStream() } returns mockInput
+
+        val pooledConnection = PooledSocks5Connection(
+            socket = mockSocket,
+            destinationIp = "192.168.1.1",
+            destinationPort = 443
+        )
+
+        val sessionKey = "10.0.0.2:12345-192.168.1.1:443"
+        val activeConnections = ConcurrentHashMap<String, ConnectionSession>()
+        val session = ConnectionSession(
+            srcIp = "10.0.0.2",
+            srcPort = 12345,
+            dstIp = "192.168.1.1",
+            dstPort = 443,
+            protocol = 6,
+            pooledConnection = pooledConnection,
+            virtualSrcIp = "10.0.0.100",
+            pendingControlFlags = TcpFlags.ACK
+        )
+        activeConnections[sessionKey] = session
+
+        val mockPool = mockk<Socks5ConnectionPool>(relaxed = true)
+        val mockOutput = mockk<FileOutputStream>(relaxed = true)
+
+        manager = ConnectionSessionManager(
+            packetProcessor = packetProcessor,
+            activeConnections = activeConnections
+        )
+        manager.socks5ConnectionPool = mockPool
+        manager.vpnOutputStream = mockOutput
+
+        val result = manager.processTcpReturn(session, sessionKey)
+
+        assertTrue(result)
+        verify { mockOutput.write(any<ByteArray>(), 0, 40) }
+    }
+
+    @Test
+    fun processTcpReturn_noDataAndNoControlPacket_returnsFalse() {
+        val mockSocket = mockk<Socket>(relaxed = true)
+        every { mockSocket.isClosed } returns false
+        every { mockSocket.isConnected } returns true
+        every { mockSocket.isInputShutdown } returns false
+        every { mockSocket.isOutputShutdown } returns false
+        every { mockSocket.soTimeout } returns 0
+        every { mockSocket.setSoTimeout(any()) } returns Unit
+
+        val mockInput = ByteArrayInputStream(byteArrayOf())
+        every { mockSocket.getInputStream() } returns mockInput
+
+        val pooledConnection = PooledSocks5Connection(
+            socket = mockSocket,
+            destinationIp = "192.168.1.1",
+            destinationPort = 443
+        )
+
+        val sessionKey = "10.0.0.2:12345-192.168.1.1:443"
+        val activeConnections = ConcurrentHashMap<String, ConnectionSession>()
+        val session = ConnectionSession(
+            srcIp = "10.0.0.2",
+            srcPort = 12345,
+            dstIp = "192.168.1.1",
+            dstPort = 443,
+            protocol = 6,
+            pooledConnection = pooledConnection,
+            virtualSrcIp = "10.0.0.100",
+            pendingControlFlags = 0
+        )
+        activeConnections[sessionKey] = session
+
+        val mockPool = mockk<Socks5ConnectionPool>(relaxed = true)
+        val mockOutput = mockk<FileOutputStream>(relaxed = true)
+
+        manager = ConnectionSessionManager(
+            packetProcessor = packetProcessor,
+            activeConnections = activeConnections
+        )
+        manager.socks5ConnectionPool = mockPool
+        manager.vpnOutputStream = mockOutput
+
+        val result = manager.processTcpReturn(session, sessionKey)
+
+        assertFalse(result)
+        verify(exactly = 0) { mockOutput.write(any<ByteArray>(), any(), any()) }
+    }
+
+    @Test
+    fun processTcpReturn_dataWithPendingFlags_usesExplicitFlags() {
+        val mockSocket = mockk<Socket>(relaxed = true)
+        every { mockSocket.isClosed } returns false
+        every { mockSocket.isConnected } returns true
+        every { mockSocket.isInputShutdown } returns false
+        every { mockSocket.isOutputShutdown } returns false
+        every { mockSocket.soTimeout } returns 0
+        every { mockSocket.setSoTimeout(any()) } returns Unit
+
+        // 模拟有 5 字节数据
+        val mockInput = ByteArrayInputStream(byteArrayOf(1, 2, 3, 4, 5))
+        every { mockSocket.getInputStream() } returns mockInput
+
+        val pooledConnection = PooledSocks5Connection(
+            socket = mockSocket,
+            destinationIp = "192.168.1.1",
+            destinationPort = 443
+        )
+
+        val sessionKey = "10.0.0.2:12345-192.168.1.1:443"
+        val activeConnections = ConcurrentHashMap<String, ConnectionSession>()
+        val session = ConnectionSession(
+            srcIp = "10.0.0.2",
+            srcPort = 12345,
+            dstIp = "192.168.1.1",
+            dstPort = 443,
+            protocol = 6,
+            pooledConnection = pooledConnection,
+            virtualSrcIp = "10.0.0.100",
+            pendingControlFlags = TcpFlags.FIN_ACK,
+            seqNum = 100L,
+            ackNum = 200L
+        )
+        activeConnections[sessionKey] = session
+
+        val mockPool = mockk<Socks5ConnectionPool>(relaxed = true)
+        val mockOutput = mockk<FileOutputStream>(relaxed = true)
+
+        manager = ConnectionSessionManager(
+            packetProcessor = packetProcessor,
+            activeConnections = activeConnections
+        )
+        manager.socks5ConnectionPool = mockPool
+        manager.vpnOutputStream = mockOutput
+
+        val result = manager.processTcpReturn(session, sessionKey)
+
+        assertTrue(result)
+        // 应注入 45 字节 = 20 IP + 20 TCP + 5 payload
+        verify { mockOutput.write(any<ByteArray>(), 0, 45) }
+        assertEquals(105L, session.seqNum) // 100 + 5
+        assertEquals(205L, session.ackNum) // 200 + 5
+        assertFalse(session.needsControlPacket())
+    }
+
     // ==================== 注入包测试 ====================
 
     @Test
@@ -411,6 +624,135 @@ class ConnectionSessionManagerTest {
         val result = manager.injectPacket(packet, 40)
         assertTrue(result)
         verify { mockOutput.write(packet, 0, 40) }
+    }
+
+    @Test
+    fun injectPacket_concurrentWrites_areThreadSafe() {
+        val mockOutput = mockk<FileOutputStream>(relaxed = true)
+        manager.vpnOutputStream = mockOutput
+
+        val writeCount = AtomicInteger(0)
+        every { mockOutput.write(any<ByteArray>(), any(), any()) } answers {
+            writeCount.incrementAndGet()
+        }
+
+        runBlocking {
+            val jobs = (1..10).map {
+                async(Dispatchers.Default) {
+                    manager.injectPacket(ByteArray(40), 40)
+                }
+            }
+            jobs.awaitAll()
+        }
+
+        assertEquals(10, writeCount.get())
+    }
+
+    // ==================== N58: available() 移除测试 ====================
+
+    @Test
+    fun processTcpReturn_noDataWithSocketTimeout_returnsFalseWithoutRemoving() {
+        val mockSocket = mockk<Socket>(relaxed = true)
+        every { mockSocket.isClosed } returns false
+        every { mockSocket.isConnected } returns true
+        every { mockSocket.isInputShutdown } returns false
+        every { mockSocket.isOutputShutdown } returns false
+        // N58: 模拟无数据可读时抛出 SocketTimeoutException
+        every { mockSocket.getInputStream() } throws SocketTimeoutException("Read timed out")
+        every { mockSocket.soTimeout = any() } returns Unit
+        every { mockSocket.soTimeout } returns 0
+
+        val pooledConnection = PooledSocks5Connection(
+            socket = mockSocket,
+            destinationIp = "192.168.1.1",
+            destinationPort = 443
+        )
+
+        val sessionKey = "10.0.0.2:12345-192.168.1.1:443"
+        val activeConnections = ConcurrentHashMap<String, ConnectionSession>()
+        val session = ConnectionSession(
+            srcIp = "10.0.0.2",
+            srcPort = 12345,
+            dstIp = "192.168.1.1",
+            dstPort = 443,
+            protocol = 6,
+            pooledConnection = pooledConnection,
+            virtualSrcIp = "10.0.0.100"
+        )
+        activeConnections[sessionKey] = session
+
+        manager = ConnectionSessionManager(
+            packetProcessor = packetProcessor,
+            activeConnections = activeConnections
+        )
+
+        val result = manager.processTcpReturn(session, sessionKey)
+
+        assertFalse(result)
+        assertTrue(activeConnections.containsKey(sessionKey))
+    }
+
+    // ==================== N57: 并行处理测试 ====================
+
+    @Test
+    fun processTcpReturn_parallelProcessing_allSessionsProcessed() = runBlocking {
+        val activeConnections = ConcurrentHashMap<String, ConnectionSession>()
+        val processedKeys = ConcurrentHashMap<String, Boolean>()
+
+        // 创建 5 个模拟连接，每个都有数据可读
+        repeat(5) { index ->
+            val data = byteArrayOf(1, 2, 3, 4)
+            val mockInput = ByteArrayInputStream(data)
+            val mockSocket = mockk<Socket>(relaxed = true)
+            every { mockSocket.isClosed } returns false
+            every { mockSocket.isConnected } returns true
+            every { mockSocket.isInputShutdown } returns false
+            every { mockSocket.isOutputShutdown } returns false
+            every { mockSocket.getInputStream() } returns mockInput
+            every { mockSocket.soTimeout = any() } returns Unit
+            every { mockSocket.soTimeout } returns 0
+
+            val pooledConnection = PooledSocks5Connection(
+                socket = mockSocket,
+                destinationIp = "192.168.1.$index",
+                destinationPort = 443
+            )
+
+            val sessionKey = "10.0.0.2:1234$index-192.168.1.$index:443"
+            val session = ConnectionSession(
+                srcIp = "10.0.0.2",
+                srcPort = 12340 + index,
+                dstIp = "192.168.1.$index",
+                dstPort = 443,
+                protocol = 6,
+                pooledConnection = pooledConnection,
+                virtualSrcIp = "10.0.0.100"
+            )
+            activeConnections[sessionKey] = session
+        }
+
+        val mockOutput = mockk<FileOutputStream>(relaxed = true)
+        manager = ConnectionSessionManager(
+            packetProcessor = packetProcessor,
+            activeConnections = activeConnections
+        )
+        manager.vpnOutputStream = mockOutput
+
+        // 模拟并行处理：每个连接独立协程调用 processTcpReturn
+        val snapshot = activeConnections.entries.map { it.key to it.value }
+        val results = snapshot.map { (key, session) ->
+            async(Dispatchers.Default) {
+                val result = manager.processTcpReturn(session, key)
+                if (result) {
+                    processedKeys[key] = true
+                }
+                result
+            }
+        }
+
+        val hadDataList = results.awaitAll()
+        assertEquals(5, hadDataList.count { it })
+        assertEquals(5, processedKeys.size)
     }
 
     // ==================== Session 移除测试 ====================
@@ -526,5 +868,110 @@ class ConnectionSessionManagerTest {
         assertEquals(0, manager.getActiveConnectionCount())
         verify(atLeast = 1) { mockPool.discardConnection(conn1) }
         verify(atLeast = 1) { mockPool.discardConnection(conn2) }
+    }
+
+    // ==================== N80: disconnect 消息处理测试 ====================
+
+    @Test
+    fun handleDisconnectMessage_validDisconnect_removesInvalidSessions() {
+        val mockSocket = mockk<Socket>(relaxed = true)
+        every { mockSocket.isClosed } returns true
+        every { mockSocket.isConnected } returns false
+        every { mockSocket.isInputShutdown } returns true
+        every { mockSocket.isOutputShutdown } returns true
+
+        val invalidConn = PooledSocks5Connection(
+            socket = mockSocket,
+            destinationIp = "192.168.1.1",
+            destinationPort = 443
+        )
+
+        val activeConnections = ConcurrentHashMap<String, ConnectionSession>()
+        activeConnections["10.0.0.2:12345-192.168.1.1:443"] = ConnectionSession(
+            srcIp = "10.0.0.2", srcPort = 12345,
+            dstIp = "192.168.1.1", dstPort = 443,
+            protocol = 6, pooledConnection = invalidConn, virtualSrcIp = "10.0.0.100"
+        )
+
+        val mockPool = mockk<Socks5ConnectionPool>(relaxed = true)
+        manager = ConnectionSessionManager(packetProcessor, activeConnections)
+        manager.socks5ConnectionPool = mockPool
+
+        val payload = """{"type":"disconnect","data":{"stream_id":"abc123"}}"""
+        val result = manager.handleDisconnectMessage(payload)
+
+        assertTrue(result)
+        assertEquals(0, manager.getActiveConnectionCount())
+        verify(atLeast = 1) { mockPool.discardConnection(invalidConn) }
+    }
+
+    @Test
+    fun handleDisconnectMessage_noInvalidSessions_returnsFalse() {
+        val mockSocket = mockk<Socket>(relaxed = true)
+        every { mockSocket.isClosed } returns false
+        every { mockSocket.isConnected } returns true
+        every { mockSocket.isInputShutdown } returns false
+        every { mockSocket.isOutputShutdown } returns false
+
+        val validConn = PooledSocks5Connection(
+            socket = mockSocket,
+            destinationIp = "192.168.1.1",
+            destinationPort = 443
+        )
+
+        val activeConnections = ConcurrentHashMap<String, ConnectionSession>()
+        activeConnections["10.0.0.2:12345-192.168.1.1:443"] = ConnectionSession(
+            srcIp = "10.0.0.2", srcPort = 12345,
+            dstIp = "192.168.1.1", dstPort = 443,
+            protocol = 6, pooledConnection = validConn, virtualSrcIp = "10.0.0.100"
+        )
+
+        manager = ConnectionSessionManager(packetProcessor, activeConnections)
+
+        val payload = """{"type":"disconnect","data":{"stream_id":"abc123"}}"""
+        val result = manager.handleDisconnectMessage(payload)
+
+        assertFalse(result)
+        assertEquals(1, manager.getActiveConnectionCount())
+    }
+
+    @Test
+    fun handleDisconnectMessage_nonDisconnectType_returnsFalse() {
+        manager = ConnectionSessionManager(packetProcessor)
+
+        val payload = """{"type":"data","data":{"stream_id":"abc123","data":"hello"}}"""
+        val result = manager.handleDisconnectMessage(payload)
+
+        assertFalse(result)
+    }
+
+    @Test
+    fun handleDisconnectMessage_missingStreamId_returnsFalse() {
+        manager = ConnectionSessionManager(packetProcessor)
+
+        val payload = """{"type":"disconnect","data":{}}"""
+        val result = manager.handleDisconnectMessage(payload)
+
+        assertFalse(result)
+    }
+
+    @Test
+    fun handleDisconnectMessage_malformedJson_returnsFalse() {
+        manager = ConnectionSessionManager(packetProcessor)
+
+        val payload = "not json at all"
+        val result = manager.handleDisconnectMessage(payload)
+
+        assertFalse(result)
+    }
+
+    @Test
+    fun handleDisconnectMessage_blankStreamId_returnsFalse() {
+        manager = ConnectionSessionManager(packetProcessor)
+
+        val payload = """{"type":"disconnect","data":{"stream_id":""}}"""
+        val result = manager.handleDisconnectMessage(payload)
+
+        assertFalse(result)
     }
 }

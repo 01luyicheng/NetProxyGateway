@@ -563,6 +563,161 @@ class VpnPacketProcessorTest {
         assertEquals(50, packetLen) // 20 IP + 20 TCP + 10 payload
     }
 
+    // ==================== H14: 0 长度控制包与 TCP 标志位测试 ====================
+
+    @Test
+    fun constructReturnPacket_zeroLengthControlPacket_returnsCorrectLength() {
+        val session = ConnectionSession(
+            srcIp = "10.0.0.2",
+            srcPort = 12345,
+            dstIp = "192.168.1.1",
+            dstPort = 443,
+            protocol = 6,
+            pooledConnection = null,
+            virtualSrcIp = "10.0.0.100"
+        )
+        val buffer = ByteArray(128)
+
+        // 0 长度控制包应返回 40（20 IP + 20 TCP）
+        val packetLen = processor.constructReturnPacket(buffer, session, 0, TcpFlags.ACK)
+        assertEquals(40, packetLen)
+    }
+
+    @Test
+    fun constructReturnPacket_zeroLengthWithFinFlag_setsFinAck() {
+        val session = ConnectionSession(
+            srcIp = "10.0.0.2",
+            srcPort = 12345,
+            dstIp = "192.168.1.1",
+            dstPort = 443,
+            protocol = 6,
+            pooledConnection = null,
+            virtualSrcIp = "10.0.0.100",
+            tcpState = TcpState.FIN_WAIT
+        )
+        val buffer = ByteArray(128)
+
+        val packetLen = processor.constructReturnPacket(buffer, session, 0)
+        assertEquals(40, packetLen)
+        // TCP 标志位在 offset 33
+        val flags = buffer[33].toInt() and 0xFF
+        assertEquals(TcpFlags.FIN_ACK, flags)
+    }
+
+    @Test
+    fun constructReturnPacket_establishedState_setsPshAck() {
+        val session = ConnectionSession(
+            srcIp = "10.0.0.2",
+            srcPort = 12345,
+            dstIp = "192.168.1.1",
+            dstPort = 443,
+            protocol = 6,
+            pooledConnection = null,
+            virtualSrcIp = "10.0.0.100",
+            tcpState = TcpState.ESTABLISHED
+        )
+        val buffer = ByteArray(128)
+
+        val packetLen = processor.constructReturnPacket(buffer, session, 10)
+        assertEquals(50, packetLen)
+        val flags = buffer[33].toInt() and 0xFF
+        assertEquals(TcpFlags.PSH_ACK, flags)
+    }
+
+    @Test
+    fun constructReturnPacket_synSentState_setsSynAck() {
+        val session = ConnectionSession(
+            srcIp = "10.0.0.2",
+            srcPort = 12345,
+            dstIp = "192.168.1.1",
+            dstPort = 443,
+            protocol = 6,
+            pooledConnection = null,
+            virtualSrcIp = "10.0.0.100",
+            tcpState = TcpState.SYN_SENT
+        )
+        val buffer = ByteArray(128)
+
+        val packetLen = processor.constructReturnPacket(buffer, session, 0)
+        assertEquals(40, packetLen)
+        val flags = buffer[33].toInt() and 0xFF
+        assertEquals(TcpFlags.SYN_ACK, flags)
+    }
+
+    @Test
+    fun constructReturnPacket_explicitRstFlag_overridesState() {
+        val session = ConnectionSession(
+            srcIp = "10.0.0.2",
+            srcPort = 12345,
+            dstIp = "192.168.1.1",
+            dstPort = 443,
+            protocol = 6,
+            pooledConnection = null,
+            virtualSrcIp = "10.0.0.100",
+            tcpState = TcpState.ESTABLISHED
+        )
+        val buffer = ByteArray(128)
+
+        val packetLen = processor.constructReturnPacket(buffer, session, 0, TcpFlags.RST_ACK)
+        assertEquals(40, packetLen)
+        val flags = buffer[33].toInt() and 0xFF
+        assertEquals(TcpFlags.RST_ACK, flags)
+    }
+
+    @Test
+    fun constructReturnPacket_usesSessionSeqAckNumbers() {
+        val session = ConnectionSession(
+            srcIp = "10.0.0.2",
+            srcPort = 12345,
+            dstIp = "192.168.1.1",
+            dstPort = 443,
+            protocol = 6,
+            pooledConnection = null,
+            virtualSrcIp = "10.0.0.100",
+            seqNum = 0x12345678L,
+            ackNum = 0xABCDEF01L
+        )
+        val buffer = ByteArray(128)
+
+        val packetLen = processor.constructReturnPacket(buffer, session, 0)
+        assertEquals(40, packetLen)
+
+        // Seq number at offset 24-27 (big-endian)
+        val seq = ((buffer[24].toInt() and 0xFF) shl 24) or
+                  ((buffer[25].toInt() and 0xFF) shl 16) or
+                  ((buffer[26].toInt() and 0xFF) shl 8) or
+                  (buffer[27].toInt() and 0xFF)
+        assertEquals(0x12345678, seq)
+
+        // Ack number at offset 28-31 (big-endian)
+        val ack = ((buffer[28].toInt() and 0xFF) shl 24) or
+                  ((buffer[29].toInt() and 0xFF) shl 16) or
+                  ((buffer[30].toInt() and 0xFF) shl 8) or
+                  (buffer[31].toInt() and 0xFF)
+        assertEquals(0xABCDEF01.toLong(), ack.toLong() and 0xFFFFFFFFL)
+    }
+
+    @Test
+    fun constructReturnPacket_zeroLengthPayload_withDataState_isValid() {
+        val session = ConnectionSession(
+            srcIp = "10.0.0.2",
+            srcPort = 12345,
+            dstIp = "192.168.1.1",
+            dstPort = 443,
+            protocol = 6,
+            pooledConnection = null,
+            virtualSrcIp = "10.0.0.100",
+            tcpState = TcpState.ESTABLISHED
+        )
+        val buffer = ByteArray(128)
+
+        // ESTABLISHED 状态下 0 长度包应使用 PSH+ACK（数据包语义）
+        val packetLen = processor.constructReturnPacket(buffer, session, 0)
+        assertEquals(40, packetLen)
+        val flags = buffer[33].toInt() and 0xFF
+        assertEquals(TcpFlags.PSH_ACK, flags)
+    }
+
     // ==================== 真实数据包测试 ====================
 
     @Test

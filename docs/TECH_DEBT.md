@@ -627,10 +627,11 @@
 - **修复难度**: 中
 - **关联问题**: ISSUES.md N56
 
-### C80: processReturnTraffic 单协程串行处理模型
+### C80: processReturnTraffic 单协程串行处理模型 [已修复]
+- **状态**: 已修复
 - **提交哈希**: d01ddd1
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L536-L562)
-- **问题描述**: 详见 ISSUES.md N57。`processReturnTraffic` 使用单协程串行遍历所有活跃连接，单个连接 I/O 阻塞会导致所有后续连接回包处理停滞。
-- **风险**: 中。单个连接阻塞影响所有连接的回包处理
-- **修复难度**: 高。需要重构为多协程并发模型或引入异步I/O
+- **修复提交**: (当前工作区)
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (processReturnTraffic)
+- **问题描述**: ~~详见 ISSUES.md N57。`processReturnTraffic` 使用单协程串行遍历所有活跃连接，单个连接 I/O 阻塞会导致所有后续连接回包处理停滞。~~ 已改为 `coroutineScope { async(Dispatchers.IO) }` 并行模型，每个连接独立协程处理回包。
+- **修复方式**: 串行 `snapshot.forEach` 改为并行 `coroutineScope { snapshot.map { async(Dispatchers.IO) { ... } }.awaitAll() }`
 - **关联问题**: ISSUES.md N57, TECH_DEBT.md C78
