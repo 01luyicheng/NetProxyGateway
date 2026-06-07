@@ -70,7 +70,7 @@ class MainViewModelTest {
         every { wifiManager.getCurrentConnection() } returns null
         every { authSessionStore.getOrCreateDeviceId() } returns "device-stable"
         every { mqttConnectionManager.connect(any(), any()) } just runs
-        every { authSessionStore.update(any(), any()) } just runs
+        every { authSessionStore.update(any(), any<CharArray>()) } just runs
         every { authSessionStore.clear() } just runs
 
         every { context.getString(R.string.error_cellular_required) } returns "__ERR_CELLULAR_REQUIRED__"
@@ -108,7 +108,7 @@ class MainViewModelTest {
         val uiState = viewModel.uiState.value
         assertEquals("123456", uiState.peerId)
         assertFalse(uiState.isPaired)
-        verify(exactly = 1) { mqttConnectionManager.connect("device-stable", "123456") }
+        verify(exactly = 1) { mqttConnectionManager.connect("device-stable", "123456".toCharArray()) }
     }
 
     @Test

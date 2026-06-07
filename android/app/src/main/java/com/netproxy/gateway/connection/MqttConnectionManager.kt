@@ -278,7 +278,7 @@ class MqttConnectionManager @Inject constructor(
         return createSSLContext(trustAllCerts).socketFactory
     }
 
-    fun connect(deviceId: String, authToken: String) {
+    fun connect(deviceId: String, authToken: CharArray) {
         var generation = 0L
         lateinit var jobToStart: Job
         synchronized(this@MqttConnectionManager) {
@@ -339,7 +339,7 @@ class MqttConnectionManager @Inject constructor(
                     connectionTimeout = CONNECTION_TIMEOUT_SECONDS
                     keepAliveInterval = 30
                     userName = deviceId
-                    password = authToken.toCharArray()
+                    password = authToken
                     setAutomaticReconnect(false) // We handle reconnection manually
 
                     if (isTlsEnabled()) {
@@ -495,7 +495,7 @@ class MqttConnectionManager @Inject constructor(
         }
     }
 
-    private fun scheduleReconnect(deviceId: String, authToken: String, generation: Long) {
+    private fun scheduleReconnect(deviceId: String, authToken: CharArray, generation: Long) {
         lateinit var jobToStart: Job
         synchronized(this@MqttConnectionManager) {
             reconnectJob?.cancel()
@@ -520,7 +520,7 @@ class MqttConnectionManager @Inject constructor(
         jobToStart.start()
     }
 
-    private fun startHeartbeat(deviceId: String, authToken: String, generation: Long) {
+    private fun startHeartbeat(deviceId: String, authToken: CharArray, generation: Long) {
         if (!shouldStayConnected || generation != connectionGeneration.get()) {
             return
         }

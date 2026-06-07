@@ -54,31 +54,31 @@ class AuthSessionStore @Inject constructor(
     }
 
     @Synchronized
-    fun update(deviceId: String, authToken: String) {
+    fun update(deviceId: String, authToken: CharArray) {
         inMemoryToken?.fill('\u0000')
-        inMemoryToken = authToken.toCharArray()
+        inMemoryToken = authToken.copyOf()
         inMemoryDeviceId = deviceId
         inMemoryInstallationDeviceId = deviceId
 
         encryptedPrefs.edit()
             .putString(KEY_INSTALLATION_DEVICE_ID, deviceId)
             .putString(KEY_DEVICE_ID, deviceId)
-            .putString(KEY_AUTH_TOKEN, authToken)
+            .putString(KEY_AUTH_TOKEN, String(authToken))
             .apply()
     }
 
     @Synchronized
-    fun updateWithResult(deviceId: String, authToken: String): AppResult<Unit> {
+    fun updateWithResult(deviceId: String, authToken: CharArray): AppResult<Unit> {
         return try {
             inMemoryToken?.fill('\u0000')
-            inMemoryToken = authToken.toCharArray()
+            inMemoryToken = authToken.copyOf()
             inMemoryDeviceId = deviceId
             inMemoryInstallationDeviceId = deviceId
 
             encryptedPrefs.edit()
                 .putString(KEY_INSTALLATION_DEVICE_ID, deviceId)
                 .putString(KEY_DEVICE_ID, deviceId)
-                .putString(KEY_AUTH_TOKEN, authToken)
+                .putString(KEY_AUTH_TOKEN, String(authToken))
                 .apply()
             AppResult.success(Unit)
         } catch (e: Exception) {
@@ -138,21 +138,21 @@ class AuthSessionStore @Inject constructor(
     }
 
     @Synchronized
-    fun isValid(username: String, password: String): Boolean {
+    fun isValid(username: String, password: CharArray): Boolean {
         val session = loadSession() ?: return false
         if (session.deviceId != username) return false
-        return constantTimeEquals(session.authToken.toCharArray(), password.toCharArray())
+        return constantTimeEquals(session.authToken, password)
     }
 
     @Synchronized
-    fun validateWithResult(username: String, password: String): AppResult<Boolean> {
+    fun validateWithResult(username: String, password: CharArray): AppResult<Boolean> {
         return try {
             val session = loadSession()
                 ?: return AppResult.success(false)
             if (session.deviceId != username) {
                 return AppResult.success(false)
             }
-            val isValid = constantTimeEquals(session.authToken.toCharArray(), password.toCharArray())
+            val isValid = constantTimeEquals(session.authToken, password)
             AppResult.success(isValid)
         } catch (e: Exception) {
             AppResult.error(e)
@@ -180,14 +180,14 @@ class AuthSessionStore @Inject constructor(
         val cachedToken = inMemoryToken
         val cachedDeviceId = inMemoryDeviceId
         if (cachedToken != null && cachedDeviceId != null) {
-            return ProxyAuthSession(cachedDeviceId, String(cachedToken))
+            return ProxyAuthSession(cachedDeviceId, cachedToken.copyOf())
         }
 
         val storedDeviceId = encryptedPrefs.getString(KEY_DEVICE_ID, null) ?: return null
         val storedToken = encryptedPrefs.getString(KEY_AUTH_TOKEN, null) ?: return null
         inMemoryDeviceId = storedDeviceId
         inMemoryToken = storedToken.toCharArray()
-        return ProxyAuthSession(storedDeviceId, storedToken)
+        return ProxyAuthSession(storedDeviceId, storedToken.toCharArray())
     }
 
     private fun constantTimeEquals(left: CharArray, right: CharArray): Boolean {
@@ -202,5 +202,22 @@ class AuthSessionStore @Inject constructor(
 
 data class ProxyAuthSession(
     val deviceId: String,
-    val authToken: String
-)
+    val authToken: CharArray
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+        other as ProxyAuthSession
+        return deviceId == other.deviceId && authToken.contentEquals(other.authToken)
+    }
+
+    override fun hashCode(): Int {
+        var result = deviceId.hashCode()
+        result = 31 * result + authToken.contentHashCode()
+        return result
+    }
+
+    override fun toString(): String {
+        return "ProxyAuthSession(deviceId='$deviceId', authToken=[REDACTED])"
+    }
+}

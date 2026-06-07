@@ -12,7 +12,7 @@
 
 ### C1: SSL信任所有证书配置风险
 - **状态**: 已修复
-- **修复提交**: `d74dd42`
+- **修复提交**: `a1747a6`
 - **修复内容**: release构建时Gradle检查，若`MQTT_TRUST_ALL_CERTS=true`则阻止构建
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L98-L114)
 - **问题**: 生产环境已有强制检查机制，当`DEBUG=false`且`MQTT_TRUST_ALL_CERTS=true`时会抛出`IllegalStateException`阻止应用启动。建议增加构建时静态检查作为额外防护
@@ -575,7 +575,7 @@
 ### N57: VpnService processReturnTraffic 单协程串行处理模型导致回包处理停滞
 - **状态**: 已修复
 - **提交哈希**: d01ddd1
-- **修复提交**: (当前工作区)
+- **修复提交**: `07aaa3b`
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (processReturnTraffic), `android/app/src/main/java/com/netproxy/gateway/vpn/ConnectionSessionManager.kt` (injectPacket)
 - **问题描述**: ~~`processReturnTraffic` 使用单协程串行遍历所有活跃连接（`activeConnections.forEach`），对每个连接同步调用 `processTcpReturn`。~~ 已改为使用 `coroutineScope { async(Dispatchers.IO) }` 并行处理每个连接的回包，单个连接 I/O 阻塞不再影响其他连接。`injectPacket()` 添加 `synchronized(stream)` 保证多协程并发写入 TUN 的线程安全。
 - **修复方式**:
@@ -586,7 +586,7 @@
 ### N58: VpnService processTcpReturn 依赖 InputStream.available() 不可靠
 - **状态**: 已修复
 - **提交哈希**: d01ddd1
-- **修复提交**: (当前工作区)
+- **修复提交**: `07aaa3b`
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/ConnectionSessionManager.kt` (processTcpReturn)
 - **问题描述**: ~~`processTcpReturn` 使用 `input.available() > 0` 判断是否有回包数据可读。~~ `available()` 返回的是估计值，可能返回 0 但实际有数据已到达。已移除 `available()` 检查，改为直接尝试读取：将 socket 超时设为 1ms，无数据时 `read()` 立即抛出 `SocketTimeoutException`，有数据则正常读取并构造回包。
 - **修复方式**:
@@ -708,9 +708,9 @@
 
 ### N79: SOCKS5-Proxy DataChan 满时关闭 stream 导致连接抖动风险
 - **状态**: 已修复
-- **修复提交**: `d74dd42`
+- **修复提交**: `07aaa3b`
 - **位置**: `server/socks5-proxy/main.go`
-- **修复内容**: 
+- **修复内容**:
   - `defaultDataChanSize`: 100 → 256
   - DataChan 满时丢弃数据包并记录日志，保持 stream 存活
   - 更新测试验证新行为
@@ -720,7 +720,7 @@
 - **状态**: 已修复
 - **修复提交**: `07aaa3b`
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/ConnectionSessionManager.kt`
-- **修复内容**: 
+- **修复内容**:
   - `ConnectionSessionManager` 新增 `handleDisconnectMessage()` 方法
   - `VpnService` 注册 MQTT disconnect 消息监听器
   - `MqttConnectionManager` 移除硬编码 control 主题订阅避免冲突
@@ -790,5 +790,135 @@
 - **问题描述**: `ConnectionSession` 与 `PooledSocks5Connection` 的生命周期绑定存在设计缺陷。当 VPN 会话因超时或异常被清理时，`PooledSocks5Connection` 上可能残留未消费的数据或处于不确定的 TCP 状态。将其 `returnConnection()` 回池会导致后续借用者读取到脏数据，造成流量混淆。连接池的复用语义（同一 dstIp:dstPort 可复用）与 VPN 会话语义（每个五元组独立字节流）不匹配。
 - **风险**: **高**。可能导致跨会话的流量混淆和数据泄漏。
 - **修复方案**: 所有从 `activeConnections` 移除的过期/无效会话，其 `pooledConnection` 直接关闭（`close()`）而非归还到连接池（`returnConnection()`）。`PooledSocks5Connection.close()` 中设置 `inUse=false`，`cleanupIdleConnections` 增加 `!isValid()` 检查，确保连接池的 `allConnections` 和 `totalConnections` 状态及时同步。
+
+---
+
+## 提交审查发现（2026-06-06，审查提交 07aaa3b..0bf8c97）
+
+> 以下问题由今日提交审查发现；**待验证修复**。
+
+### H18: `advanceAck` 逻辑错误：发送数据时不应增加 Ack 号
+- **状态**: 待修复
+- **提交哈希**: `07aaa3b`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/ConnectionSessionManager.kt` (L170-171)
+- **问题描述**: `processTcpReturn` 在读取到数据后调用 `session.advanceAck(read)`。Ack 号应确认的是**接收到的数据**（客户端发送给 VPN 的数据），但此处是 SOCKS5 代理从远程服务器读取的响应数据。作为回包构造方，`seqNum` 应该增加 `read`（发送了 read 字节给客户端），但 `ackNum` 不应该增加 `read`，它应基于客户端发来的数据计算。当前实现会导致 Ack 号与客户端实际发送的数据不同步，可能引发 TCP 重传或连接异常。
+- **风险**: **高**。TCP 状态机不正确，可能导致连接异常。
+- **建议修复**: 移除 `advanceAck(read)`，或仅在 VPN 确实从客户端接收数据时增加 Ack 号。
+
+### H19: 连接池竞态条件：`computeIfPresent` + `putIfAbsent` 非原子
+- **状态**: 待修复
+- **提交哈希**: `d74dd42`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/ConnectionSessionManager.kt` (L53-104)
+- **问题描述**: `forwardViaSocks5` 中 `computeIfPresent` 和 `putIfAbsent` 之间没有原子性保证。当两个并发请求同时到达时：线程A执行 `computeIfPresent` 返回 null，线程B执行 `computeIfPresent` 返回 null，线程A借用连接并 `putIfAbsent`，线程B借用另一个连接并 `putIfAbsent` 覆盖线程A的会话，线程A的连接成为孤儿连接，造成连接池泄漏。原 `VpnServiceTest` 中的 `ConflictActiveConnections` 测试类专门测试此竞态，但新测试未覆盖。
+- **风险**: **高**。高并发下可能导致连接池泄漏、孤儿连接。
+- **建议修复**: 使用 `computeIfAbsent` 原子操作替代 `computeIfPresent` + `putIfAbsent` 组合。
+
+### H20: `removeSessionByStreamId` 未真正使用 streamId 进行匹配
+- **状态**: 待修复
+- **提交哈希**: `07aaa3b`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/ConnectionSessionManager.kt` (L273-300)
+- **问题描述**: 方法参数 `streamId` 被接收后，仅用于日志记录，实际逻辑是遍历所有连接并清理 `!isValid()` 的连接，与传入的 `streamId` 完全无关。这意味着收到 disconnect 消息后，会盲目清理所有无效连接，而非精确清理目标 stream。如果此时有其他连接恰好处于无效状态，会被误清理。
+- **风险**: **高**。任何 disconnect 消息都会清理所有无效连接，可能导致误清理。
+- **建议修复**: 在 `ConnectionSession` 中增加 `streamId` 字段，建立 `streamId -> session` 的映射，实现精确清理。
+
+### H21: `virtualSrcIp` 硬编码为 "10.0.0.1"
+- **状态**: 待修复
+- **提交哈希**: `d74dd42`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/ConnectionSessionManager.kt` (L79)
+- **问题描述**: 所有新会话的 `virtualSrcIp` 被硬编码为 `"10.0.0.1"`，注释说"由调用方覆盖或使用分配器"，但 `forwardViaSocks5` 方法没有参数允许调用方传入。多连接场景下所有会话使用相同虚拟源 IP，回包路由可能混乱。原 `VpnService` 中有 `virtualIpPool` 和 `nextVirtualIp` 分配逻辑，提取后该逻辑仍留在 `VpnService` 中，但 `ConnectionSessionManager` 无法使用。
+- **风险**: **高**。多连接场景下虚拟 IP 冲突，回包路由混乱。
+- **建议修复**: 添加 `VirtualIpAllocator` 依赖注入到 `ConnectionSessionManager`。
+
+### H22: `seqNum`/`ackNum` 默认值为 0，未初始化合理值
+- **状态**: 待修复
+- **提交哈希**: `07aaa3b`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/ConnectionSession.kt` (L48-50)
+- **问题描述**: `seqNum` 和 `ackNum` 默认值为 0。对于已建立的 SOCKS5 连接，TCP 三次握手已在代理层完成，VPN 层注入的回包 seq/ack 应从握手完成时的初始值开始。当前 0 值可能导致客户端认为序列号回绕或无效。测试用例中手动设置了 seq/ack，但生产代码中 `ConnectionSession` 创建时未初始化合理值。
+- **风险**: **高**。客户端可能认为序列号回绕或无效，导致连接重置。
+- **建议修复**: 为 `ConnectionSession` 添加构造函数参数或工厂方法，初始化合理的 seq/ack 起始值。
+
+### M10: MQTT 订阅回调时序问题
+- **状态**: 待修复
+- **提交哈希**: `07aaa3b`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L446-448, L568-583, L629-651, L668)
+- **问题描述**:
+  1. 代码中删除了 `subscribe("device/$deviceId/control")` 硬编码订阅。
+  2. `VpnService.registerDisconnectListener()` 在 VPN 状态变为 `RUNNING` 后调用，但此时 MQTT 连接可能尚未建立或正在重连。
+  3. `subscribe()` 在 MQTT 未连接时返回错误，导致监听器注册失败。
+  4. **更严重的问题**: MQTT 断开重连后，`topicCallbacks` 会在 `disconnect()` 中被 `clear()`（L668），但 `VpnService` 不会在重连后重新注册 `registerDisconnectListener()`，导致 disconnect 监听器**永久丢失**。
+- **风险**: **高**。MQTT 重连后 disconnect 消息无法处理，导致连接泄漏。
+- **建议修复**:
+  1. 在 `MqttConnectionManager` 连接成功回调中自动重新注册之前注册的 topic callbacks。
+  2. 或添加 `onConnected` 监听器机制，让 `VpnService` 在 MQTT 重连后重新注册 disconnect 监听器。
+
+### M12: `handleDisconnectMessage` 使用正则解析 JSON
+- **状态**: 待修复
+- **提交哈希**: `07aaa3b`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/ConnectionSessionManager.kt` (L309-332)
+- **问题描述**: 使用 `Regex` 解析 JSON 容易因格式变化（如空格、换行、Unicode 转义）而失败。验证发现项目中**没有任何 JSON 解析库**（无 Gson、Moshi、org.json、Kotlinx Serialization）。
+- **风险**: **中**。JSON 格式变化时解析失败，disconnect 消息处理失效。
+- **建议修复**:
+  1. 优先方案：添加 Kotlinx Serialization 或 Gson 依赖，使用标准 JSON 库解析。
+  2. 临时方案：增强正则表达式以处理更多 JSON 变体（如字段顺序变化、额外空格）。
+
+### C75: C1 构建时检查可绕过：大小写敏感匹配
+- **状态**: 待修复
+- **提交哈希**: `a1747a6`
+- **位置**: `android/app/build.gradle.kts` (L37-45)
+- **问题描述**: 当前检查使用 `trustAllCerts == "true"` 进行精确字符串匹配。验证确认以下变体均可绕过检查：`True`、`TRUE`、`TrUe`（大小写变体）、` true`（前导空格）、`true `（尾随空格）、`1`、`yes`、`on`（语义等价值）。虽然运行时 `MqttConnectionManager.kt` 仍有二次防护，但构建时检查的本意是提前拦截，不应存在明显绕过。
+- **风险**: **中**。构建时检查可靠性降低。
+- **建议修复**: 使用大小写不敏感比较并去除空白：
+  ```kotlin
+  if (trustAllCerts?.trim()?.equals("true", ignoreCase = true) == true)
+  ```
+
+### C76: `VpnPacketProcessor` 中仍有魔法数字 [已验证为误报]
+- **状态**: 不存在（验证通过）
+- **提交哈希**: `9078448`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnPacketProcessor.kt`
+- **验证结果**: `0x45` 已提取为 `IP_VERSION_IHL` 常量，`0x40` 已提取为 `IP_FLAG_DF` 常量（L11-L24），无直接使用魔法数字。
+
+### C77: `isProcessing` 死代码未删除
+- **状态**: 待修复
+- **提交哈希**: `d74dd42`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/ConnectionSessionManager.kt` (L28)
+- **问题描述**: `isProcessing` 被声明为 `AtomicBoolean(false)`，但全文件搜索仅有这一处声明，没有任何读取或写入操作。
+- **风险**: **低**。死代码增加维护成本。
+- **建议修复**: 删除 `isProcessing` 字段。
+
+### C78: `TcpState` 状态机未实际驱动状态转换
+- **状态**: 待修复
+- **提交哈希**: `07aaa3b`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/ConnectionSession.kt` (L8-17, L48, L79)
+- **问题描述**: `TcpState` 枚举定义了 `SYN_SENT`、`ESTABLISHED`、`FIN_WAIT`、`CLOSED` 等状态，但验证确认：
+  1. `tcpState` 默认值为 `ESTABLISHED`（L48）。
+  2. 全局搜索 `tcpState =` 赋值操作，生产代码中**没有任何结果**。
+  3. `tcpState` 仅在 `resolveTcpFlags()`（L79）中被读取，用于根据状态返回标志位，但由于没有任何代码修改 `tcpState`，状态机始终停留在 `ESTABLISHED`。
+- **风险**: **低**。当前功能正常，但状态机设计未实际使用，`SYN_SENT`/`FIN_WAIT`/`CLOSED` 等状态永远不会被触发。
+- **建议修复**: 在连接建立、终止或异常时更新 `tcpState`，或在 `ConnectionSession` 创建时根据实际 SOCKS5 连接状态设置初始值。
+
+### C79: `pendingControlFlags` 无生产代码入口
+- **状态**: 待修复
+- **提交哈希**: `07aaa3b`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/ConnectionSession.kt` (L51), `ConnectionSessionManager.kt`
+- **问题描述**: `consumePendingFlags()` 和 `needsControlPacket()` 已定义，但验证确认：
+  1. 全局搜索 `pendingControlFlags` 的赋值操作，生产代码中**没有任何赋值**。
+  2. 唯一出现的位置是 `ConnectionSession.kt` L51 的声明（默认值为0），以及 `needsControlPacket()` 和 `consumePendingFlags()` 的读取/消费。
+  3. 所有对 `pendingControlFlags` 的赋值仅出现在测试代码 `ConnectionSessionManagerTest.kt` 中。
+  4. 这意味着 `processTcpReturn()` 中调用了 `session.consumePendingFlags()` 和 `session.needsControlPacket()`，但生产代码没有任何路径会设置 `pendingControlFlags`，0长度控制包注入机制实际上**不可达**。
+- **风险**: **低**。0 长度控制包注入逻辑永远不会被触发。
+- **建议修复**: 在连接建立、终止或异常时设置 `pendingControlFlags`，触发控制包注入。
+
+### C80: `VpnService` 核心交互测试覆盖缺失
+- **状态**: 待修复
+- **提交哈希**: `d74dd42`
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt`
+- **问题描述**: 验证确认：
+  1. `VpnServiceTest.kt` 当前共 **876 行**。
+  2. 全局搜索 `processVpnTraffic`、`forwardViaSocks5`、`processReturnTraffic`、`processPacket`，在测试文件中**没有任何匹配**。
+  3. 当前测试内容仅限于：`VpnState`/`VpnStatus` 枚举测试、`VpnDnsConfig` 工具方法、常量验证、`IpAddressUtils` 工具、`PooledSocks5Connection` Mock 测试、`ConnectionSession` 属性测试、IP 脱敏工具测试。
+  4. **缺失的核心测试**：`GatewayVpnService.processVpnTraffic()`、`ConnectionSessionManager.forwardViaSocks5()`、`ConnectionSessionManager.processTcpReturn()` 的集成测试，以及 `processPacket` 路由决策逻辑测试。
+- **风险**: **中**。核心交互逻辑缺乏回归保护，重构风险大。
+- **建议修复**: 为 `VpnService.processPacket` 的路由决策补充单元测试，使用 mock 的 `ConnectionSessionManager`。
 
 

@@ -102,7 +102,7 @@ class Socks5ProxyService : Service() {
                                 SocksPortUnificationServerHandler(),
                                 Socks5ProxyHandler(
                                     credentialValidator = { username, password ->
-                                        authSessionStore.isValid(username, password)
+                                        authSessionStore.isValid(username, password.toCharArray())
                                     }
                                 )
                             )

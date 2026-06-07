@@ -64,7 +64,7 @@ class MqttConnectionManagerConnectCleanupTest {
             throw RuntimeException("boom")
         }
 
-        manager.connect(deviceId = "device-1", authToken = "token-1")
+        manager.connect(deviceId = "device-1", authToken = "token-1".toCharArray())
         testScope.advanceUntilIdle()
         testScope.advanceUntilIdle()
 

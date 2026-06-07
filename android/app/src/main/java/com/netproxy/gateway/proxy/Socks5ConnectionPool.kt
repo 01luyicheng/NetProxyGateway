@@ -84,7 +84,7 @@ class Socks5ConnectionPool(
     private val proxyHost: String = "127.0.0.1",
     private val proxyPort: Int = 1080,
     private val config: Socks5ConnectionPoolConfig = Socks5ConnectionPoolConfig(),
-    private val credentialProvider: () -> Pair<String, String>?
+    private val credentialProvider: () -> Pair<String, CharArray>?
 ) {
     companion object {
         private val logger = LoggerFactory.getLogger(Socks5ConnectionPool::class.java)
@@ -322,7 +322,7 @@ class Socks5ConnectionPool(
         destinationIp: String,
         destinationPort: Int,
         username: String,
-        password: String,
+        password: CharArray,
         protectSocket: ((Socket) -> Boolean)?
     ): Socket {
         val socket = Socket().apply {
@@ -362,7 +362,7 @@ class Socks5ConnectionPool(
         input: java.io.InputStream,
         output: java.io.OutputStream,
         username: String,
-        password: String,
+        password: CharArray,
         destinationIp: String,
         destinationPort: Int
     ) {
@@ -378,7 +378,7 @@ class Socks5ConnectionPool(
 
         // 2. 用户名/密码认证
         val userBytes = username.toByteArray(Charsets.UTF_8)
-        val passBytes = password.toByteArray(Charsets.UTF_8)
+        val passBytes = String(password).toByteArray(Charsets.UTF_8)
         require(userBytes.size <= 255 && passBytes.size <= 255) { "SOCKS5 credentials too long" }
 
         output.write(SOCKS5_AUTH_VERSION)
@@ -387,6 +387,8 @@ class Socks5ConnectionPool(
         output.write(passBytes.size)
         output.write(passBytes)
         output.flush()
+        // 立即清除临时转换的密码字节数组
+        passBytes.fill(0)
 
         val authResponse = ByteArray(2)
         readFully(input, authResponse)

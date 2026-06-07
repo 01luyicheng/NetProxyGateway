@@ -163,7 +163,7 @@ interface UIModule : UICommandHandler, UIQueryHandler {
  */
 interface ConfigCommandHandler {
     fun setDeviceId(deviceId: String)
-    fun setAuthToken(token: String)
+    fun setAuthToken(token: CharArray)
     fun requestPermissions(permissions: List<String>): Boolean
 }
 
@@ -172,7 +172,7 @@ interface ConfigCommandHandler {
  */
 interface ConfigQueryHandler {
     fun getDeviceId(): String
-    fun getAuthToken(): String
+    fun getAuthToken(): CharArray
     fun checkPermissions(): List<String>
 }
 
@@ -183,9 +183,9 @@ interface ConfigQueryHandler {
 @Deprecated("使用ConfigCommandHandler和ConfigQueryHandler替代")
 interface ConfigModule : ConfigCommandHandler, ConfigQueryHandler {
     override fun getDeviceId(): String
-    override fun getAuthToken(): String
+    override fun getAuthToken(): CharArray
     override fun setDeviceId(deviceId: String)
-    override fun setAuthToken(token: String)
+    override fun setAuthToken(token: CharArray)
     override fun checkPermissions(): List<String>
     override fun requestPermissions(permissions: List<String>): Boolean
 }

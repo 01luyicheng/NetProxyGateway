@@ -105,11 +105,11 @@ class MqttConnectionManagerHeartbeatTest {
         val method = MqttConnectionManager::class.java.getDeclaredMethod(
             "startHeartbeat",
             String::class.java,
-            String::class.java,
+            CharArray::class.java,
             java.lang.Long.TYPE,
         )
         method.isAccessible = true
-        method.invoke(this, deviceId, authToken, generation)
+        method.invoke(this, deviceId, authToken.toCharArray(), generation)
     }
 
     private fun MqttConnectionManager.setPrivateBooleanField(fieldName: String, value: Boolean) {

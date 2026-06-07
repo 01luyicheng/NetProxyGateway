@@ -56,7 +56,7 @@ class CommunicationModuleImpl @Inject constructor(
 ) : CommunicationModule, CommunicationCommandHandler, CommunicationQueryHandler {
 
     override fun connect(deviceId: String, authToken: String): Boolean {
-        mqttConnectionManager.connect(deviceId, authToken)
+        mqttConnectionManager.connect(deviceId, authToken.toCharArray())
         return true
     }
 
@@ -171,8 +171,8 @@ class ConfigModuleImpl @Inject constructor(
         return prefs.getString("device_id", "") ?: ""
     }
 
-    override fun getAuthToken(): String {
-        return authSessionStore.getCurrentSession()?.authToken ?: ""
+    override fun getAuthToken(): CharArray {
+        return authSessionStore.getCurrentSession()?.authToken ?: CharArray(0)
     }
 
     override fun setDeviceId(deviceId: String) {
@@ -182,7 +182,7 @@ class ConfigModuleImpl @Inject constructor(
         }
     }
 
-    override fun setAuthToken(token: String) {
+    override fun setAuthToken(token: CharArray) {
         val deviceId = getDeviceId()
         if (deviceId.isNotBlank()) {
             authSessionStore.update(deviceId, token)
