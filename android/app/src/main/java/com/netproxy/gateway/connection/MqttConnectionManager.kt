@@ -90,6 +90,7 @@ class MqttConnectionManager @Inject constructor(
     private var connectJob: Job? = null
     private @Volatile var shouldStayConnected: Boolean = false
     private val connectionGeneration = AtomicLong(0)
+    private var activeTokenSnapshot: CharArray? = null
 
     private val _connectionState = MutableStateFlow<MqttConnectionState>(MqttConnectionState.Disconnected)
     val connectionState: StateFlow<MqttConnectionState> = _connectionState.asStateFlow()
@@ -280,6 +281,10 @@ class MqttConnectionManager @Inject constructor(
 
     fun connect(deviceId: String, authToken: CharArray) {
         val tokenSnapshot = authToken.copyOf()
+        synchronized(this@MqttConnectionManager) {
+            activeTokenSnapshot?.fill('\u0000')
+            activeTokenSnapshot = tokenSnapshot
+        }
         var generation = 0L
         lateinit var jobToStart: Job
         synchronized(this@MqttConnectionManager) {
@@ -367,7 +372,7 @@ class MqttConnectionManager @Inject constructor(
                             }
                             _connectionState.value = MqttConnectionState.Error(cause?.message ?: "Connection lost")
                             if (shouldStayConnected) {
-                                scheduleReconnect(deviceId, authToken, generation)
+                                scheduleReconnect(deviceId, tokenSnapshot, generation)
                             }
                         }
                     }
@@ -529,6 +534,7 @@ class MqttConnectionManager @Inject constructor(
         heartbeatJob?.cancel()
         heartbeatJob = scope.launch {
             val tokenSnapshot = authToken.copyOf()
+            try {
             var consecutiveFailures = 0
             while (
                 shouldStayConnected &&
@@ -579,6 +585,9 @@ class MqttConnectionManager @Inject constructor(
                     }
                     break
                 }
+            }
+            } finally {
+                tokenSnapshot.fill('\u0000')
             }
         }
     }
@@ -664,6 +673,9 @@ class MqttConnectionManager @Inject constructor(
             connectJob?.cancel()
             connectJob = null
             reconnectDelay = INITIAL_RECONNECT_DELAY
+
+            activeTokenSnapshot?.fill('\u0000')
+            activeTokenSnapshot = null
 
             val c = mqttClient
             mqttClient = null

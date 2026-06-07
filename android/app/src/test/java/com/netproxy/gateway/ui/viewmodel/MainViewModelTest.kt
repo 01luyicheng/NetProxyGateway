@@ -387,6 +387,85 @@ class MainViewModelTest {
     }
 
     // -------------------------------------------------------------------------
+    // CharArray lifecycle tests (N37-B1, N37-B2, N37-B5)
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun pairWithCode_cellularConnected_writesAuthTokenToUiState() = runTest {
+        every { networkStateManager.isCellularConnected() } returns true
+        val stateFlow = MutableStateFlow<MqttConnectionState>(MqttConnectionState.Disconnected)
+        every { mqttConnectionManager.connectionState } returns stateFlow
+
+        val viewModel = MainViewModel(context, networkStateManager, mqttConnectionManager, wifiManager, authSessionStore)
+        advanceUntilIdle()
+
+        viewModel.pairWithCode("123456")
+        advanceUntilIdle()
+
+        val authToken = viewModel.uiState.value.authToken
+        assertTrue(authToken.isNotEmpty())
+        assertTrue(authToken.contentEquals("123456".toCharArray()))
+    }
+
+    @Test
+    fun disconnect_zerosOutOldAuthToken() = runTest {
+        every { networkStateManager.isCellularConnected() } returns true
+        val stateFlow = MutableStateFlow<MqttConnectionState>(MqttConnectionState.Disconnected)
+        every { mqttConnectionManager.connectionState } returns stateFlow
+
+        val viewModel = MainViewModel(context, networkStateManager, mqttConnectionManager, wifiManager, authSessionStore)
+        advanceUntilIdle()
+
+        viewModel.pairWithCode("654321")
+        advanceUntilIdle()
+
+        // Capture the token reference before disconnect
+        val tokenBeforeDisconnect = viewModel.uiState.value.authToken
+        assertTrue(tokenBeforeDisconnect.contentEquals("654321".toCharArray()))
+
+        viewModel.disconnect()
+        advanceUntilIdle()
+
+        // After disconnect, the old token should be zeroed
+        assertTrue(tokenBeforeDisconnect.all { it == '\u0000' })
+        // And the new UiState should have an empty token
+        assertTrue(viewModel.uiState.value.authToken.isEmpty())
+    }
+
+    @Test
+    fun disconnect_doesNotModifyNewStateAuthToken() = runTest {
+        every { networkStateManager.isCellularConnected() } returns true
+        val stateFlow = MutableStateFlow<MqttConnectionState>(MqttConnectionState.Disconnected)
+        every { mqttConnectionManager.connectionState } returns stateFlow
+
+        val viewModel = MainViewModel(context, networkStateManager, mqttConnectionManager, wifiManager, authSessionStore)
+        advanceUntilIdle()
+
+        viewModel.pairWithCode("999888")
+        advanceUntilIdle()
+
+        viewModel.disconnect()
+        advanceUntilIdle()
+
+        // New state's authToken should be CharArray(0), not a zeroed copy of the old token
+        assertEquals(0, viewModel.uiState.value.authToken.size)
+    }
+
+    @Test
+    fun pairWithCode_withoutCellular_zerosAuthTokenArray() = runTest {
+        every { networkStateManager.isCellularConnected() } returns false
+
+        val viewModel = MainViewModel(context, networkStateManager, mqttConnectionManager, wifiManager, authSessionStore)
+        advanceUntilIdle()
+
+        viewModel.pairWithCode("111111")
+        advanceUntilIdle()
+
+        // When cellular is not connected, the token should be zeroed and not stored in UiState
+        assertTrue(viewModel.uiState.value.authToken.isEmpty())
+    }
+
+    // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
 

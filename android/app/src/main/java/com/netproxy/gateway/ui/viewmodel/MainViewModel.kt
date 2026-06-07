@@ -304,11 +304,11 @@ class MainViewModel @Inject constructor(
 
     fun pairWithCode(code: String) {
         viewModelScope.launch {
-            _uiState.update { it.copy(peerId = code, isPairingInProgress = true, errorMessage = null) }
+            val authTokenArray = code.toCharArray()
+            _uiState.update { it.copy(peerId = code, isPairingInProgress = true, errorMessage = null, authToken = authTokenArray.copyOf()) }
 
             if (networkStateManager.isCellularConnected()) {
                 val deviceIdSnapshot = _uiState.value.deviceId
-                val authTokenArray = code.toCharArray()
                 authSessionStore.update(
                     deviceId = deviceIdSnapshot,
                     authToken = authTokenArray
@@ -318,6 +318,7 @@ class MainViewModel @Inject constructor(
                     authToken = authTokenArray
                 )
             } else {
+                authTokenArray.fill('\u0000')
                 _uiState.update {
                     it.copy(isPairingInProgress = false, errorMessage = AppLocale.getString(context, R.string.error_cellular_required))
                 }
@@ -380,13 +381,20 @@ class MainViewModel @Inject constructor(
         authSessionStore.clear()
         toggleVpn(false)
         _uiState.update { current ->
-            current.authToken.fill('\u0000')
-            current.copy(
+            val oldToken = current.authToken
+            val newState = current.copy(
                 isConnected = false,
                 isPaired = false,
                 peerId = "",
                 authToken = CharArray(0)
             )
+            oldToken.fill('\u0000')
+            newState
         }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        _uiState.value.authToken.fill('\u0000')
     }
 }

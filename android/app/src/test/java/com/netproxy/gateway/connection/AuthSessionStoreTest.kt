@@ -850,4 +850,27 @@ class AuthSessionStoreTest {
         assertNotNull("isValid method should exist", isValidMethod)
         assertNotNull("getCurrentSession method should exist", getCurrentSessionMethod)
     }
+
+    // ==================== CharArray 生命周期测试 (N37-B6) ====================
+
+    @Test
+    fun loadSession_returnsCopyNotSameReferenceAsInMemoryToken() = runTest {
+        // Update to populate inMemoryToken
+        authSessionStore.update("device-1", "secret-token".toCharArray())
+        advanceUntilIdle()
+
+        val session1 = authSessionStore.getCurrentSession()
+        val session2 = authSessionStore.getCurrentSession()
+
+        assertNotNull(session1)
+        assertNotNull(session2)
+
+        // Both sessions should have equal content but different CharArray references
+        assertTrue(session1!!.authToken.contentEquals(session2!!.authToken))
+        // The returned CharArray should be a copy, not the same reference as inMemoryToken
+        // (Modifying one should not affect the other)
+        session1.authToken.fill('\u0000')
+        assertFalse(session2.authToken.contentEquals(CharArray("secret-token".length)))
+        assertTrue(session2.authToken.contentEquals("secret-token".toCharArray()))
+    }
 }
