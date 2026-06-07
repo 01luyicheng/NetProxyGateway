@@ -379,11 +379,13 @@ class MainViewModel @Inject constructor(
         mqttConnectionManager.disconnect()
         authSessionStore.clear()
         toggleVpn(false)
-        _uiState.update {
-            it.copy(
+        _uiState.update { current ->
+            current.authToken.fill('\u0000')
+            current.copy(
                 isConnected = false,
                 isPaired = false,
-                peerId = ""
+                peerId = "",
+                authToken = CharArray(0)
             )
         }
     }
