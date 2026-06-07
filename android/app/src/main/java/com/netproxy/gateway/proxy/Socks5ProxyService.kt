@@ -102,6 +102,7 @@ class Socks5ProxyService : Service() {
                                 SocksPortUnificationServerHandler(),
                                 Socks5ProxyHandler(
                                     credentialValidator = { username, password ->
+                                        // Netty SOCKS5 处理器传入的是 String，这是库的限制
                                         authSessionStore.isValid(username, password.toCharArray())
                                     }
                                 )

@@ -120,6 +120,10 @@ data class UiState(
         result = 31 * result + networkIsValidated.hashCode()
         return result
     }
+
+    override fun toString(): String {
+        return "UiState(isConnected=$isConnected, isPaired=$isPaired, isPairingInProgress=$isPairingInProgress, peerId='$peerId', deviceId='$deviceId', authToken=[REDACTED], isVpnEnabled=$isVpnEnabled, wifiConnected=$wifiConnected, cellularConnected=$cellularConnected, currentWifiSsid='$currentWifiSsid', wifiNetworks=$wifiNetworks, errorMessage=$errorMessage, mqttState=$mqttState, mqttErrorMessage=$mqttErrorMessage, connectionDurationMs=$connectionDurationMs, lastHeartbeatTimeMs=$lastHeartbeatTimeMs, heartbeatFailures=$heartbeatFailures, reconnectCount=$reconnectCount, vpnDetailedStatus=$vpnDetailedStatus, networkIsValidated=$networkIsValidated)"
+    }
 }
 
 @HiltViewModel

@@ -378,21 +378,24 @@ class Socks5ConnectionPool(
 
         // 2. 用户名/密码认证
         val userBytes = username.toByteArray(Charsets.UTF_8)
-        val passBytes = String(password).toByteArray(Charsets.UTF_8)
-        require(userBytes.size <= 255 && passBytes.size <= 255) { "SOCKS5 credentials too long" }
+        val passBytes = Charsets.UTF_8.encode(java.nio.CharBuffer.wrap(password)).array()
+        try {
+            require(userBytes.size <= 255 && passBytes.size <= 255) { "SOCKS5 credentials too long" }
 
-        output.write(SOCKS5_AUTH_VERSION)
-        output.write(userBytes.size)
-        output.write(userBytes)
-        output.write(passBytes.size)
-        output.write(passBytes)
-        output.flush()
-        // 立即清除临时转换的密码字节数组
-        passBytes.fill(0)
+            output.write(SOCKS5_AUTH_VERSION)
+            output.write(userBytes.size)
+            output.write(userBytes)
+            output.write(passBytes.size)
+            output.write(passBytes)
+            output.flush()
 
-        val authResponse = ByteArray(2)
-        readFully(input, authResponse)
-        require(authResponse[1].toInt() == 0x00) { "SOCKS5 authentication failed" }
+            val authResponse = ByteArray(2)
+            readFully(input, authResponse)
+            require(authResponse[1].toInt() == 0x00) { "SOCKS5 authentication failed" }
+        } finally {
+            // 立即清除临时转换的密码字节数组
+            passBytes.fill(0)
+        }
 
         // 3. CONNECT请求
         val addressBytes = InetAddress.getByName(destinationIp).address

@@ -60,6 +60,7 @@ class AuthSessionStore @Inject constructor(
         inMemoryDeviceId = deviceId
         inMemoryInstallationDeviceId = deviceId
 
+        // EncryptedSharedPreferences API 限制：putString 只接受 String，无法避免中间 String 转换
         encryptedPrefs.edit()
             .putString(KEY_INSTALLATION_DEVICE_ID, deviceId)
             .putString(KEY_DEVICE_ID, deviceId)
@@ -75,6 +76,7 @@ class AuthSessionStore @Inject constructor(
             inMemoryDeviceId = deviceId
             inMemoryInstallationDeviceId = deviceId
 
+            // EncryptedSharedPreferences API 限制：putString 只接受 String，无法避免中间 String 转换
             encryptedPrefs.edit()
                 .putString(KEY_INSTALLATION_DEVICE_ID, deviceId)
                 .putString(KEY_DEVICE_ID, deviceId)
