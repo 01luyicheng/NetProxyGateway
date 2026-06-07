@@ -378,7 +378,9 @@ class Socks5ConnectionPool(
 
         // 2. 用户名/密码认证
         val userBytes = username.toByteArray(Charsets.UTF_8)
-        val passBytes = Charsets.UTF_8.encode(java.nio.CharBuffer.wrap(password)).array()
+        val encoded = Charsets.UTF_8.encode(java.nio.CharBuffer.wrap(password))
+        val passBytes = ByteArray(encoded.remaining())
+        encoded.get(passBytes)
         try {
             require(userBytes.size <= 255 && passBytes.size <= 255) { "SOCKS5 credentials too long" }
 

@@ -279,6 +279,7 @@ class MqttConnectionManager @Inject constructor(
     }
 
     fun connect(deviceId: String, authToken: CharArray) {
+        val tokenSnapshot = authToken.copyOf()
         var generation = 0L
         lateinit var jobToStart: Job
         synchronized(this@MqttConnectionManager) {
@@ -339,7 +340,7 @@ class MqttConnectionManager @Inject constructor(
                     connectionTimeout = CONNECTION_TIMEOUT_SECONDS
                     keepAliveInterval = 30
                     userName = deviceId
-                    password = authToken
+                    password = tokenSnapshot
                     setAutomaticReconnect(false) // We handle reconnection manually
 
                     if (isTlsEnabled()) {
@@ -474,7 +475,7 @@ class MqttConnectionManager @Inject constructor(
                     _connectionState.value = MqttConnectionState.Error(e.message ?: "Connection failed")
                     if (shouldStayConnected) {
                         onReconnectAttemptFailed()
-                        scheduleReconnect(deviceId, authToken, generation)
+                        scheduleReconnect(deviceId, tokenSnapshot, generation)
                     }
                 }
             }
@@ -527,6 +528,7 @@ class MqttConnectionManager @Inject constructor(
 
         heartbeatJob?.cancel()
         heartbeatJob = scope.launch {
+            val tokenSnapshot = authToken.copyOf()
             var consecutiveFailures = 0
             while (
                 shouldStayConnected &&
@@ -573,7 +575,7 @@ class MqttConnectionManager @Inject constructor(
                     if (shouldStayConnected && generation == connectionGeneration.get()) {
                         _connectionState.value = MqttConnectionState.Error("Max heartbeat failures reached")
                         onReconnectAttemptFailed()
-                        scheduleReconnect(deviceId, authToken, generation)
+                        scheduleReconnect(deviceId, tokenSnapshot, generation)
                     }
                     break
                 }

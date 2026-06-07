@@ -55,8 +55,8 @@ class CommunicationModuleImpl @Inject constructor(
     private val mqttConnectionManager: MqttConnectionManager
 ) : CommunicationModule, CommunicationCommandHandler, CommunicationQueryHandler {
 
-    override fun connect(deviceId: String, authToken: String): Boolean {
-        mqttConnectionManager.connect(deviceId, authToken.toCharArray())
+    override fun connect(deviceId: String, authToken: CharArray): Boolean {
+        mqttConnectionManager.connect(deviceId, authToken)
         return true
     }
 

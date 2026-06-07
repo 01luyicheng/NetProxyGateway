@@ -142,8 +142,12 @@ class AuthSessionStore @Inject constructor(
     @Synchronized
     fun isValid(username: String, password: CharArray): Boolean {
         val session = loadSession() ?: return false
-        if (session.deviceId != username) return false
-        return constantTimeEquals(session.authToken, password)
+        return try {
+            if (session.deviceId != username) false
+            else constantTimeEquals(session.authToken, password)
+        } finally {
+            session.authToken.fill('\u0000')
+        }
     }
 
     @Synchronized
@@ -151,11 +155,15 @@ class AuthSessionStore @Inject constructor(
         return try {
             val session = loadSession()
                 ?: return AppResult.success(false)
-            if (session.deviceId != username) {
-                return AppResult.success(false)
+            return try {
+                if (session.deviceId != username) {
+                    AppResult.success(false)
+                } else {
+                    AppResult.success(constantTimeEquals(session.authToken, password))
+                }
+            } finally {
+                session.authToken.fill('\u0000')
             }
-            val isValid = constantTimeEquals(session.authToken, password)
-            AppResult.success(isValid)
         } catch (e: Exception) {
             AppResult.error(e)
         }

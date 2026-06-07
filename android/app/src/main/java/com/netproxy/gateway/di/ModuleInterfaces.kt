@@ -38,7 +38,7 @@ interface CoreModule : CoreQueryHandler
  * Communication模块命令处理器
  */
 interface CommunicationCommandHandler {
-    fun connect(deviceId: String, authToken: String): Boolean
+    fun connect(deviceId: String, authToken: CharArray): Boolean
     fun publish(topic: String, payload: String, qos: Int)
     fun subscribe(topic: String, qos: Int, callback: ((String) -> Unit)?)
     fun disconnect()
@@ -57,7 +57,7 @@ interface CommunicationQueryHandler {
  */
 @Deprecated("使用CommunicationCommandHandler和CommunicationQueryHandler替代")
 interface CommunicationModule : CommunicationCommandHandler, CommunicationQueryHandler {
-    override fun connect(deviceId: String, authToken: String): Boolean
+    override fun connect(deviceId: String, authToken: CharArray): Boolean
     override fun publish(topic: String, payload: String, qos: Int)
     override fun subscribe(topic: String, qos: Int, callback: ((String) -> Unit)?)
     override fun getConnectionState(): StateFlow<MqttConnectionState>
