@@ -403,7 +403,7 @@ class AuthSessionStoreTest {
     }
 
     @Test
-    fun isValid_withEmptyToken_shouldReturnFalse() {
+    fun isValid_withEmptyToken_shouldReturnTrueWhenStoredTokenIsAlsoEmpty() {
         // 设置空token会话
         every { encryptedPrefs.getString("device_id", null) } returns "device-123"
         every { encryptedPrefs.getString("auth_token", null) } returns ""

@@ -367,7 +367,7 @@ class MqttConnectionManager @Inject constructor(
                             }
                             _connectionState.value = MqttConnectionState.Error(cause?.message ?: "Connection lost")
                             if (shouldStayConnected) {
-                                scheduleReconnect(deviceId, authToken, generation)
+                                scheduleReconnect(deviceId, tokenSnapshot, generation)
                             }
                         }
                     }
@@ -446,7 +446,7 @@ class MqttConnectionManager @Inject constructor(
 
                 // N80: 先触发已注册的 topicCallbacks，再执行默认订阅
                 // 这样 VpnService 中通过 subscribe() 注册的 disconnect 监听器会被保留
-                startHeartbeat(deviceId, authToken, generation)
+                startHeartbeat(deviceId, tokenSnapshot, generation)
 
                 } catch (e: Exception) {
                     val clientToClose = localClient
@@ -477,6 +477,8 @@ class MqttConnectionManager @Inject constructor(
                         onReconnectAttemptFailed()
                         scheduleReconnect(deviceId, tokenSnapshot, generation)
                     }
+                } finally {
+                    tokenSnapshot.fill('\u0000')
                 }
             }
 
