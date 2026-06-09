@@ -499,24 +499,30 @@ class MqttConnectionManager @Inject constructor(
     }
 
     private fun scheduleReconnect(deviceId: String, authToken: CharArray, generation: Long) {
+        // N37-B7 fix: create own copy immediately so caller can safely zero its reference
+        val tokenCopy = authToken.copyOf()
         lateinit var jobToStart: Job
         synchronized(this@MqttConnectionManager) {
             reconnectJob?.cancel()
             jobToStart = scope.launch(start = CoroutineStart.LAZY) {
-                val delayMs = synchronized(this@MqttConnectionManager) { reconnectDelay }
-                delay(delayMs)
-                if (!shouldStayConnected || generation != connectionGeneration.get()) {
-                    return@launch
-                }
-                synchronized(this@MqttConnectionManager) {
-                    _diagnostics.update {
-                        it.copy(
-                            reconnectDelay = reconnectDelay,
-                            reconnectCount = it.reconnectCount + 1
-                        )
+                try {
+                    val delayMs = synchronized(this@MqttConnectionManager) { reconnectDelay }
+                    delay(delayMs)
+                    if (!shouldStayConnected || generation != connectionGeneration.get()) {
+                        return@launch
                     }
+                    synchronized(this@MqttConnectionManager) {
+                        _diagnostics.update {
+                            it.copy(
+                                reconnectDelay = reconnectDelay,
+                                reconnectCount = it.reconnectCount + 1
+                            )
+                        }
+                    }
+                    connect(deviceId, tokenCopy)
+                } finally {
+                    tokenCopy.fill('\u0000')
                 }
-                connect(deviceId, authToken)
             }
             reconnectJob = jobToStart
         }
@@ -531,56 +537,60 @@ class MqttConnectionManager @Inject constructor(
         heartbeatJob?.cancel()
         heartbeatJob = scope.launch {
             val tokenSnapshot = authToken.copyOf()
-            var consecutiveFailures = 0
-            while (
-                shouldStayConnected &&
-                generation == connectionGeneration.get() &&
-                _connectionState.value == MqttConnectionState.Connected
-            ) {
-                delay(HEARTBEAT_INTERVAL)
-                if (!shouldStayConnected || generation != connectionGeneration.get()) {
-                    break
-                }
-                val result = publishWithResult(
-                    "device/$deviceId/heartbeat",
-                    "{\"status\":\"alive\"}",
-                    logError = false
-                )
-                if (result.isSuccess()) {
-                    consecutiveFailures = 0
-                    _diagnostics.update {
-                        it.copy(
-                            lastHeartbeatTime = System.currentTimeMillis(),
-                            consecutiveHeartbeatFailures = 0
-                        )
+            try {
+                var consecutiveFailures = 0
+                while (
+                    shouldStayConnected &&
+                    generation == connectionGeneration.get() &&
+                    _connectionState.value == MqttConnectionState.Connected
+                ) {
+                    delay(HEARTBEAT_INTERVAL)
+                    if (!shouldStayConnected || generation != connectionGeneration.get()) {
+                        break
                     }
-                    continue
-                }
+                    val result = publishWithResult(
+                        "device/$deviceId/heartbeat",
+                        "{\"status\":\"alive\"}",
+                        logError = false
+                    )
+                    if (result.isSuccess()) {
+                        consecutiveFailures = 0
+                        _diagnostics.update {
+                            it.copy(
+                                lastHeartbeatTime = System.currentTimeMillis(),
+                                consecutiveHeartbeatFailures = 0
+                            )
+                        }
+                        continue
+                    }
 
-                val heartbeatException = result.exceptionOrNull()
-                if (heartbeatException == null) {
-                    logger.error("Heartbeat publish error")
-                } else {
-                    val summary = when (heartbeatException) {
-                        is MqttException -> "MqttException(reasonCode=${heartbeatException.reasonCode})"
-                        else -> heartbeatException.javaClass.simpleName
+                    val heartbeatException = result.exceptionOrNull()
+                    if (heartbeatException == null) {
+                        logger.error("Heartbeat publish error")
+                    } else {
+                        val summary = when (heartbeatException) {
+                            is MqttException -> "MqttException(reasonCode=${heartbeatException.reasonCode})"
+                            else -> heartbeatException.javaClass.simpleName
+                        }
+                        logger.error("Heartbeat publish error: $summary")
                     }
-                    logger.error("Heartbeat publish error: $summary")
-                }
-                consecutiveFailures++
-                _diagnostics.update {
-                    it.copy(consecutiveHeartbeatFailures = consecutiveFailures)
-                }
-                if (consecutiveFailures >= MAX_HEARTBEAT_FAILURES) {
-                    logger.warn("Max heartbeat failures reached, triggering reconnect")
-                    AppAuditLogStore.warn("MQTT", "Max heartbeat failures reached; reconnecting")
-                    if (shouldStayConnected && generation == connectionGeneration.get()) {
-                        _connectionState.value = MqttConnectionState.Error("Max heartbeat failures reached")
-                        onReconnectAttemptFailed()
-                        scheduleReconnect(deviceId, tokenSnapshot, generation)
+                    consecutiveFailures++
+                    _diagnostics.update {
+                        it.copy(consecutiveHeartbeatFailures = consecutiveFailures)
                     }
-                    break
+                    if (consecutiveFailures >= MAX_HEARTBEAT_FAILURES) {
+                        logger.warn("Max heartbeat failures reached, triggering reconnect")
+                        AppAuditLogStore.warn("MQTT", "Max heartbeat failures reached; reconnecting")
+                        if (shouldStayConnected && generation == connectionGeneration.get()) {
+                            _connectionState.value = MqttConnectionState.Error("Max heartbeat failures reached")
+                            onReconnectAttemptFailed()
+                            scheduleReconnect(deviceId, tokenSnapshot, generation)
+                        }
+                        break
+                    }
                 }
+            } finally {
+                tokenSnapshot.fill('\u0000')
             }
         }
     }

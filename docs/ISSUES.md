@@ -921,4 +921,28 @@
 - **风险**: **中**。核心交互逻辑缺乏回归保护，重构风险大。
 - **建议修复**: 为 `VpnService.processPacket` 的路由决策补充单元测试，使用 mock 的 `ConnectionSessionManager`。
 
+### N37-B7: `connect()` finally 清零 `tokenSnapshot` 导致 `scheduleReconnect()` 使用已清零 token
+- **状态**: 已修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (connect → connectionLost/catch → scheduleReconnect)
+- **问题描述**: commit `a4c74bb` 在 `connect()` 中添加了 `try-finally` 清零 `tokenSnapshot`。但当连接断开（`connectionLost`）或连接异常（catch 块）时，`scheduleReconnect(deviceId, tokenSnapshot, generation)` 将 `tokenSnapshot` 传递给延迟协程。`scheduleReconnect()` 返回后，`finally` 块立即清零 `tokenSnapshot`。由于 `scheduleReconnect()` 的协程通过 lambda 捕获了 `authToken`（与 `tokenSnapshot` 是同一对象引用），延迟协程执行 `connect(deviceId, authToken)` 时 `authToken` 已被清零，`connect()` 复制的是空数组，导致 MQTT 重连静默认证失败。
+- **风险**: **高（关键）**。连接断开或连接异常触发的自动重连必然使用空 token 认证，用户看到持续 Error 状态但无法恢复连接。
+- **触发场景**: 网络不稳定导致连接断开 → `connectionLost()` 调用 `scheduleReconnect()` → `connect()` 的 `finally` 清零 `tokenSnapshot` → 延迟后重连使用空 token → 认证失败 → 持续重连失败循环。
+- **修复方式**: `scheduleReconnect()` 在入口处立即创建 `authToken.copyOf()` 作为独立副本（`tokenCopy`），在协程的 `try-finally` 中清零 `tokenCopy`，确保调用方清零其引用不影响重连使用的副本。
+
+### N37-B9: `startHeartbeat()` 中 `tokenSnapshot` 从未清零
+- **状态**: 已修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (startHeartbeat)
+- **问题描述**: `startHeartbeat()` 创建 `tokenSnapshot = authToken.copyOf()` 用于心跳失败时传递给 `scheduleReconnect()`，但整个心跳协程没有 `try-finally` 块来清零 `tokenSnapshot`。当心跳协程因任何原因退出（正常结束、取消、异常）时，`tokenSnapshot` 中的认证令牌仍驻留内存，直到 GC 回收。
+- **风险**: **中**。认证令牌明文残留在内存中，内存转储可提取。
+- **触发场景**: MQTT 连接建立 → 心跳协程启动 → 连接断开或 `disconnect()` 取消心跳协程 → `tokenSnapshot` 未清零 → 令牌残留内存。
+- **修复方式**: 在 `startHeartbeat()` 的协程体中添加 `try-finally`，在 `finally` 块中清零 `tokenSnapshot`。
+
+### N37-B10: `Socks5ConnectionPool.createNewConnection()` 未清零 `credentialProvider` 返回的 `CharArray`
+- **状态**: 已修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (createNewConnection)
+- **问题描述**: `credentialProvider()` 返回 `Pair<String, CharArray>`，其中 `CharArray` 是认证令牌的副本（由 `VpnService` 中 `session.authToken.copyOf()` 创建）。`createNewConnection()` 解构为 `(username, password)` 后，`password` 仅传递给 `createSocks5Socket()` → `performSocks5Handshake()`。虽然 `performSocks5Handshake()` 在 `finally` 中清零了编码后的 `passBytes`，但原始 `password` CharArray 从未被清零。每次创建 SOCKS5 连接都会泄漏一份认证令牌副本。
+- **风险**: **中**。每次 SOCKS5 连接创建都泄漏一份令牌副本，VPN 活跃期间可能创建大量连接，内存中残留多份令牌明文。
+- **触发场景**: VPN 活跃 → 流量转发触发 `borrowConnection()` → `createNewConnection()` 调用 `credentialProvider()` 获取令牌副本 → SOCKS5 握手完成 → `password` CharArray 未清零 → 令牌副本残留内存。
+- **修复方式**: 在 `createNewConnection()` 的 `finally` 块中清零 `credentialPassword`。
+
 

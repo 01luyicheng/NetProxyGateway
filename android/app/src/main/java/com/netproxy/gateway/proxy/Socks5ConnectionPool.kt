@@ -263,6 +263,7 @@ class Socks5ConnectionPool(
         var slotReserved = false
         var connectionEstablished = false
         var trackedConnection: PooledSocks5Connection? = null
+        var credentialPassword: CharArray? = null
 
         try {
             if (!tryReserveConnectionSlot()) {
@@ -278,6 +279,7 @@ class Socks5ConnectionPool(
             }
 
             val (username, password) = credentials
+            credentialPassword = password
 
             val socket = createSocks5Socket(destinationIp, destinationPort, username, password, protectSocket)
             val connection = PooledSocks5Connection(socket, destinationIp, destinationPort)
@@ -296,6 +298,8 @@ class Socks5ConnectionPool(
             logger.error("Failed to create SOCKS5 connection to $destinationIp:$destinationPort", e)
             return null
         } finally {
+            // Zero credential CharArray immediately after use to prevent token leakage
+            credentialPassword?.fill('\u0000')
             // 统一在 finally 块中管理连接计数，确保一致性
             if (slotReserved && !connectionEstablished) {
                 totalConnections.decrementAndGet()
