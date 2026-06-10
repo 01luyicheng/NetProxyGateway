@@ -797,13 +797,6 @@
 
 > 以下问题由 subagent 多维度代码审查发现；**待验证修复**。
 
-### REF2: `recovery_test.go` 中 `errors.Is` 断言为死代码
-- **状态**: 待修复
-- **位置**: `server/shared/recovery/recovery_test.go` (L42)
-- **问题描述**: `TestRecover_WithNamedReturn` 中 `errors.Is(err, fmt.Errorf("named panic: boom"))` 每次调用都会创建新的 error 实例，`errors.Is` 对新实例永远返回 `false`。测试之所以能通过，完全依赖第二个条件 `err.Error() != "named panic: boom"`。第一个条件是死代码，掩盖了错误比较逻辑的根本缺陷。
-- **风险**: **高**。虚假测试逻辑掩盖了 `Recover` 错误包装行为的真实验证。
-- **建议修复**: 移除 `errors.Is` 分支，改为纯字符串比较；或让 `Recover` 使用 `%w` 包装 panic value 并配合 `errors.New` 实例进行验证。
-
 ### REF3: 错误包装语义从 `%w` 降级为 `%v`
 - **状态**: 待修复
 - **位置**: `server/shared/recovery/recovery.go` (L79)

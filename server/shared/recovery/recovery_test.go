@@ -1,8 +1,6 @@
 package recovery
 
 import (
-	"errors"
-	"fmt"
 	"testing"
 )
 
@@ -39,7 +37,7 @@ func TestRecover_WithNamedReturn(t *testing.T) {
 	}
 	if err == nil {
 		t.Error("expected error, got nil")
-	} else if !errors.Is(err, fmt.Errorf("named panic: boom")) && err.Error() != "named panic: boom" {
+	} else if err.Error() != "named panic: boom" {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
