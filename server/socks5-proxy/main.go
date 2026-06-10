@@ -25,6 +25,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/netproxy/shared/httpclient"
 	"github.com/netproxy/shared/ratelimit"
+	"github.com/netproxy/shared/recovery"
 	"github.com/netproxy/shared/stringutil"
 )
 // SOCKS5 protocol constants
@@ -254,13 +255,9 @@ func NewStreamConn(streamID, deviceID string, tunnelConn *websocket.Conn, tunnel
 
 // Read implements net.Conn.Read.
 func (s *StreamConn) Read(p []byte) (n int, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("Panic in StreamConn.Read for stream %s: %v", s.StreamID, r)
-			n = 0
-			err = fmt.Errorf("read panic: %w", errors.New(fmt.Sprint(r)))
-		}
-	}()
+	defer recovery.Recover("StreamConn.Read",
+		recovery.WithStreamID(s.StreamID),
+		recovery.WithNamedReturn(&n, &err, "read panic"))
 
 	s.readMu.Lock()
 	defer s.readMu.Unlock()
@@ -340,13 +337,9 @@ func (s *StreamConn) drainAndEOF(p []byte) (n int, err error) {
 
 // Write implements net.Conn.Write.
 func (s *StreamConn) Write(p []byte) (n int, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("Panic in StreamConn.Write for stream %s: %v", s.StreamID, r)
-			n = 0
-			err = fmt.Errorf("write panic: %w", errors.New(fmt.Sprint(r)))
-		}
-	}()
+	defer recovery.Recover("StreamConn.Write",
+		recovery.WithStreamID(s.StreamID),
+		recovery.WithNamedReturn(&n, &err, "write panic"))
 
 	if atomic.LoadInt32(&s.Closed) == 1 {
 		return 0, fmt.Errorf("stream closed")
@@ -427,11 +420,8 @@ func (s *StreamConn) WriteToDataChan(data []byte) error {
 
 // sendDisconnect sends a disconnect message asynchronously.
 func (s *StreamConn) sendDisconnect() {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("Panic in sendDisconnect for stream %s: %v", s.StreamID, r)
-		}
-	}()
+	defer recovery.Recover("sendDisconnect",
+		recovery.WithStreamID(s.StreamID))
 
 	msg := struct {
 		Type string `json:"type"`
@@ -629,12 +619,9 @@ func (tc *TunnelClient) GetOrConnectTunnel(deviceID, token string) (*websocket.C
 		}
 
 		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("Panic in dialTunnel for device %s: %v", deviceID, r)
-					err = fmt.Errorf("dial panic: %w", errors.New(fmt.Sprint(r)))
-				}
-			}()
+			defer recovery.Recover("dialTunnel",
+				recovery.WithDeviceID(deviceID),
+				recovery.WithNamedReturn(nil, &err, "dial panic"))
 			conn, err = tc.dialTunnel(deviceID, token)
 		}()
 
@@ -752,11 +739,8 @@ func (tc *TunnelClient) isConnAlive(conn *websocket.Conn) bool {
 
 // readLoop reads and processes messages from the device.
 func (tc *TunnelClient) readLoop(deviceID string, conn *websocket.Conn) {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("Panic in readLoop for device %s: %v", deviceID, r)
-		}
-	}()
+	defer recovery.Recover("readLoop",
+		recovery.WithDeviceID(deviceID))
 
 	defer func() {
 		var streamsToClose []*StreamConn
@@ -809,11 +793,8 @@ func (tc *TunnelClient) readLoop(deviceID string, conn *websocket.Conn) {
 
 		if messageType == websocket.BinaryMessage || messageType == websocket.TextMessage {
 			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						log.Printf("Panic in handleMessage for device %s: %v", deviceID, r)
-					}
-				}()
+				defer recovery.Recover("handleMessage",
+					recovery.WithDeviceID(deviceID))
 				tc.handleMessage(conn, data)
 			}()
 		}
@@ -922,11 +903,7 @@ func (tc *TunnelClient) handleData(data json.RawMessage) {
 // handleDisconnect processes a disconnect message from the device.
 // Since the peer initiated the disconnect, no disconnect echo is sent.
 func (tc *TunnelClient) handleDisconnect(data json.RawMessage) {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("Panic in handleDisconnect: %v", r)
-		}
-	}()
+	defer recovery.Recover("handleDisconnect")
 
 	var resp struct {
 		StreamID string `json:"stream_id"`
@@ -956,11 +933,8 @@ func (tc *TunnelClient) handleDisconnect(data json.RawMessage) {
 // cleanupStream removes a stream from the streams map and closes it.
 // Lock safety: streamConn.Close() is executed outside the lock to avoid holding tc.mu during I/O.
 func (tc *TunnelClient) cleanupStream(streamID string, streamConn *StreamConn) {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("Panic in cleanupStream for stream %s: %v", streamID, r)
-		}
-	}()
+	defer recovery.Recover("cleanupStream",
+		recovery.WithStreamID(streamID))
 
 	tc.mu.Lock()
 	exists := false
@@ -1191,12 +1165,9 @@ func (s *SOCKS5Server) Start() error {
 		}
 
 		go func(c net.Conn) {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("Panic in handleConnection: %v", r)
-					_ = c.Close()
-				}
-			}()
+			defer recovery.RecoverAction("handleConnection", func() {
+				_ = c.Close()
+			})
 			s.handleConnection(c)
 		}(conn)
 	}
@@ -1472,13 +1443,9 @@ func (s *SOCKS5Server) relay(clientConn, targetConn net.Conn) error {
 	}
 
 	copyStream := func(dst, src net.Conn) {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("Panic in relay copyStream: %v", r)
-				closeOnce.Do(closeConnections)
-				errChan <- fmt.Errorf("copyStream panic: %w", errors.New(fmt.Sprint(r)))
-			}
-		}()
+		defer recovery.RecoverAction("relay.copyStream", func() {
+			closeOnce.Do(closeConnections)
+		})
 		_, err := io.Copy(dst, src)
 		closeOnce.Do(closeConnections)
 		errChan <- err
