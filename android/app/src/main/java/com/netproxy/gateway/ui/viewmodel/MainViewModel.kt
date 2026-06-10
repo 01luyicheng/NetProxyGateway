@@ -55,7 +55,7 @@ data class UiState(
     val isPairingInProgress: Boolean = false,
     val peerId: String = "",
     val deviceId: String = "",
-    val authToken: String = "",
+    val authToken: CharArray = CharArray(0),
     val isVpnEnabled: Boolean = false,
     val wifiConnected: Boolean = false,
     val cellularConnected: Boolean = false,
@@ -70,7 +70,61 @@ data class UiState(
     val reconnectCount: Int = 0,
     val vpnDetailedStatus: VpnStatus = VpnStatus(),
     val networkIsValidated: Boolean = false
-)
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+        other as UiState
+        return isConnected == other.isConnected &&
+            isPaired == other.isPaired &&
+            isPairingInProgress == other.isPairingInProgress &&
+            peerId == other.peerId &&
+            deviceId == other.deviceId &&
+            authToken.contentEquals(other.authToken) &&
+            isVpnEnabled == other.isVpnEnabled &&
+            wifiConnected == other.wifiConnected &&
+            cellularConnected == other.cellularConnected &&
+            currentWifiSsid == other.currentWifiSsid &&
+            wifiNetworks == other.wifiNetworks &&
+            errorMessage == other.errorMessage &&
+            mqttState == other.mqttState &&
+            mqttErrorMessage == other.mqttErrorMessage &&
+            connectionDurationMs == other.connectionDurationMs &&
+            lastHeartbeatTimeMs == other.lastHeartbeatTimeMs &&
+            heartbeatFailures == other.heartbeatFailures &&
+            reconnectCount == other.reconnectCount &&
+            vpnDetailedStatus == other.vpnDetailedStatus &&
+            networkIsValidated == other.networkIsValidated
+    }
+
+    override fun hashCode(): Int {
+        var result = isConnected.hashCode()
+        result = 31 * result + isPaired.hashCode()
+        result = 31 * result + isPairingInProgress.hashCode()
+        result = 31 * result + peerId.hashCode()
+        result = 31 * result + deviceId.hashCode()
+        result = 31 * result + authToken.contentHashCode()
+        result = 31 * result + isVpnEnabled.hashCode()
+        result = 31 * result + wifiConnected.hashCode()
+        result = 31 * result + cellularConnected.hashCode()
+        result = 31 * result + currentWifiSsid.hashCode()
+        result = 31 * result + wifiNetworks.hashCode()
+        result = 31 * result + (errorMessage?.hashCode() ?: 0)
+        result = 31 * result + mqttState.hashCode()
+        result = 31 * result + (mqttErrorMessage?.hashCode() ?: 0)
+        result = 31 * result + connectionDurationMs.hashCode()
+        result = 31 * result + lastHeartbeatTimeMs.hashCode()
+        result = 31 * result + heartbeatFailures
+        result = 31 * result + reconnectCount
+        result = 31 * result + vpnDetailedStatus.hashCode()
+        result = 31 * result + networkIsValidated.hashCode()
+        return result
+    }
+
+    override fun toString(): String {
+        return "UiState(isConnected=$isConnected, isPaired=$isPaired, isPairingInProgress=$isPairingInProgress, peerId='$peerId', deviceId='$deviceId', authToken=[REDACTED], isVpnEnabled=$isVpnEnabled, wifiConnected=$wifiConnected, cellularConnected=$cellularConnected, currentWifiSsid='$currentWifiSsid', wifiNetworks=$wifiNetworks, errorMessage=$errorMessage, mqttState=$mqttState, mqttErrorMessage=$mqttErrorMessage, connectionDurationMs=$connectionDurationMs, lastHeartbeatTimeMs=$lastHeartbeatTimeMs, heartbeatFailures=$heartbeatFailures, reconnectCount=$reconnectCount, vpnDetailedStatus=$vpnDetailedStatus, networkIsValidated=$networkIsValidated)"
+    }
+}
 
 @HiltViewModel
 class MainViewModel @Inject constructor(
@@ -254,14 +308,19 @@ class MainViewModel @Inject constructor(
 
             if (networkStateManager.isCellularConnected()) {
                 val deviceIdSnapshot = _uiState.value.deviceId
-                authSessionStore.update(
-                    deviceId = deviceIdSnapshot,
-                    authToken = code
-                )
-                mqttConnectionManager.connect(
-                    deviceId = deviceIdSnapshot,
-                    authToken = code
-                )
+                val authTokenArray = code.toCharArray()
+                try {
+                    authSessionStore.update(
+                        deviceId = deviceIdSnapshot,
+                        authToken = authTokenArray
+                    )
+                    mqttConnectionManager.connect(
+                        deviceId = deviceIdSnapshot,
+                        authToken = authTokenArray
+                    )
+                } finally {
+                    authTokenArray.fill('\u0000')
+                }
             } else {
                 _uiState.update {
                     it.copy(isPairingInProgress = false, errorMessage = AppLocale.getString(context, R.string.error_cellular_required))
@@ -324,12 +383,16 @@ class MainViewModel @Inject constructor(
         mqttConnectionManager.disconnect()
         authSessionStore.clear()
         toggleVpn(false)
-        _uiState.update {
-            it.copy(
+        _uiState.update { current ->
+            val tokenToClear = current.authToken
+            val updated = current.copy(
                 isConnected = false,
                 isPaired = false,
-                peerId = ""
+                peerId = "",
+                authToken = CharArray(0)
             )
+            tokenToClear.fill('\u0000')
+            updated
         }
     }
 }

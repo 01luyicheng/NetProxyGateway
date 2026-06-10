@@ -278,7 +278,8 @@ class MqttConnectionManager @Inject constructor(
         return createSSLContext(trustAllCerts).socketFactory
     }
 
-    fun connect(deviceId: String, authToken: String) {
+    fun connect(deviceId: String, authToken: CharArray) {
+        val tokenSnapshot = authToken.copyOf()
         var generation = 0L
         lateinit var jobToStart: Job
         synchronized(this@MqttConnectionManager) {
@@ -339,7 +340,7 @@ class MqttConnectionManager @Inject constructor(
                     connectionTimeout = CONNECTION_TIMEOUT_SECONDS
                     keepAliveInterval = 30
                     userName = deviceId
-                    password = authToken.toCharArray()
+                    password = tokenSnapshot
                     setAutomaticReconnect(false) // We handle reconnection manually
 
                     if (isTlsEnabled()) {
@@ -366,7 +367,7 @@ class MqttConnectionManager @Inject constructor(
                             }
                             _connectionState.value = MqttConnectionState.Error(cause?.message ?: "Connection lost")
                             if (shouldStayConnected) {
-                                scheduleReconnect(deviceId, authToken, generation)
+                                scheduleReconnect(deviceId, tokenSnapshot, generation)
                             }
                         }
                     }
@@ -445,7 +446,7 @@ class MqttConnectionManager @Inject constructor(
 
                 // N80: 先触发已注册的 topicCallbacks，再执行默认订阅
                 // 这样 VpnService 中通过 subscribe() 注册的 disconnect 监听器会被保留
-                startHeartbeat(deviceId, authToken, generation)
+                startHeartbeat(deviceId, tokenSnapshot, generation)
 
                 } catch (e: Exception) {
                     val clientToClose = localClient
@@ -474,8 +475,10 @@ class MqttConnectionManager @Inject constructor(
                     _connectionState.value = MqttConnectionState.Error(e.message ?: "Connection failed")
                     if (shouldStayConnected) {
                         onReconnectAttemptFailed()
-                        scheduleReconnect(deviceId, authToken, generation)
+                        scheduleReconnect(deviceId, tokenSnapshot, generation)
                     }
+                } finally {
+                    tokenSnapshot.fill('\u0000')
                 }
             }
 
@@ -495,7 +498,7 @@ class MqttConnectionManager @Inject constructor(
         }
     }
 
-    private fun scheduleReconnect(deviceId: String, authToken: String, generation: Long) {
+    private fun scheduleReconnect(deviceId: String, authToken: CharArray, generation: Long) {
         lateinit var jobToStart: Job
         synchronized(this@MqttConnectionManager) {
             reconnectJob?.cancel()
@@ -520,63 +523,68 @@ class MqttConnectionManager @Inject constructor(
         jobToStart.start()
     }
 
-    private fun startHeartbeat(deviceId: String, authToken: String, generation: Long) {
+    private fun startHeartbeat(deviceId: String, authToken: CharArray, generation: Long) {
         if (!shouldStayConnected || generation != connectionGeneration.get()) {
             return
         }
 
         heartbeatJob?.cancel()
         heartbeatJob = scope.launch {
-            var consecutiveFailures = 0
-            while (
-                shouldStayConnected &&
-                generation == connectionGeneration.get() &&
-                _connectionState.value == MqttConnectionState.Connected
-            ) {
-                delay(HEARTBEAT_INTERVAL)
-                if (!shouldStayConnected || generation != connectionGeneration.get()) {
-                    break
-                }
-                val result = publishWithResult(
-                    "device/$deviceId/heartbeat",
-                    "{\"status\":\"alive\"}",
-                    logError = false
-                )
-                if (result.isSuccess()) {
-                    consecutiveFailures = 0
-                    _diagnostics.update {
-                        it.copy(
-                            lastHeartbeatTime = System.currentTimeMillis(),
-                            consecutiveHeartbeatFailures = 0
-                        )
+            val tokenSnapshot = authToken.copyOf()
+            try {
+                var consecutiveFailures = 0
+                while (
+                    shouldStayConnected &&
+                    generation == connectionGeneration.get() &&
+                    _connectionState.value == MqttConnectionState.Connected
+                ) {
+                    delay(HEARTBEAT_INTERVAL)
+                    if (!shouldStayConnected || generation != connectionGeneration.get()) {
+                        break
                     }
-                    continue
-                }
+                    val result = publishWithResult(
+                        "device/$deviceId/heartbeat",
+                        "{\"status\":\"alive\"}",
+                        logError = false
+                    )
+                    if (result.isSuccess()) {
+                        consecutiveFailures = 0
+                        _diagnostics.update {
+                            it.copy(
+                                lastHeartbeatTime = System.currentTimeMillis(),
+                                consecutiveHeartbeatFailures = 0
+                            )
+                        }
+                        continue
+                    }
 
-                val heartbeatException = result.exceptionOrNull()
-                if (heartbeatException == null) {
-                    logger.error("Heartbeat publish error")
-                } else {
-                    val summary = when (heartbeatException) {
-                        is MqttException -> "MqttException(reasonCode=${heartbeatException.reasonCode})"
-                        else -> heartbeatException.javaClass.simpleName
+                    val heartbeatException = result.exceptionOrNull()
+                    if (heartbeatException == null) {
+                        logger.error("Heartbeat publish error")
+                    } else {
+                        val summary = when (heartbeatException) {
+                            is MqttException -> "MqttException(reasonCode=${heartbeatException.reasonCode})"
+                            else -> heartbeatException.javaClass.simpleName
+                        }
+                        logger.error("Heartbeat publish error: $summary")
                     }
-                    logger.error("Heartbeat publish error: $summary")
-                }
-                consecutiveFailures++
-                _diagnostics.update {
-                    it.copy(consecutiveHeartbeatFailures = consecutiveFailures)
-                }
-                if (consecutiveFailures >= MAX_HEARTBEAT_FAILURES) {
-                    logger.warn("Max heartbeat failures reached, triggering reconnect")
-                    AppAuditLogStore.warn("MQTT", "Max heartbeat failures reached; reconnecting")
-                    if (shouldStayConnected && generation == connectionGeneration.get()) {
-                        _connectionState.value = MqttConnectionState.Error("Max heartbeat failures reached")
-                        onReconnectAttemptFailed()
-                        scheduleReconnect(deviceId, authToken, generation)
+                    consecutiveFailures++
+                    _diagnostics.update {
+                        it.copy(consecutiveHeartbeatFailures = consecutiveFailures)
                     }
-                    break
+                    if (consecutiveFailures >= MAX_HEARTBEAT_FAILURES) {
+                        logger.warn("Max heartbeat failures reached, triggering reconnect")
+                        AppAuditLogStore.warn("MQTT", "Max heartbeat failures reached; reconnecting")
+                        if (shouldStayConnected && generation == connectionGeneration.get()) {
+                            _connectionState.value = MqttConnectionState.Error("Max heartbeat failures reached")
+                            onReconnectAttemptFailed()
+                            scheduleReconnect(deviceId, tokenSnapshot, generation)
+                        }
+                        break
+                    }
                 }
+            } finally {
+                tokenSnapshot.fill('\u0000')
             }
         }
     }

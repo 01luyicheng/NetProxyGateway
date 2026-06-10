@@ -379,7 +379,7 @@ class GatewayVpnService : AndroidVpnService() {
             credentialProvider = {
                 val session = authSessionStore.getCurrentSession()
                 if (session != null) {
-                    Pair(session.deviceId, session.authToken)
+                    Pair(session.deviceId, session.authToken.copyOf())
                 } else {
                     null
                 }

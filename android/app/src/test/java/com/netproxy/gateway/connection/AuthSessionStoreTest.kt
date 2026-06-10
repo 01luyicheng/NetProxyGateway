@@ -110,17 +110,17 @@ class AuthSessionStoreTest {
 
     @Test
     fun proxyAuthSession_defaultValues() {
-        val session = ProxyAuthSession("device-123", "token-456")
+        val session = ProxyAuthSession("device-123", "token-456".toCharArray())
 
         assertEquals("device-123", session.deviceId)
-        assertEquals("token-456", session.authToken)
+        assertTrue(session.authToken.contentEquals("token-456".toCharArray()))
     }
 
     @Test
     fun proxyAuthSession_equality() {
-        val session1 = ProxyAuthSession("device-1", "token-1")
-        val session2 = ProxyAuthSession("device-1", "token-1")
-        val session3 = ProxyAuthSession("device-2", "token-2")
+        val session1 = ProxyAuthSession("device-1", "token-1".toCharArray())
+        val session2 = ProxyAuthSession("device-1", "token-1".toCharArray())
+        val session3 = ProxyAuthSession("device-2", "token-2".toCharArray())
 
         assertEquals(session1, session2)
         assertTrue(session1 != session3)
@@ -128,83 +128,84 @@ class AuthSessionStoreTest {
 
     @Test
     fun proxyAuthSession_hashCodeConsistency() {
-        val session1 = ProxyAuthSession("device-1", "token-1")
-        val session2 = ProxyAuthSession("device-1", "token-1")
+        val session1 = ProxyAuthSession("device-1", "token-1".toCharArray())
+        val session2 = ProxyAuthSession("device-1", "token-1".toCharArray())
 
         assertEquals(session1.hashCode(), session2.hashCode())
     }
 
     @Test
     fun proxyAuthSession_copy() {
-        val session = ProxyAuthSession("device-1", "token-1")
+        val session = ProxyAuthSession("device-1", "token-1".toCharArray())
         val copied = session.copy(deviceId = "device-2")
 
         assertEquals("device-2", copied.deviceId)
-        assertEquals("token-1", copied.authToken)
+        assertTrue(copied.authToken.contentEquals("token-1".toCharArray()))
     }
 
     @Test
     fun proxyAuthSession_componentFunctions() {
-        val session = ProxyAuthSession("device-1", "token-1")
+        val session = ProxyAuthSession("device-1", "token-1".toCharArray())
 
         assertEquals("device-1", session.deviceId)
-        assertEquals("token-1", session.authToken)
+        assertTrue(session.authToken.contentEquals("token-1".toCharArray()))
     }
 
     @Test
     fun proxyAuthSession_toString() {
-        val session = ProxyAuthSession("device-1", "token-1")
+        val session = ProxyAuthSession("device-1", "token-1".toCharArray())
         val str = session.toString()
 
         assertTrue(str.contains("device-1"))
-        assertTrue(str.contains("token-1"))
+        assertTrue(str.contains("[REDACTED]"))
+        assertFalse(str.contains("token-1"))
     }
 
     @Test
     fun proxyAuthSession_withEmptyStrings() {
-        val session = ProxyAuthSession("", "")
+        val session = ProxyAuthSession("", "".toCharArray())
 
         assertEquals("", session.deviceId)
-        assertEquals("", session.authToken)
+        assertTrue(session.authToken.contentEquals("".toCharArray()))
     }
 
     @Test
     fun proxyAuthSession_withLongStrings() {
         val longDeviceId = "device-".repeat(100)
         val longToken = "token-".repeat(100)
-        val session = ProxyAuthSession(longDeviceId, longToken)
+        val session = ProxyAuthSession(longDeviceId, longToken.toCharArray())
 
         assertEquals(longDeviceId, session.deviceId)
-        assertEquals(longToken, session.authToken)
+        assertTrue(session.authToken.contentEquals(longToken.toCharArray()))
     }
 
     @Test
     fun proxyAuthSession_withSpecialCharacters() {
         val deviceId = "device-123!@#$%^&*()"
         val token = "token-456_+=[]{}|;':\",./<>?"
-        val session = ProxyAuthSession(deviceId, token)
+        val session = ProxyAuthSession(deviceId, token.toCharArray())
 
         assertEquals(deviceId, session.deviceId)
-        assertEquals(token, session.authToken)
+        assertTrue(session.authToken.contentEquals(token.toCharArray()))
     }
 
     @Test
     fun proxyAuthSession_equalsNull() {
-        val session = ProxyAuthSession("device", "token")
+        val session = ProxyAuthSession("device", "token".toCharArray())
 
         assertFalse(session.equals(null))
     }
 
     @Test
     fun proxyAuthSession_equalsDifferentType() {
-        val session = ProxyAuthSession("device", "token")
+        val session = ProxyAuthSession("device", "token".toCharArray())
 
         assertFalse(session.equals("not a session"))
     }
 
     @Test
     fun proxyAuthSession_equalsSameObject() {
-        val session = ProxyAuthSession("device", "token")
+        val session = ProxyAuthSession("device", "token".toCharArray())
 
         assertTrue(session.equals(session))
     }
@@ -214,7 +215,7 @@ class AuthSessionStoreTest {
     @Test
     fun update_normalUpdate_shouldStoreInMemoryAndEncryptedPrefs() {
         val deviceId = "device-123"
-        val authToken = "token-abc"
+        val authToken = "token-abc".toCharArray()
 
         authSessionStore.update(deviceId, authToken)
 
@@ -222,7 +223,7 @@ class AuthSessionStoreTest {
         verify { encryptedPrefs.edit() }
         verify { editor.putString("installation_device_id", deviceId) }
         verify { editor.putString("device_id", deviceId) }
-        verify { editor.putString("auth_token", authToken) }
+        verify { editor.putString("auth_token", "token-abc") }
         verify { editor.apply() }
     }
 
@@ -232,10 +233,10 @@ class AuthSessionStoreTest {
         every { encryptedPrefs.getString("device_id", null) } returns "old-device"
         every { encryptedPrefs.getString("auth_token", null) } returns "old-token"
 
-        authSessionStore.update("old-device", "old-token")
+        authSessionStore.update("old-device", "old-token".toCharArray())
 
         // 更新为新会话
-        authSessionStore.update("new-device", "new-token")
+        authSessionStore.update("new-device", "new-token".toCharArray())
 
         // 验证新值被存储
         verify { editor.putString("device_id", "new-device") }
@@ -245,7 +246,7 @@ class AuthSessionStoreTest {
     @Test
     fun updateWithResult_normalUpdate_shouldReturnSuccess() {
         val deviceId = "device-123"
-        val authToken = "token-abc"
+        val authToken = "token-abc".toCharArray()
 
         val result = authSessionStore.updateWithResult(deviceId, authToken)
 
@@ -258,7 +259,7 @@ class AuthSessionStoreTest {
     @Test
     fun updateWithResult_whenExceptionThrown_shouldReturnError() {
         val deviceId = "device-123"
-        val authToken = "token-abc"
+        val authToken = "token-abc".toCharArray()
 
         // 模拟异常
         every { encryptedPrefs.edit() } throws RuntimeException("Storage error")
@@ -275,7 +276,7 @@ class AuthSessionStoreTest {
     @Test
     fun clear_normalClear_shouldClearMemoryAndStorage() {
         // 先设置一个会话
-        authSessionStore.update("device-123", "token-abc")
+        authSessionStore.update("device-123", "token-abc".toCharArray())
 
         // 清除会话
         authSessionStore.clear()
@@ -298,7 +299,7 @@ class AuthSessionStoreTest {
     @Test
     fun clearWithResult_normalClear_shouldReturnSuccess() {
         // 先设置一个会话
-        authSessionStore.update("device-123", "token-abc")
+        authSessionStore.update("device-123", "token-abc".toCharArray())
 
         val result = authSessionStore.clearWithResult()
 
@@ -332,7 +333,7 @@ class AuthSessionStoreTest {
     @Test
     fun clear_shouldAlsoRemoveInstallationDeviceId() {
         every { encryptedPrefs.getString("installation_device_id", null) } returns "device-stable"
-        authSessionStore.update("device-stable", "token-abc")
+        authSessionStore.update("device-stable", "token-abc".toCharArray())
 
         authSessionStore.clear()
 
@@ -363,7 +364,7 @@ class AuthSessionStoreTest {
         every { encryptedPrefs.getString("device_id", null) } returns "device-123"
         every { encryptedPrefs.getString("auth_token", null) } returns "token-abc"
 
-        val result = authSessionStore.isValid("device-123", "token-abc")
+        val result = authSessionStore.isValid("device-123", "token-abc".toCharArray())
 
         assertTrue(result)
     }
@@ -374,7 +375,7 @@ class AuthSessionStoreTest {
         every { encryptedPrefs.getString("device_id", null) } returns "device-123"
         every { encryptedPrefs.getString("auth_token", null) } returns "token-abc"
 
-        val result = authSessionStore.isValid("wrong-device", "token-abc")
+        val result = authSessionStore.isValid("wrong-device", "token-abc".toCharArray())
 
         assertFalse(result)
     }
@@ -385,7 +386,7 @@ class AuthSessionStoreTest {
         every { encryptedPrefs.getString("device_id", null) } returns "device-123"
         every { encryptedPrefs.getString("auth_token", null) } returns "token-abc"
 
-        val result = authSessionStore.isValid("device-123", "wrong-token")
+        val result = authSessionStore.isValid("device-123", "wrong-token".toCharArray())
 
         assertFalse(result)
     }
@@ -396,18 +397,18 @@ class AuthSessionStoreTest {
         every { encryptedPrefs.getString("device_id", null) } returns null
         every { encryptedPrefs.getString("auth_token", null) } returns null
 
-        val result = authSessionStore.isValid("device-123", "token-abc")
+        val result = authSessionStore.isValid("device-123", "token-abc".toCharArray())
 
         assertFalse(result)
     }
 
     @Test
-    fun isValid_withEmptyToken_shouldReturnFalse() {
+    fun isValid_withEmptyToken_shouldReturnTrueWhenStoredTokenIsAlsoEmpty() {
         // 设置空token会话
         every { encryptedPrefs.getString("device_id", null) } returns "device-123"
         every { encryptedPrefs.getString("auth_token", null) } returns ""
 
-        val result = authSessionStore.isValid("device-123", "")
+        val result = authSessionStore.isValid("device-123", "".toCharArray())
 
         // 空字符串应该匹配（如果存储的也是空字符串）
         assertTrue(result)
@@ -419,7 +420,7 @@ class AuthSessionStoreTest {
         every { encryptedPrefs.getString("device_id", null) } returns "device-123"
         every { encryptedPrefs.getString("auth_token", null) } returns "token-abc"
 
-        val result = authSessionStore.validateWithResult("device-123", "token-abc")
+        val result = authSessionStore.validateWithResult("device-123", "token-abc".toCharArray())
 
         assertTrue(result.isSuccess())
         assertEquals(true, result.getOrNull())
@@ -431,7 +432,7 @@ class AuthSessionStoreTest {
         every { encryptedPrefs.getString("device_id", null) } returns "device-123"
         every { encryptedPrefs.getString("auth_token", null) } returns "token-abc"
 
-        val result = authSessionStore.validateWithResult("device-123", "wrong-token")
+        val result = authSessionStore.validateWithResult("device-123", "wrong-token".toCharArray())
 
         assertTrue(result.isSuccess())
         assertEquals(false, result.getOrNull())
@@ -443,7 +444,7 @@ class AuthSessionStoreTest {
         every { encryptedPrefs.getString("device_id", null) } returns null
         every { encryptedPrefs.getString("auth_token", null) } returns null
 
-        val result = authSessionStore.validateWithResult("device-123", "token-abc")
+        val result = authSessionStore.validateWithResult("device-123", "token-abc".toCharArray())
 
         assertTrue(result.isSuccess())
         assertEquals(false, result.getOrNull())
@@ -454,7 +455,7 @@ class AuthSessionStoreTest {
         // 模拟异常
         every { encryptedPrefs.getString(any(), any()) } throws RuntimeException("Read error")
 
-        val result = authSessionStore.validateWithResult("device-123", "token-abc")
+        val result = authSessionStore.validateWithResult("device-123", "token-abc".toCharArray())
 
         assertTrue(result.isError())
         assertNotNull(result.exceptionOrNull())
@@ -472,7 +473,7 @@ class AuthSessionStoreTest {
 
         assertNotNull(session)
         assertEquals("device-123", session?.deviceId)
-        assertEquals("token-abc", session?.authToken)
+        assertTrue(session?.authToken?.contentEquals("token-abc".toCharArray()) == true)
     }
 
     @Test
@@ -520,7 +521,7 @@ class AuthSessionStoreTest {
         val session = result.getOrNull()
         assertNotNull(session)
         assertEquals("device-123", session?.deviceId)
-        assertEquals("token-abc", session?.authToken)
+        assertTrue(session?.authToken?.contentEquals("token-abc".toCharArray()) == true)
     }
 
     @Test
@@ -556,7 +557,7 @@ class AuthSessionStoreTest {
         every { encryptedPrefs.getString("device_id", null) } returns "device-123"
         every { encryptedPrefs.getString("auth_token", null) } returns "token-abc"
 
-        val result = authSessionStore.isValid("device-123", "token-abc")
+        val result = authSessionStore.isValid("device-123", "token-abc".toCharArray())
 
         assertTrue(result)
     }
@@ -567,7 +568,7 @@ class AuthSessionStoreTest {
         every { encryptedPrefs.getString("device_id", null) } returns "device-123"
         every { encryptedPrefs.getString("auth_token", null) } returns "token-abc"
 
-        val result = authSessionStore.isValid("device-123", "different-token")
+        val result = authSessionStore.isValid("device-123", "different-token".toCharArray())
 
         assertFalse(result)
     }
@@ -578,7 +579,7 @@ class AuthSessionStoreTest {
         every { encryptedPrefs.getString("device_id", null) } returns "device-123"
         every { encryptedPrefs.getString("auth_token", null) } returns "short"
 
-        val result = authSessionStore.isValid("device-123", "much-longer-token")
+        val result = authSessionStore.isValid("device-123", "much-longer-token".toCharArray())
 
         assertFalse(result)
     }
@@ -589,7 +590,7 @@ class AuthSessionStoreTest {
         every { encryptedPrefs.getString("device_id", null) } returns "device-123"
         every { encryptedPrefs.getString("auth_token", null) } returns ""
 
-        val result = authSessionStore.isValid("device-123", "")
+        val result = authSessionStore.isValid("device-123", "".toCharArray())
 
         assertTrue(result)
     }
@@ -601,7 +602,7 @@ class AuthSessionStoreTest {
         every { encryptedPrefs.getString("auth_token", null) } returns "token-abc"
 
         // 只有一个字符不同
-        val result = authSessionStore.isValid("device-123", "token-abcX")
+        val result = authSessionStore.isValid("device-123", "token-abcX".toCharArray())
 
         assertFalse(result)
     }
@@ -622,7 +623,7 @@ class AuthSessionStoreTest {
         )
 
         testTokens.forEach { token ->
-            val result = authSessionStore.isValid("device-123", token)
+            val result = authSessionStore.isValid("device-123", token.toCharArray())
             assertFalse("Token '$token' should be invalid", result)
         }
     }
@@ -634,11 +635,11 @@ class AuthSessionStoreTest {
         every { encryptedPrefs.getString("auth_token", null) } returns "令牌-abc"
 
         // 正确匹配
-        val validResult = authSessionStore.isValid("device-123", "令牌-abc")
+        val validResult = authSessionStore.isValid("device-123", "令牌-abc".toCharArray())
         assertTrue(validResult)
 
         // 错误匹配
-        val invalidResult = authSessionStore.isValid("device-123", "令牌-abd")
+        val invalidResult = authSessionStore.isValid("device-123", "令牌-abd".toCharArray())
         assertFalse(invalidResult)
     }
 
@@ -649,11 +650,11 @@ class AuthSessionStoreTest {
         every { encryptedPrefs.getString("auth_token", null) } returns "token!@#$%^&*()"
 
         // 正确匹配
-        val validResult = authSessionStore.isValid("device-123", "token!@#$%^&*()")
+        val validResult = authSessionStore.isValid("device-123", "token!@#$%^&*()".toCharArray())
         assertTrue(validResult)
 
         // 错误匹配
-        val invalidResult = authSessionStore.isValid("device-123", "token!@#$%^&*()X")
+        val invalidResult = authSessionStore.isValid("device-123", "token!@#$%^&*()X".toCharArray())
         assertFalse(invalidResult)
     }
 
@@ -701,19 +702,19 @@ class AuthSessionStoreTest {
     @Test
     fun memoryCache_shouldBeUpdated_onUpdate() {
         // 设置初始会话
-        authSessionStore.update("old-device", "old-token")
+        authSessionStore.update("old-device", "old-token".toCharArray())
 
         // 更新会话
         every { encryptedPrefs.getString("device_id", null) } returns "new-device"
         every { encryptedPrefs.getString("auth_token", null) } returns "new-token"
 
-        authSessionStore.update("new-device", "new-token")
+        authSessionStore.update("new-device", "new-token".toCharArray())
 
         // 验证新会话可以直接获取（从内存）
         val session = authSessionStore.getCurrentSession()
         assertNotNull(session)
         assertEquals("new-device", session?.deviceId)
-        assertEquals("new-token", session?.authToken)
+        assertTrue(session?.authToken?.contentEquals("new-token".toCharArray()) == true)
     }
 
     // ==================== 边界条件测试 ====================
@@ -722,70 +723,70 @@ class AuthSessionStoreTest {
     fun proxyAuthSession_withUnicodeCharacters() {
         val deviceId = "设备-123"
         val token = "令牌-456"
-        val session = ProxyAuthSession(deviceId, token)
+        val session = ProxyAuthSession(deviceId, token.toCharArray())
 
         assertEquals(deviceId, session.deviceId)
-        assertEquals(token, session.authToken)
+        assertTrue(session.authToken.contentEquals(token.toCharArray()))
     }
 
     @Test
     fun proxyAuthSession_withWhitespace() {
         val deviceId = "  device  "
         val token = "  token  "
-        val session = ProxyAuthSession(deviceId, token)
+        val session = ProxyAuthSession(deviceId, token.toCharArray())
 
         assertEquals(deviceId, session.deviceId)
-        assertEquals(token, session.authToken)
+        assertTrue(session.authToken.contentEquals(token.toCharArray()))
     }
 
     @Test
     fun proxyAuthSession_withNewlines() {
         val deviceId = "device\nwith\nnewlines"
         val token = "token\nwith\nnewlines"
-        val session = ProxyAuthSession(deviceId, token)
+        val session = ProxyAuthSession(deviceId, token.toCharArray())
 
         assertEquals(deviceId, session.deviceId)
-        assertEquals(token, session.authToken)
+        assertTrue(session.authToken.contentEquals(token.toCharArray()))
     }
 
     @Test
     fun proxyAuthSession_withTabs() {
         val deviceId = "device\twith\ttabs"
         val token = "token\twith\ttabs"
-        val session = ProxyAuthSession(deviceId, token)
+        val session = ProxyAuthSession(deviceId, token.toCharArray())
 
         assertEquals(deviceId, session.deviceId)
-        assertEquals(token, session.authToken)
+        assertTrue(session.authToken.contentEquals(token.toCharArray()))
     }
 
     // ==================== 数据类行为测试 ====================
 
     @Test
     fun proxyAuthSession_destructuring() {
-        val session = ProxyAuthSession("device-1", "token-1")
+        val session = ProxyAuthSession("device-1", "token-1".toCharArray())
         val (deviceId, authToken) = session
 
         assertEquals("device-1", deviceId)
-        assertEquals("token-1", authToken)
+        assertTrue(authToken.contentEquals("token-1".toCharArray()))
     }
 
     @Test
     fun proxyAuthSession_copyWithAllFields() {
-        val session = ProxyAuthSession("device-1", "token-1")
-        val copied = session.copy(deviceId = "device-2", authToken = "token-2")
+        val session = ProxyAuthSession("device-1", "token-1".toCharArray())
+        val copied = session.copy(deviceId = "device-2", authToken = "token-2".toCharArray())
 
         assertEquals("device-2", copied.deviceId)
-        assertEquals("token-2", copied.authToken)
+        assertTrue(copied.authToken.contentEquals("token-2".toCharArray()))
     }
 
     @Test
     fun proxyAuthSession_copyPreservesOriginal() {
-        val session = ProxyAuthSession("device-1", "token-1")
+        val session = ProxyAuthSession("device-1", "token-1".toCharArray())
         val copied = session.copy(deviceId = "device-2")
 
         // Original should be unchanged
         assertEquals("device-1", session.deviceId)
-        assertEquals("token-1", session.authToken)
+        assertTrue(session.authToken.contentEquals("token-1".toCharArray()))
     }
 
     // ==================== 类结构测试 ====================

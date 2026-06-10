@@ -118,7 +118,7 @@
 
 ### C17: Go服务端代码风格不一致 [已解决]
 - **状态**: 已解决（2026-06-06）
-- **修复提交**: (当前工作区)
+- **修复提交**: `9078448`
 - **位置**: `server/socks5-proxy/main.go`, `server/api/main.go`
 - **修复内容**:
   - SOCKS5 代理：将 auth version `0x01` 替换为 `authSubVersion` 常量
@@ -133,7 +133,7 @@
 
 ### C18: generateSecureRandomString性能可优化 [已解决]
 - **状态**: 已解决（2026-06-06）
-- **修复提交**: (当前工作区)
+- **修复提交**: `9078448`
 - **位置**: `server/api/main.go`
 - **问题描述**: 每次循环分配新内存，频繁进行系统调用。拒绝采样阈值计算正确但存在性能优化空间
 - **修复内容**:
@@ -154,7 +154,7 @@
 
 ### C20: VpnService日志模板格式不一致 [已解决]
 - **状态**: 已解决（2026-06-06）
-- **修复提交**: (当前工作区)
+- **修复提交**: `0bf8c97`
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt`
 - **问题描述**: 日志消息模板中分隔符`-`的使用格式不一致，有的带前后空格，有的不带空格。不影响功能但降低日志可读性和一致性
 - **修复内容**:
@@ -169,7 +169,7 @@
 
 ### C21: VpnLogRedaction缺少KDoc文档 [已解决]
 - **状态**: 已解决（2026-06-06）
-- **修复提交**: (当前工作区)
+- **修复提交**: `0bf8c97`
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnLogRedaction.kt`
 - **问题描述**: 公共函数`redactIp()`和`redactConnectionKey()`缺少KDoc文档注释，未说明函数用途、参数格式和返回值格式
 - **修复内容**:
@@ -179,7 +179,7 @@
 
 ### C22: VpnLogRedaction魔法值未命名 [已解决]
 - **状态**: 已解决（2026-06-06）
-- **修复提交**: (当前工作区)
+- **修复提交**: `0bf8c97`
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnLogRedaction.kt`
 - **问题描述**: 代码中使用字面量`4`（IPv4段数）、`6`（最小脱敏长度）、`2`（连接键分段数）等魔法值，未提取为命名常量，降低可读性
 - **修复内容**:
@@ -601,7 +601,7 @@
 ### C80: processReturnTraffic 单协程串行处理模型 [已修复]
 - **状态**: 已修复
 - **提交哈希**: d01ddd1
-- **修复提交**: (当前工作区)
+- **修复提交**: `07aaa3b`
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (processReturnTraffic)
 - **问题描述**: ~~详见 ISSUES.md N57。`processReturnTraffic` 使用单协程串行遍历所有活跃连接，单个连接 I/O 阻塞会导致所有后续连接回包处理停滞。~~ 已改为 `coroutineScope { async(Dispatchers.IO) }` 并行模型，每个连接独立协程处理回包。
 - **修复方式**: 串行 `snapshot.forEach` 改为并行 `coroutineScope { snapshot.map { async(Dispatchers.IO) { ... } }.awaitAll() }`
