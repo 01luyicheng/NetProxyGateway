@@ -973,35 +973,120 @@
 - **修复方式**: 只调用一次 `toCharArray()`，对返回值使用 `copyOf()` 创建独立副本。
 
 ### N37-B7: `startHeartbeat()` 的 `finally` 清零 `tokenSnapshot` 导致 `scheduleReconnect()` 使用已清零 token
-- **状态**: 已修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (startHeartbeat → scheduleReconnect)
+-- **状态**: 已修复
+-- **修复提交**: `1371601`
+-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (startHeartbeat → scheduleReconnect)
 - **问题描述**: N37-B4 修复在 `startHeartbeat()` 中添加了 `try-finally` 清零 `tokenSnapshot`。但当心跳连续失败达到 `MAX_HEARTBEAT_FAILURES` 时，`scheduleReconnect(deviceId, tokenSnapshot, generation)` 将 `tokenSnapshot` 传递给延迟协程。`scheduleReconnect()` 返回后，`finally` 块立即清零 `tokenSnapshot`。由于 `scheduleReconnect()` 的协程通过 lambda 捕获了 `authToken`（与 `tokenSnapshot` 是同一对象引用），延迟协程执行 `connect(deviceId, authToken)` 时 `authToken` 已被清零，`connect()` 复制的是空数组，导致 MQTT 重连静默认证失败。
 - **风险**: **高**。心跳失败触发的自动重连必然使用空 token 认证，用户看到持续 Error 状态但无法恢复连接。
 - **触发场景**: 网络不稳定导致 3 次连续心跳失败 → `startHeartbeat()` 调用 `scheduleReconnect()` → `finally` 清零 `tokenSnapshot` → 延迟后重连使用空 token → 认证失败 → 持续重连失败循环。
 - **修复方式**: `scheduleReconnect()` 在入口处立即创建 `authToken.copyOf()` 作为独立副本（`tokenCopy`），在协程的 `try-finally` 中清零 `tokenCopy`，确保调用方清零其引用不影响重连使用的副本。
 
 ### N37-B8: `pairWithCode()` 非蜂窝路径未清零 UiState 中的 `authToken` 副本
-- **状态**: 已修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (pairWithCode)
+-- **状态**: 已修复
+-- **修复提交**: `1371601`
+-- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (pairWithCode)
 - **问题描述**: N37-B2 修复在 `pairWithCode()` 中将 `authTokenArray.copyOf()` 写入 UiState。但在蜂窝网络不可用的 else 分支中，仅清零了原始 `authTokenArray`，未将 UiState 中的 `authToken` 重置为 `CharArray(0)`。UiState 中的 token 副本持续驻留内存，直到 `disconnect()` 或 `onCleared()` 被调用。
 - **风险**: **中**。配对失败后 token 明文仍在 UiState 中残留，内存转储可提取。
 - **触发场景**: 用户在无蜂窝网络时尝试配对 → `pairWithCode()` 进入 else 分支 → 原始数组被清零但 UiState 中的副本未清零 → token 残留内存。
 - **修复方式**: 在 else 分支的 `_uiState.update` 中添加 `authToken = CharArray(0)`。
 
 ### N37-B9: `startHeartbeat()` 中 `tokenSnapshot` 从未清零
-- **状态**: 已修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (startHeartbeat)
+-- **状态**: 已修复
+-- **修复提交**: `1371601`
+-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (startHeartbeat)
 - **问题描述**: `startHeartbeat()` 创建 `tokenSnapshot = authToken.copyOf()` 用于心跳失败时传递给 `scheduleReconnect()`，但整个心跳协程没有 `try-finally` 块来清零 `tokenSnapshot`。当心跳协程退出时，`tokenSnapshot` 中的认证令牌仍驻留内存。
 - **风险**: **中**。心跳协程退出后 token 副本滞留内存，直到 GC 回收。
 - **触发场景**: 心跳协程因连接断开、ViewModel 销毁或状态变化而退出 → `tokenSnapshot` 未被清零 → token 残留内存。
 - **修复方式**: 在 `startHeartbeat()` 的协程体中添加 `try-finally`，在 `finally` 块中清零 `tokenSnapshot`。
 
 ### N37-B10: `Socks5ConnectionPool.createNewConnection()` 未清零 `credentialProvider` 返回的 `CharArray`
-- **状态**: 已修复
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (createNewConnection)
+-- **状态**: 已修复
+-- **修复提交**: `59f7d41`
+-- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (createNewConnection)
 - **问题描述**: `credentialProvider()` 返回 `Pair<String, CharArray>`，其中 `CharArray` 是认证令牌的副本。`createNewConnection()` 解构后，`password` 仅传递给 `createSocks5Socket()` → `performSocks5Handshake()`。虽然 `performSocks5Handshake()` 在 `finally` 中清零了编码后的 `passBytes`，但原始 `password` CharArray 从未被清零。每次创建 SOCKS5 连接都会泄漏一份认证令牌副本。
 - **风险**: **中**。每次 SOCKS5 连接创建都泄漏一份 token 副本，高并发场景下内存中可能同时存在多份明文 token。
 - **触发场景**: VPN 服务建立 SOCKS5 代理连接 → `createNewConnection()` 调用 `credentialProvider()` → 使用密码后未清零原始 CharArray → token 泄漏。
 - **修复方式**: 在 `createNewConnection()` 的 `finally` 块中清零 `credentialPassword`。
+
+---
+
+## 近5次提交审查发现（2026-06-10，审查 a629ba5..4c0cea6）
+
+> 以下问题由 subagent 多维度代码审查发现；**待修复**。
+
+### C81: `connect()` 传递原始 `authToken` 给 `startHeartbeat()`
+- **状态**: 待修复
+- **提交哈希**: `4c0cea6`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (connect, L454)
+- **问题描述**: `connect()` 内部已创建 `tokenSnapshot = authToken.copyOf()`，但调用 `startHeartbeat()` 时传递的是原始 `authToken` 参数而非 `tokenSnapshot`。如果调用方在 `connect()` 返回后立即清零 `authToken`，`startHeartbeat()` 内部的 `copyOf()` 将复制空数组，导致心跳失败后的重连使用空 token。
+- **风险**: **高**。与 N37-B3 同类问题，心跳协程可能复制已清零的 token。
+- **修复方式**: 将 `startHeartbeat(deviceId, authToken, generation)` 改为 `startHeartbeat(deviceId, tokenSnapshot, generation)`。
+
+### C82: `pairWithCode()` 成功路径未清零局部 `authTokenArray`
+- **状态**: 待修复
+- **提交哈希**: `4c0cea6`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (pairWithCode, L305-326)
+- **问题描述**: `pairWithCode()` 成功路径（蜂窝网络可用分支）中，`authTokenArray` 被传递给 `authSessionStore.update()` 和 `mqttConnectionManager.connect()`（两者内部会 copy），但 `authTokenArray` 本身在方法结束前从未被清零。只有 `else` 分支（失败路径）中执行了 `authTokenArray.fill('\u0000')`。
+- **风险**: **中**。配对成功后局部变量仍持有原始 token 引用，直到方法栈帧销毁。
+- **修复方式**: 在成功路径末尾（`mqttConnectionManager.connect()` 调用后）添加 `authTokenArray.fill('\u0000')`。
+
+### T1: `Socks5ConnectionPoolTest` N37-B10 测试虚假通过
+- **状态**: 待修复
+- **提交哈希**: `4c0cea6`
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/proxy/Socks5ConnectionPoolTest.kt` (n37b10_createNewConnection_zerosCredentialPasswordAfterUse, L341-L371)
+- **问题描述**: 测试声明验证 `credentialPassword` 在使用后被清零，但断言仅检查原始 `secretPassword` 未被修改，完全没有捕获 `credentialProvider` 返回的 **copy** 的引用。即使生产代码中 `credentialPassword?.fill('\u0000')` 被意外删除，该测试仍会通过。
+- **风险**: **高**。虚假通过的测试比没有测试更危险，会掩盖生产代码的安全回归。
+- **修复方式**: 在 `credentialProvider` lambda 中将返回的 copy 捕获到外部变量，在 `borrowConnection` 后断言该 copy 已被 zeroed。
+
+### T2: `AuthSessionStoreTest` 测试名与断言矛盾
+- **状态**: 待修复
+- **提交哈希**: `4c0cea6`
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/connection/AuthSessionStoreTest.kt` (isValid_withEmptyToken_shouldReturnFalse, L406-L415)
+- **问题描述**: 测试方法名明确声明 `shouldReturnFalse`，但实际断言为 `assertTrue(result)`。注释说明意图是"空字符串应该匹配"，但名实严重不符，会导致维护者误解。
+- **风险**: **高**。测试名与行为矛盾，可能导致未来维护者按方法名"修复"代码，引入实际缺陷。
+- **修复方式**: 将方法重命名为 `isValid_withEmptyToken_shouldReturnTrue`，或根据业务需求修正断言和注释。
+
+### T3: `AuthSessionStoreTest` `@Synchronized` 检查未完成
+- **状态**: 待修复
+- **提交哈希**: `4c0cea6`
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/connection/AuthSessionStoreTest.kt` (authSessionStore_methodsAreSynchronized, L838-L852)
+- **问题描述**: 测试注释声称"Check that key methods have @Synchronized annotation"，但代码仅使用 `assertNotNull` 验证四个方法存在，完全没有检查方法上是否有 `@Synchronized` 注解。
+- **风险**: **高**。给团队虚假的线程安全信心。若 `@Synchronized` 被意外移除，测试不会失败。
+- **修复方式**: 添加 `assertTrue(method.isAnnotationPresent(Synchronized::class.java))` 断言。
+
+### T4: `MqttConnectionManagerHeartbeatTest` 过度 mock `connect()` 内部实现
+- **状态**: 待修复
+- **提交哈希**: `4c0cea6`
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/connection/MqttConnectionManagerHeartbeatTest.kt` (scheduleReconnect_createsOwnTokenCopy_originalZeroingDoesNotAffectReconnect, L121-L131)
+- **问题描述**: mock `connect()` 的 `answers` 块中通过反射设置 `activeTokenSnapshot` 私有字段，模拟了真实 `connect()` 的内部副作用。测试与实现细节深度耦合，若 `connect()` 重构（例如不再使用 `activeTokenSnapshot` 字段），此测试会在被测逻辑其实正确的情况下假失败。
+- **风险**: **中**。测试脆弱性高，重构成本大。
+- **修复方式**: 仅验证 `connect()` 收到的 `CharArray` 内容正确且未被 zeroed，不要在 mock 中复制真实方法的内部状态管理逻辑。
+
+### T5: `AuthSessionStoreTest` 遗漏关键 token zeroing 验证
+- **状态**: 待修复
+- **提交哈希**: `4c0cea6`
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/connection/AuthSessionStoreTest.kt`
+- **问题描述**: 以下 N37 核心安全行为没有任何测试覆盖：
+  1. `update()` / `updateWithResult()` 中旧 `inMemoryToken` 是否在替换前被 zeroed。
+  2. `clear()` / `clearWithResult()` 中 `inMemoryToken` 是否被 zeroed。
+  3. `isValid()` / `validateWithResult()` 中临时 `session.authToken` 是否在 `finally` 中被 zeroed。
+- **风险**: **中**。安全行为缺乏回归保护，未来重构可能意外移除 zeroing 逻辑。
+- **修复方式**: 为上述三种场景补充直接测试，通过反射读取 `inMemoryToken` 或捕获返回的 `session.authToken` 引用进行验证。
+
+### T6: `Socks5ConnectionPoolTest` 并发测试存在 flaky 风险
+- **状态**: 待修复
+- **提交哈希**: `4c0cea6`
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/proxy/Socks5ConnectionPoolTest.kt` (borrowConnection_cleanupInvalidConnections_doesNotCloseValidConnectionWhenInUseFlips, L24-L103)
+- **问题描述**: 测试使用真实 `Thread` 和 `ReentrantReadWriteLock`，依赖 `Thread.yield()` 和固定 2 秒超时做同步。在 CPU 负载高的 CI 环境或 Windows 系统上，线程调度顺序无法保证，可能因超时而失败。
+- **风险**: **中**。flaky test 会降低团队对 CI 的信任度，增加调试成本。
+- **修复方式**: 使用 `CountDownLatch` 或 `Semaphore` 替代 `Thread.yield()` 和固定超时，实现确定性同步。
+
+### T7: `MainViewModelTest` 两个测试方法高度重复
+- **状态**: 待修复
+- **提交哈希**: `4c0cea6`
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/ui/viewmodel/MainViewModelTest.kt` (pairWithCode_withoutCellular_zerosAuthTokenArray, L455-L466; pairWithCode_withoutCellular_clearsUiStateAuthTokenCopy, L470-L484)
+- **问题描述**: 两个测试测试了完全相同的场景（无蜂窝网络时 `pairWithCode` 的行为），且断言内容几乎一致（`authToken.isEmpty()` 与 `authToken.size == 0` 等价）。
+- **风险**: **低**。增加维护负担，无额外覆盖价值。
+- **修复方式**: 合并为一个测试，或删除其中一个。
 
 
