@@ -465,6 +465,24 @@ class MainViewModelTest {
         assertTrue(viewModel.uiState.value.authToken.isEmpty())
     }
 
+    // N37-B8: verify the UiState authToken copy is also cleared on failed pairing
+    @Test
+    fun pairWithCode_withoutCellular_clearsUiStateAuthTokenCopy() = runTest {
+        every { networkStateManager.isCellularConnected() } returns false
+
+        val viewModel = MainViewModel(context, networkStateManager, mqttConnectionManager, wifiManager, authSessionStore)
+        advanceUntilIdle()
+
+        viewModel.pairWithCode("222333")
+        advanceUntilIdle()
+
+        // UiState authToken should be CharArray(0), not a zeroed copy of the original
+        val authToken = viewModel.uiState.value.authToken
+        assertEquals(0, authToken.size)
+        // Error message should be set
+        assertEquals("__ERR_CELLULAR_REQUIRED__", viewModel.uiState.value.errorMessage)
+    }
+
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------

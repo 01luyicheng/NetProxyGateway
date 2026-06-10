@@ -1,8 +1,12 @@
 package com.netproxy.gateway.connection
 
 import android.content.Context
+import io.mockk.every
 import io.mockk.mockk
+import io.mockk.slot
+import io.mockk.spyk
 import io.mockk.unmockkAll
+import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -97,6 +101,75 @@ class MqttConnectionManagerHeartbeatTest {
         assertTrue("Expected heartbeatJob to remain active", jobAfter?.isActive == true)
     }
 
+    // ==================== N37-B7: scheduleReconnect token copy test ====================
+
+    @Test
+    fun scheduleReconnect_createsOwnTokenCopy_originalZeroingDoesNotAffectReconnect() =
+        testScope.runTest {
+            val spyManager = spyk(MqttConnectionManager(context, testScope))
+
+            spyManager.setPrivateBooleanField("shouldStayConnected", true)
+            spyManager.setPrivateConnectionState(MqttConnectionState.Connected)
+
+            val generation = spyManager.getPrivateConnectionGeneration()
+            val originalToken = "secret-token".toCharArray()
+
+            // Mock connect() to capture the token argument
+            val tokenSlot = slot<CharArray>()
+            every { spyManager.connect(any(), capture(tokenSlot)) } answers {
+                // Simulate what connect() does: copy the token immediately
+                val tokenSnapshot = tokenSlot.captured.copyOf()
+                // Set activeTokenSnapshot via reflection so disconnect can clean up
+                val field =
+                    MqttConnectionManager::class.java.getDeclaredField("activeTokenSnapshot")
+                field.isAccessible = true
+                field.set(spyManager, tokenSnapshot)
+            }
+
+            // Call scheduleReconnect via reflection
+            spyManager.invokePrivateScheduleReconnect(
+                "device-123",
+                originalToken,
+                generation,
+            )
+
+            // Zero the original token (simulating startHeartbeat's finally block)
+            originalToken.fill('\u0000')
+
+            // Advance time past the reconnect delay
+            advanceTimeBy(INITIAL_RECONNECT_DELAY)
+            advanceUntilIdle()
+
+            // Verify connect() was called
+            verify { spyManager.connect(any(), any()) }
+
+            // The token passed to connect() should NOT be zeroed
+            assertTrue(
+                "scheduleReconnect should pass a non-zeroed token copy to connect(), " +
+                    "but got: ${tokenSlot.captured.toList()}",
+                tokenSlot.captured.contentEquals("secret-token".toCharArray()),
+            )
+
+            // Cleanup
+            spyManager.disconnect()
+            advanceUntilIdle()
+        }
+
+    private fun MqttConnectionManager.invokePrivateScheduleReconnect(
+        deviceId: String,
+        authToken: CharArray,
+        generation: Long,
+    ) {
+        val method = MqttConnectionManager::class.java.getDeclaredMethod(
+            "scheduleReconnect",
+            String::class.java,
+            CharArray::class.java,
+            java.lang.Long.TYPE,
+        )
+        method.isAccessible = true
+        method.invoke(this, deviceId, authToken, generation)
+    }
+
     private fun MqttConnectionManager.invokePrivateStartHeartbeat(
         deviceId: String,
         authToken: CharArray,
@@ -142,5 +215,6 @@ class MqttConnectionManagerHeartbeatTest {
     private companion object {
         private const val HEARTBEAT_INTERVAL_MS = 30_000L
         private const val MAX_FAILURES = 3
+        private const val INITIAL_RECONNECT_DELAY = 5_000L
     }
 }

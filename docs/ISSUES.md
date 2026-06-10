@@ -972,4 +972,20 @@
 - **风险**: **中**。多余的 CharArray 副本增加了 token 泄漏面。
 - **修复方式**: 只调用一次 `toCharArray()`，对返回值使用 `copyOf()` 创建独立副本。
 
+### N37-B7: `startHeartbeat()` 的 `finally` 清零 `tokenSnapshot` 导致 `scheduleReconnect()` 使用已清零 token
+- **状态**: 已修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (startHeartbeat → scheduleReconnect)
+- **问题描述**: N37-B4 修复在 `startHeartbeat()` 中添加了 `try-finally` 清零 `tokenSnapshot`。但当心跳连续失败达到 `MAX_HEARTBEAT_FAILURES` 时，`scheduleReconnect(deviceId, tokenSnapshot, generation)` 将 `tokenSnapshot` 传递给延迟协程。`scheduleReconnect()` 返回后，`finally` 块立即清零 `tokenSnapshot`。由于 `scheduleReconnect()` 的协程通过 lambda 捕获了 `authToken`（与 `tokenSnapshot` 是同一对象引用），延迟协程执行 `connect(deviceId, authToken)` 时 `authToken` 已被清零，`connect()` 复制的是空数组，导致 MQTT 重连静默认证失败。
+- **风险**: **高**。心跳失败触发的自动重连必然使用空 token 认证，用户看到持续 Error 状态但无法恢复连接。
+- **触发场景**: 网络不稳定导致 3 次连续心跳失败 → `startHeartbeat()` 调用 `scheduleReconnect()` → `finally` 清零 `tokenSnapshot` → 延迟后重连使用空 token → 认证失败 → 持续重连失败循环。
+- **修复方式**: `scheduleReconnect()` 在入口处立即创建 `authToken.copyOf()` 作为独立副本（`tokenCopy`），在协程的 `try-finally` 中清零 `tokenCopy`，确保调用方清零其引用不影响重连使用的副本。
+
+### N37-B8: `pairWithCode()` 非蜂窝路径未清零 UiState 中的 `authToken` 副本
+- **状态**: 已修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (pairWithCode)
+- **问题描述**: N37-B2 修复在 `pairWithCode()` 中将 `authTokenArray.copyOf()` 写入 UiState。但在蜂窝网络不可用的 else 分支中，仅清零了原始 `authTokenArray`，未将 UiState 中的 `authToken` 重置为 `CharArray(0)`。UiState 中的 token 副本持续驻留内存，直到 `disconnect()` 或 `onCleared()` 被调用。
+- **风险**: **中**。配对失败后 token 明文仍在 UiState 中残留，内存转储可提取。
+- **触发场景**: 用户在无蜂窝网络时尝试配对 → `pairWithCode()` 进入 else 分支 → 原始数组被清零但 UiState 中的副本未清零 → token 残留内存。
+- **修复方式**: 在 else 分支的 `_uiState.update` 中添加 `authToken = CharArray(0)`。
+
 

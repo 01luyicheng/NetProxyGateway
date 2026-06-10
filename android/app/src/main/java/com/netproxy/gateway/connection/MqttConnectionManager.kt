@@ -502,24 +502,30 @@ class MqttConnectionManager @Inject constructor(
     }
 
     private fun scheduleReconnect(deviceId: String, authToken: CharArray, generation: Long) {
+        // N37-B7 fix: create own copy immediately so caller can safely zero its reference
+        val tokenCopy = authToken.copyOf()
         lateinit var jobToStart: Job
         synchronized(this@MqttConnectionManager) {
             reconnectJob?.cancel()
             jobToStart = scope.launch(start = CoroutineStart.LAZY) {
-                val delayMs = synchronized(this@MqttConnectionManager) { reconnectDelay }
-                delay(delayMs)
-                if (!shouldStayConnected || generation != connectionGeneration.get()) {
-                    return@launch
-                }
-                synchronized(this@MqttConnectionManager) {
-                    _diagnostics.update {
-                        it.copy(
-                            reconnectDelay = reconnectDelay,
-                            reconnectCount = it.reconnectCount + 1
-                        )
+                try {
+                    val delayMs = synchronized(this@MqttConnectionManager) { reconnectDelay }
+                    delay(delayMs)
+                    if (!shouldStayConnected || generation != connectionGeneration.get()) {
+                        return@launch
                     }
+                    synchronized(this@MqttConnectionManager) {
+                        _diagnostics.update {
+                            it.copy(
+                                reconnectDelay = reconnectDelay,
+                                reconnectCount = it.reconnectCount + 1
+                            )
+                        }
+                    }
+                    connect(deviceId, tokenCopy)
+                } finally {
+                    tokenCopy.fill('\u0000')
                 }
-                connect(deviceId, authToken)
             }
             reconnectJob = jobToStart
         }
