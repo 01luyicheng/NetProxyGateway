@@ -384,13 +384,15 @@ class MainViewModel @Inject constructor(
         authSessionStore.clear()
         toggleVpn(false)
         _uiState.update { current ->
-            current.authToken.fill('\u0000')
-            current.copy(
+            val tokenToClear = current.authToken
+            val updated = current.copy(
                 isConnected = false,
                 isPaired = false,
                 peerId = "",
                 authToken = CharArray(0)
             )
+            tokenToClear.fill('\u0000')
+            updated
         }
     }
 }
