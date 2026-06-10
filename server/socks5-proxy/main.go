@@ -1443,9 +1443,13 @@ func (s *SOCKS5Server) relay(clientConn, targetConn net.Conn) error {
 	}
 
 	copyStream := func(dst, src net.Conn) {
-		defer recovery.RecoverAction("relay.copyStream", func() {
-			closeOnce.Do(closeConnections)
-		})
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("Panic in relay.copyStream: %v", r)
+				closeOnce.Do(closeConnections)
+				errChan <- fmt.Errorf("copyStream panic: %v", r)
+			}
+		}()
 		_, err := io.Copy(dst, src)
 		closeOnce.Do(closeConnections)
 		errChan <- err

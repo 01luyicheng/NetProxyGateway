@@ -797,13 +797,6 @@
 
 > 以下问题由 subagent 多维度代码审查发现；**待验证修复**。
 
-### REF1: `relay.copyStream` 替换后丢失 `errChan` 写入，导致 `relay` 死锁
-- **状态**: 待修复
-- **位置**: `server/socks5-proxy/main.go` (L1445-L1452)
-- **问题描述**: 原始内联 defer/recover 代码在 `copyStream` panic 时会同时执行 `closeOnce.Do(closeConnections)` **和** `errChan <- fmt.Errorf("copyStream panic: %w", errors.New(fmt.Sprint(r)))`。新代码使用 `recovery.RecoverAction` 后仅保留了清理 action，**完全丢失了 `errChan` 写入**。`relay` 函数中 `for i := 0; i < 2; i++` 严格等待两次 `errChan` 接收，若任一 goroutine panic，另一 goroutine 仅写入一次，`relay` 将在第二次 `<-errChan` 时**永久阻塞**。
-- **风险**: **高**。SOCKS5 relay 在任一方向发生 panic 时会导致整个连接永久挂起。
-- **建议修复**: 此位置不适合使用 `RecoverAction`（无法同时满足"执行清理"和"向通道写错误"）。建议恢复为内联 defer，或扩展 `RecoverAction` 支持错误通道写入回调。
-
 ### REF2: `recovery_test.go` 中 `errors.Is` 断言为死代码
 - **状态**: 待修复
 - **位置**: `server/shared/recovery/recovery_test.go` (L42)
