@@ -17,8 +17,10 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -115,10 +117,12 @@ class MqttConnectionManagerHeartbeatTest {
             val originalToken = "secret-token".toCharArray()
 
             // Mock connect() to capture the token argument
-            val tokenSlot = slot<CharArray>()
-            every { spyManager.connect(any(), capture(tokenSlot)) } answers {
+            var capturedToken: CharArray? = null
+            every { spyManager.connect(any(), any()) } answers {
+                // Capture a copy immediately before any zeroing happens
+                capturedToken = secondArg<CharArray>().copyOf()
                 // Simulate what connect() does: copy the token immediately
-                val tokenSnapshot = tokenSlot.captured.copyOf()
+                val tokenSnapshot = secondArg<CharArray>().copyOf()
                 // Set activeTokenSnapshot via reflection so disconnect can clean up
                 val field =
                     MqttConnectionManager::class.java.getDeclaredField("activeTokenSnapshot")
@@ -144,10 +148,11 @@ class MqttConnectionManagerHeartbeatTest {
             verify { spyManager.connect(any(), any()) }
 
             // The token passed to connect() should NOT be zeroed
+            assertNotNull(capturedToken)
             assertTrue(
                 "scheduleReconnect should pass a non-zeroed token copy to connect(), " +
-                    "but got: ${tokenSlot.captured.toList()}",
-                tokenSlot.captured.contentEquals("secret-token".toCharArray()),
+                    "but got: ${capturedToken!!.toList()}",
+                capturedToken!!.contentEquals("secret-token".toCharArray()),
             )
 
             // Cleanup
