@@ -403,7 +403,7 @@ class AuthSessionStoreTest {
     }
 
     @Test
-    fun isValid_withEmptyToken_shouldReturnTrueWhenStoredTokenIsAlsoEmpty() {
+    fun isValid_withEmptyToken_shouldReturnFalse() {
         // 设置空token会话
         every { encryptedPrefs.getString("device_id", null) } returns "device-123"
         every { encryptedPrefs.getString("auth_token", null) } returns ""
@@ -849,5 +849,28 @@ class AuthSessionStoreTest {
         assertNotNull("clear method should exist", clearMethod)
         assertNotNull("isValid method should exist", isValidMethod)
         assertNotNull("getCurrentSession method should exist", getCurrentSessionMethod)
+    }
+
+    // ==================== CharArray 生命周期测试 (N37-B6) ====================
+
+    @Test
+    fun loadSession_returnsCopyNotSameReferenceAsInMemoryToken() = runTest {
+        // Update to populate inMemoryToken
+        authSessionStore.update("device-1", "secret-token".toCharArray())
+        advanceUntilIdle()
+
+        val session1 = authSessionStore.getCurrentSession()
+        val session2 = authSessionStore.getCurrentSession()
+
+        assertNotNull(session1)
+        assertNotNull(session2)
+
+        // Both sessions should have equal content but different CharArray references
+        assertTrue(session1!!.authToken.contentEquals(session2!!.authToken))
+        // The returned CharArray should be a copy, not the same reference as inMemoryToken
+        // (Modifying one should not affect the other)
+        session1.authToken.fill('\u0000')
+        assertFalse(session2.authToken.contentEquals(CharArray("secret-token".length)))
+        assertTrue(session2.authToken.contentEquals("secret-token".toCharArray()))
     }
 }

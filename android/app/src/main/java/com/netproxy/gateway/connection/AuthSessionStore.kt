@@ -143,11 +143,8 @@ class AuthSessionStore @Inject constructor(
     fun isValid(username: String, password: CharArray): Boolean {
         val session = loadSession() ?: return false
         return try {
-            if (session.deviceId != username) {
-                false
-            } else {
-                constantTimeEquals(session.authToken, password)
-            }
+            if (session.deviceId != username) false
+            else constantTimeEquals(session.authToken, password)
         } finally {
             session.authToken.fill('\u0000')
         }
@@ -199,7 +196,6 @@ class AuthSessionStore @Inject constructor(
         val storedDeviceId = encryptedPrefs.getString(KEY_DEVICE_ID, null) ?: return null
         val storedToken = encryptedPrefs.getString(KEY_AUTH_TOKEN, null) ?: return null
         inMemoryDeviceId = storedDeviceId
-        inMemoryToken?.fill('\u0000')
         val tokenArray = storedToken.toCharArray()
         inMemoryToken = tokenArray
         return ProxyAuthSession(storedDeviceId, tokenArray.copyOf())

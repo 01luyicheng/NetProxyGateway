@@ -921,4 +921,55 @@
 - **风险**: **中**。核心交互逻辑缺乏回归保护，重构风险大。
 - **建议修复**: 为 `VpnService.processPacket` 的路由决策补充单元测试，使用 mock 的 `ConnectionSessionManager`。
 
+---
+
+## CharArray 生命周期审查发现（2026-06-07，审查 PR #18 fix/n37-auth-chararray-security-v2）
+
+> 以下问题由 N37 CharArray 安全修复的深度审查发现；**已在本分支修复**。
+
+### N37-B1: `disconnect()` 就地修改 StateFlow 旧值的 `authToken` CharArray
+- **状态**: 已修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (disconnect)
+- **问题描述**: `disconnect()` 中 `current.authToken.fill('\u0000')` 直接修改了 `MutableStateFlow` 当前值中的 CharArray。由于 `data class copy()` 对 CharArray 执行浅拷贝，多个 UiState 实例共享同一 CharArray 引用。就地 fill 会破坏状态不可变性，可能导致并发读取时数据不一致。
+- **风险**: **高**。状态不可变性被破坏，并发读取时可能读到已清零的 token。
+- **修复方式**: 先保存旧 token 引用，再创建新状态，最后清零旧引用。
+
+### N37-B2: `pairWithCode()` 未将 `authToken` 写入 `UiState`
+- **状态**: 已修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (pairWithCode)
+- **问题描述**: `pairWithCode()` 创建了 `authTokenArray` 并传给 `authSessionStore` 和 `mqttConnectionManager`，但从未更新 `_uiState` 中的 `authToken` 字段。`UiState.authToken` 始终为 `CharArray(0)`，导致 `disconnect()` 中的清零操作无效（对空数组 fill 无意义）。
+- **风险**: **高**。安全设计形同虚设——token 从未在 UiState 中存储，disconnect 清零逻辑无效。
+- **修复方式**: 在 `pairWithCode()` 中将 `authTokenArray.copyOf()` 写入 UiState。
+
+### N37-B3: `connectionLost()` 传递原始 `authToken` 而非 `tokenSnapshot`
+- **状态**: 已修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (connectionLost callback)
+- **问题描述**: `connectionLost` 回调中 `scheduleReconnect(deviceId, authToken, generation)` 传递的是 `connect()` 方法的参数 `authToken`，而 catch 块中 `scheduleReconnect(deviceId, tokenSnapshot, generation)` 传递的是 `tokenSnapshot`（`authToken.copyOf()`）。如果调用方在 `connect()` 返回后清零了原始 `authToken`，`connectionLost` 回调将使用已清零的数组，导致重连认证失败。
+- **风险**: **高**。MQTT 重连时可能使用已清零的 token，导致静默认证失败。
+- **修复方式**: 统一使用 `tokenSnapshot`，确保回调中使用的是受控副本。
+
+### N37-B4: `MqttConnectionManager` 中 `tokenSnapshot` 从未清零
+- **状态**: 已修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (connect, startHeartbeat, disconnect)
+- **问题描述**: `connect()` 中 `val tokenSnapshot = authToken.copyOf()` 和 `startHeartbeat()` 中 `val tokenSnapshot = authToken.copyOf()` 创建了 CharArray 副本，但这些副本在整个协程生命周期内持续存在，从未被 `fill('\u0000')` 清零。这是 N37 CharArray 安全修复的最大泄漏点——token 明文在内存中长时间驻留。
+- **风险**: **高**。直接抵消 CharArray 安全设计的核心目的，内存转储可提取明文 token。
+- **修复方式**: 
+  1. 在 `connect()` 中将 `tokenSnapshot` 存储为 `activeTokenSnapshot` 实例变量
+  2. 在 `disconnect()` 中清零 `activeTokenSnapshot`
+  3. 在 `startHeartbeat()` 的协程中添加 `try-finally`，在 `finally` 中清零 `tokenSnapshot`
+
+### N37-B5: `MainViewModel` 缺少 `onCleared()` 覆写，CharArray token 在 ViewModel 销毁时未清零
+- **状态**: 已修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt`
+- **问题描述**: `MainViewModel` 继承自 `ViewModel`，但没有覆写 `onCleared()`。当 Activity/Fragment 销毁时，`UiState.authToken` 中的 CharArray 不会被清零。JVM 的垃圾回收不保证立即清除内存中的敏感数据。
+- **风险**: **高**。敏感凭证在 ViewModel 生命周期结束后仍可被内存转储攻击读取。
+- **修复方式**: 覆写 `onCleared()`，清零 `_uiState.value.authToken`。
+
+### N37-B6: `loadSession()` 中 `storedToken.toCharArray()` 创建双副本
+- **状态**: 已修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/AuthSessionStore.kt` (loadSession)
+- **问题描述**: `storedToken.toCharArray()` 被调用了两次，创建了两个独立的 CharArray 副本。一个赋给 `inMemoryToken`，另一个作为返回值的 `authToken`。两份副本都需要被清零，但返回给调用者的副本不受 `AuthSessionStore` 管理。
+- **风险**: **中**。多余的 CharArray 副本增加了 token 泄漏面。
+- **修复方式**: 只调用一次 `toCharArray()`，对返回值使用 `copyOf()` 创建独立副本。
+
 

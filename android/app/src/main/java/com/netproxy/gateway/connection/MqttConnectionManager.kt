@@ -90,6 +90,7 @@ class MqttConnectionManager @Inject constructor(
     private var connectJob: Job? = null
     private @Volatile var shouldStayConnected: Boolean = false
     private val connectionGeneration = AtomicLong(0)
+    private var activeTokenSnapshot: CharArray? = null
 
     private val _connectionState = MutableStateFlow<MqttConnectionState>(MqttConnectionState.Disconnected)
     val connectionState: StateFlow<MqttConnectionState> = _connectionState.asStateFlow()
@@ -280,6 +281,10 @@ class MqttConnectionManager @Inject constructor(
 
     fun connect(deviceId: String, authToken: CharArray) {
         val tokenSnapshot = authToken.copyOf()
+        synchronized(this@MqttConnectionManager) {
+            activeTokenSnapshot?.fill('\u0000')
+            activeTokenSnapshot = tokenSnapshot
+        }
         var generation = 0L
         lateinit var jobToStart: Job
         synchronized(this@MqttConnectionManager) {
@@ -446,7 +451,7 @@ class MqttConnectionManager @Inject constructor(
 
                 // N80: 先触发已注册的 topicCallbacks，再执行默认订阅
                 // 这样 VpnService 中通过 subscribe() 注册的 disconnect 监听器会被保留
-                startHeartbeat(deviceId, tokenSnapshot, generation)
+                startHeartbeat(deviceId, authToken, generation)
 
                 } catch (e: Exception) {
                     val clientToClose = localClient
@@ -477,8 +482,6 @@ class MqttConnectionManager @Inject constructor(
                         onReconnectAttemptFailed()
                         scheduleReconnect(deviceId, tokenSnapshot, generation)
                     }
-                } finally {
-                    tokenSnapshot.fill('\u0000')
                 }
             }
 
@@ -532,57 +535,57 @@ class MqttConnectionManager @Inject constructor(
         heartbeatJob = scope.launch {
             val tokenSnapshot = authToken.copyOf()
             try {
-                var consecutiveFailures = 0
-                while (
-                    shouldStayConnected &&
-                    generation == connectionGeneration.get() &&
-                    _connectionState.value == MqttConnectionState.Connected
-                ) {
-                    delay(HEARTBEAT_INTERVAL)
-                    if (!shouldStayConnected || generation != connectionGeneration.get()) {
-                        break
-                    }
-                    val result = publishWithResult(
-                        "device/$deviceId/heartbeat",
-                        "{\"status\":\"alive\"}",
-                        logError = false
-                    )
-                    if (result.isSuccess()) {
-                        consecutiveFailures = 0
-                        _diagnostics.update {
-                            it.copy(
-                                lastHeartbeatTime = System.currentTimeMillis(),
-                                consecutiveHeartbeatFailures = 0
-                            )
-                        }
-                        continue
-                    }
-
-                    val heartbeatException = result.exceptionOrNull()
-                    if (heartbeatException == null) {
-                        logger.error("Heartbeat publish error")
-                    } else {
-                        val summary = when (heartbeatException) {
-                            is MqttException -> "MqttException(reasonCode=${heartbeatException.reasonCode})"
-                            else -> heartbeatException.javaClass.simpleName
-                        }
-                        logger.error("Heartbeat publish error: $summary")
-                    }
-                    consecutiveFailures++
-                    _diagnostics.update {
-                        it.copy(consecutiveHeartbeatFailures = consecutiveFailures)
-                    }
-                    if (consecutiveFailures >= MAX_HEARTBEAT_FAILURES) {
-                        logger.warn("Max heartbeat failures reached, triggering reconnect")
-                        AppAuditLogStore.warn("MQTT", "Max heartbeat failures reached; reconnecting")
-                        if (shouldStayConnected && generation == connectionGeneration.get()) {
-                            _connectionState.value = MqttConnectionState.Error("Max heartbeat failures reached")
-                            onReconnectAttemptFailed()
-                            scheduleReconnect(deviceId, tokenSnapshot, generation)
-                        }
-                        break
-                    }
+            var consecutiveFailures = 0
+            while (
+                shouldStayConnected &&
+                generation == connectionGeneration.get() &&
+                _connectionState.value == MqttConnectionState.Connected
+            ) {
+                delay(HEARTBEAT_INTERVAL)
+                if (!shouldStayConnected || generation != connectionGeneration.get()) {
+                    break
                 }
+                val result = publishWithResult(
+                    "device/$deviceId/heartbeat",
+                    "{\"status\":\"alive\"}",
+                    logError = false
+                )
+                if (result.isSuccess()) {
+                    consecutiveFailures = 0
+                    _diagnostics.update {
+                        it.copy(
+                            lastHeartbeatTime = System.currentTimeMillis(),
+                            consecutiveHeartbeatFailures = 0
+                        )
+                    }
+                    continue
+                }
+
+                val heartbeatException = result.exceptionOrNull()
+                if (heartbeatException == null) {
+                    logger.error("Heartbeat publish error")
+                } else {
+                    val summary = when (heartbeatException) {
+                        is MqttException -> "MqttException(reasonCode=${heartbeatException.reasonCode})"
+                        else -> heartbeatException.javaClass.simpleName
+                    }
+                    logger.error("Heartbeat publish error: $summary")
+                }
+                consecutiveFailures++
+                _diagnostics.update {
+                    it.copy(consecutiveHeartbeatFailures = consecutiveFailures)
+                }
+                if (consecutiveFailures >= MAX_HEARTBEAT_FAILURES) {
+                    logger.warn("Max heartbeat failures reached, triggering reconnect")
+                    AppAuditLogStore.warn("MQTT", "Max heartbeat failures reached; reconnecting")
+                    if (shouldStayConnected && generation == connectionGeneration.get()) {
+                        _connectionState.value = MqttConnectionState.Error("Max heartbeat failures reached")
+                        onReconnectAttemptFailed()
+                        scheduleReconnect(deviceId, tokenSnapshot, generation)
+                    }
+                    break
+                }
+            }
             } finally {
                 tokenSnapshot.fill('\u0000')
             }
@@ -670,6 +673,9 @@ class MqttConnectionManager @Inject constructor(
             connectJob?.cancel()
             connectJob = null
             reconnectDelay = INITIAL_RECONNECT_DELAY
+
+            activeTokenSnapshot?.fill('\u0000')
+            activeTokenSnapshot = null
 
             val c = mqttClient
             mqttClient = null
