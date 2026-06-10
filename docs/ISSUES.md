@@ -1015,23 +1015,22 @@
 > 以下问题由 subagent 多维度代码审查发现；**待修复**。
 
 ### C81: `connect()` 传递原始 `authToken` 给 `startHeartbeat()`
-- **状态**: 待修复
-- **提交哈希**: `4c0cea6`
+- **状态**: 已修复
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (connect, L454)
 - **问题描述**: `connect()` 内部已创建 `tokenSnapshot = authToken.copyOf()`，但调用 `startHeartbeat()` 时传递的是原始 `authToken` 参数而非 `tokenSnapshot`。如果调用方在 `connect()` 返回后立即清零 `authToken`，`startHeartbeat()` 内部的 `copyOf()` 将复制空数组，导致心跳失败后的重连使用空 token。
 - **风险**: **高**。与 N37-B3 同类问题，心跳协程可能复制已清零的 token。
+- **触发场景**: `scheduleReconnect` 调用 `connect(deviceId, tokenCopy)` → `connect()` 返回后 `scheduleReconnect` 的 finally 块立即清零 `tokenCopy` → `connect()` 内部协程执行到 `startHeartbeat(deviceId, authToken, generation)` 时 `authToken`(即 `tokenCopy`)已被清零 → `startHeartbeat` 创建空 `tokenSnapshot` → 心跳失败后 `scheduleReconnect` 使用空 token → 认证失败 → 持续重连失败循环。
 - **修复方式**: 将 `startHeartbeat(deviceId, authToken, generation)` 改为 `startHeartbeat(deviceId, tokenSnapshot, generation)`。
 
 ### C82: `pairWithCode()` 成功路径未清零局部 `authTokenArray`
-- **状态**: 待修复
-- **提交哈希**: `4c0cea6`
+- **状态**: 已修复
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (pairWithCode, L305-326)
 - **问题描述**: `pairWithCode()` 成功路径（蜂窝网络可用分支）中，`authTokenArray` 被传递给 `authSessionStore.update()` 和 `mqttConnectionManager.connect()`（两者内部会 copy），但 `authTokenArray` 本身在方法结束前从未被清零。只有 `else` 分支（失败路径）中执行了 `authTokenArray.fill('\u0000')`。
 - **风险**: **中**。配对成功后局部变量仍持有原始 token 引用，直到方法栈帧销毁。
 - **修复方式**: 在成功路径末尾（`mqttConnectionManager.connect()` 调用后）添加 `authTokenArray.fill('\u0000')`。
 
 ### T1: `Socks5ConnectionPoolTest` N37-B10 测试虚假通过
-- **状态**: 待修复
+- **状态**: 已修复
 - **提交哈希**: `4c0cea6`
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/proxy/Socks5ConnectionPoolTest.kt` (n37b10_createNewConnection_zerosCredentialPasswordAfterUse, L341-L371)
 - **问题描述**: 测试声明验证 `credentialPassword` 在使用后被清零，但断言仅检查原始 `secretPassword` 未被修改，完全没有捕获 `credentialProvider` 返回的 **copy** 的引用。即使生产代码中 `credentialPassword?.fill('\u0000')` 被意外删除，该测试仍会通过。
@@ -1039,7 +1038,7 @@
 - **修复方式**: 在 `credentialProvider` lambda 中将返回的 copy 捕获到外部变量，在 `borrowConnection` 后断言该 copy 已被 zeroed。
 
 ### T2: `AuthSessionStoreTest` 测试名与断言矛盾
-- **状态**: 待修复
+- **状态**: 已修复
 - **提交哈希**: `4c0cea6`
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/connection/AuthSessionStoreTest.kt` (isValid_withEmptyToken_shouldReturnFalse, L406-L415)
 - **问题描述**: 测试方法名明确声明 `shouldReturnFalse`，但实际断言为 `assertTrue(result)`。注释说明意图是"空字符串应该匹配"，但名实严重不符，会导致维护者误解。
@@ -1047,7 +1046,7 @@
 - **修复方式**: 将方法重命名为 `isValid_withEmptyToken_shouldReturnTrue`，或根据业务需求修正断言和注释。
 
 ### T3: `AuthSessionStoreTest` `@Synchronized` 检查未完成
-- **状态**: 待修复
+- **状态**: 已修复
 - **提交哈希**: `4c0cea6`
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/connection/AuthSessionStoreTest.kt` (authSessionStore_methodsAreSynchronized, L838-L852)
 - **问题描述**: 测试注释声称"Check that key methods have @Synchronized annotation"，但代码仅使用 `assertNotNull` 验证四个方法存在，完全没有检查方法上是否有 `@Synchronized` 注解。

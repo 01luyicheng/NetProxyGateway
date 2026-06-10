@@ -317,6 +317,8 @@ class MainViewModel @Inject constructor(
                     deviceId = deviceIdSnapshot,
                     authToken = authTokenArray
                 )
+                // C82 fix: zero the local CharArray after both consumers have taken their own copies
+                authTokenArray.fill('\u0000')
             } else {
                 authTokenArray.fill('\u0000')
                 _uiState.update {

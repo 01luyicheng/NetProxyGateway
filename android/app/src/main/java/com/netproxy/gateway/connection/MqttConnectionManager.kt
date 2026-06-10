@@ -451,7 +451,10 @@ class MqttConnectionManager @Inject constructor(
 
                 // N80: 先触发已注册的 topicCallbacks，再执行默认订阅
                 // 这样 VpnService 中通过 subscribe() 注册的 disconnect 监听器会被保留
-                startHeartbeat(deviceId, authToken, generation)
+                // C81 fix: use tokenSnapshot instead of original authToken to avoid
+                // zeroed-array copy when caller (e.g. scheduleReconnect) zeroes its
+                // reference after connect() returns.
+                startHeartbeat(deviceId, tokenSnapshot, generation)
 
                 } catch (e: Exception) {
                     val clientToClose = localClient

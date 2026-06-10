@@ -160,6 +160,39 @@ class MqttConnectionManagerHeartbeatTest {
             advanceUntilIdle()
         }
 
+    // ==================== C81: connect() passes tokenSnapshot to startHeartbeat ====================
+
+    @Test
+    fun connect_createsTokenSnapshotIndependentOfOriginalAuth() =
+        testScope.runTest {
+            manager.setPrivateBooleanField("shouldStayConnected", true)
+            manager.setPrivateConnectionState(MqttConnectionState.Connected)
+
+            val originalToken = "heartbeat-secret".toCharArray()
+
+            // Call connect() - it should synchronously copy the token into tokenSnapshot
+            // and store it as activeTokenSnapshot
+            manager.connect("device-123", originalToken)
+
+            // Zero the original token after connect() returns (simulating
+            // scheduleReconnect's finally block zeroing its tokenCopy)
+            originalToken.fill('\u0000')
+
+            // activeTokenSnapshot should still contain the valid token,
+            // proving connect() made an independent copy (tokenSnapshot)
+            val activeSnapshot = manager.getPrivateActiveTokenSnapshot()
+            assertNotNull("activeTokenSnapshot should be set after connect()", activeSnapshot)
+            assertTrue(
+                "C81: activeTokenSnapshot (tokenSnapshot) should be independent of original authToken, " +
+                    "but got: ${activeSnapshot!!.toList()}",
+                activeSnapshot.contentEquals("heartbeat-secret".toCharArray()),
+            )
+
+            // Cleanup
+            manager.disconnect()
+            advanceUntilIdle()
+        }
+
     private fun MqttConnectionManager.invokePrivateScheduleReconnect(
         deviceId: String,
         authToken: CharArray,
@@ -215,6 +248,12 @@ class MqttConnectionManagerHeartbeatTest {
         val field = MqttConnectionManager::class.java.getDeclaredField("heartbeatJob")
         field.isAccessible = true
         return field.get(this) as? Job
+    }
+
+    private fun MqttConnectionManager.getPrivateActiveTokenSnapshot(): CharArray? {
+        val field = MqttConnectionManager::class.java.getDeclaredField("activeTokenSnapshot")
+        field.isAccessible = true
+        return field.get(this) as? CharArray
     }
 
     private companion object {

@@ -403,7 +403,7 @@ class AuthSessionStoreTest {
     }
 
     @Test
-    fun isValid_withEmptyToken_shouldReturnFalse() {
+    fun isValid_withEmptyToken_shouldReturnTrue() {
         // 设置空token会话
         every { encryptedPrefs.getString("device_id", null) } returns "device-123"
         every { encryptedPrefs.getString("auth_token", null) } returns ""
@@ -849,6 +849,12 @@ class AuthSessionStoreTest {
         assertNotNull("clear method should exist", clearMethod)
         assertNotNull("isValid method should exist", isValidMethod)
         assertNotNull("getCurrentSession method should exist", getCurrentSessionMethod)
+
+        // T3 fix: actually verify @Synchronized annotation is present
+        assertTrue("update should be @Synchronized", updateMethod!!.isAnnotationPresent(Synchronized::class.java))
+        assertTrue("clear should be @Synchronized", clearMethod!!.isAnnotationPresent(Synchronized::class.java))
+        assertTrue("isValid should be @Synchronized", isValidMethod!!.isAnnotationPresent(Synchronized::class.java))
+        assertTrue("getCurrentSession should be @Synchronized", getCurrentSessionMethod!!.isAnnotationPresent(Synchronized::class.java))
     }
 
     // ==================== CharArray 生命周期测试 (N37-B6) ====================

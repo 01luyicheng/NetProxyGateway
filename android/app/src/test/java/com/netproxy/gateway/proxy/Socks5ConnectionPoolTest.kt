@@ -339,7 +339,7 @@ class Socks5ConnectionPoolTest {
 
     @Test
     fun n37b10_createNewConnection_zerosCredentialPasswordAfterUse() {
-        var capturedPassword: CharArray? = null
+        var capturedPasswordCopy: CharArray? = null
         val secretPassword = "super-secret-token".toCharArray()
 
         val pool = Socks5ConnectionPool(
@@ -348,7 +348,9 @@ class Socks5ConnectionPoolTest {
                 cleanupIntervalMs = 60_000
             ),
             credentialProvider = {
-                Pair("user", secretPassword.copyOf())
+                val copy = secretPassword.copyOf()
+                capturedPasswordCopy = copy
+                Pair("user", copy)
             }
         )
 
@@ -357,9 +359,15 @@ class Socks5ConnectionPoolTest {
             // but the credentialProvider will be called and the password should be zeroed
             pool.borrowConnection("10.0.0.1", 443)
 
-            // The secretPassword copy provided by credentialProvider should have been zeroed
-            // in createNewConnection's finally block after the socket connection failed.
-            // We verify by checking that the original secretPassword is still intact
+            // T1 fix: verify the actual copy returned by credentialProvider was zeroed,
+            // not just that the original secretPassword is intact.
+            val copy = capturedPasswordCopy
+            assertNotNull("credentialProvider should have been called", copy)
+            assertTrue(
+                "Credential password copy should be zeroed after use",
+                copy!!.all { it == '\u0000' }
+            )
+            // Also verify the original secretPassword is still intact
             // (proving we zero the copy, not the original).
             assertTrue(
                 "Original secretPassword should remain intact",
