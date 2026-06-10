@@ -988,4 +988,20 @@
 - **触发场景**: 用户在无蜂窝网络时尝试配对 → `pairWithCode()` 进入 else 分支 → 原始数组被清零但 UiState 中的副本未清零 → token 残留内存。
 - **修复方式**: 在 else 分支的 `_uiState.update` 中添加 `authToken = CharArray(0)`。
 
+### N37-B9: `startHeartbeat()` 中 `tokenSnapshot` 从未清零
+- **状态**: 已修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (startHeartbeat)
+- **问题描述**: `startHeartbeat()` 创建 `tokenSnapshot = authToken.copyOf()` 用于心跳失败时传递给 `scheduleReconnect()`，但整个心跳协程没有 `try-finally` 块来清零 `tokenSnapshot`。当心跳协程退出时，`tokenSnapshot` 中的认证令牌仍驻留内存。
+- **风险**: **中**。心跳协程退出后 token 副本滞留内存，直到 GC 回收。
+- **触发场景**: 心跳协程因连接断开、ViewModel 销毁或状态变化而退出 → `tokenSnapshot` 未被清零 → token 残留内存。
+- **修复方式**: 在 `startHeartbeat()` 的协程体中添加 `try-finally`，在 `finally` 块中清零 `tokenSnapshot`。
+
+### N37-B10: `Socks5ConnectionPool.createNewConnection()` 未清零 `credentialProvider` 返回的 `CharArray`
+- **状态**: 已修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ConnectionPool.kt` (createNewConnection)
+- **问题描述**: `credentialProvider()` 返回 `Pair<String, CharArray>`，其中 `CharArray` 是认证令牌的副本。`createNewConnection()` 解构后，`password` 仅传递给 `createSocks5Socket()` → `performSocks5Handshake()`。虽然 `performSocks5Handshake()` 在 `finally` 中清零了编码后的 `passBytes`，但原始 `password` CharArray 从未被清零。每次创建 SOCKS5 连接都会泄漏一份认证令牌副本。
+- **风险**: **中**。每次 SOCKS5 连接创建都泄漏一份 token 副本，高并发场景下内存中可能同时存在多份明文 token。
+- **触发场景**: VPN 服务建立 SOCKS5 代理连接 → `createNewConnection()` 调用 `credentialProvider()` → 使用密码后未清零原始 CharArray → token 泄漏。
+- **修复方式**: 在 `createNewConnection()` 的 `finally` 块中清零 `credentialPassword`。
+
 
