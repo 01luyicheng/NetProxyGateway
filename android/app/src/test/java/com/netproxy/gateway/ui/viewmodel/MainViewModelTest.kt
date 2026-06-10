@@ -108,7 +108,12 @@ class MainViewModelTest {
         val uiState = viewModel.uiState.value
         assertEquals("123456", uiState.peerId)
         assertFalse(uiState.isPaired)
-        verify(exactly = 1) { mqttConnectionManager.connect("device-stable", "123456".toCharArray()) }
+        verify(exactly = 1) {
+            mqttConnectionManager.connect(
+                "device-stable",
+                match { it.contentEquals("123456".toCharArray()) }
+            )
+        }
     }
 
     @Test

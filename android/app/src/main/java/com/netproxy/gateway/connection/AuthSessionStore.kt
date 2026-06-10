@@ -200,8 +200,9 @@ class AuthSessionStore @Inject constructor(
         val storedToken = encryptedPrefs.getString(KEY_AUTH_TOKEN, null) ?: return null
         inMemoryDeviceId = storedDeviceId
         inMemoryToken?.fill('\u0000')
-        inMemoryToken = storedToken.toCharArray()
-        return ProxyAuthSession(storedDeviceId, storedToken.toCharArray())
+        val tokenArray = storedToken.toCharArray()
+        inMemoryToken = tokenArray
+        return ProxyAuthSession(storedDeviceId, tokenArray.copyOf())
     }
 
     private fun constantTimeEquals(left: CharArray, right: CharArray): Boolean {
