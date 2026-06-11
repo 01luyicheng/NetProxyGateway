@@ -804,13 +804,6 @@
 - **风险**: **中**。库包的可观测性和可集成性受限，但需与项目整体日志策略统一规划。
 - **建议修复**: 若项目未来需要统一日志收集，应在 `shared` 层面引入最小化 `Logger` 接口（如 `type Logger interface { Printf(format string, v ...any) }`），并将 `recovery`、`ratelimit` 等包一并改造；当前单点改动意义不大。
 
-### REF9: 缺少非字符串 panic value 的边界测试
-- **状态**: 待修复
-- **位置**: `server/shared/recovery/recovery_test.go`
-- **问题描述**: 所有 panic 测试均使用 `panic("test panic")`（字符串类型）。生产代码使用 `%v` 格式化 panic value，但未验证非字符串类型（如 `panic(123)`、`panic(nil)`、`panic(errors.New("err"))`）的行为。**验证发现**：项目使用 Go 1.22，`panic(nil)` 时 `recover()` 返回的是 `*runtime.PanicNilError`（值为 `"panic called with nil argument"`），`r != nil` 为 `true`，当前 `Recover` 可以正常恢复并执行日志和 named return 逻辑；但在旧版 Go 中行为不同，仍值得显式测试以锁定行为并防止未来退化。
-- **风险**: **中**。边界行为未经验证，生产环境中可能遇到意外表现；且 `fmt.Errorf` 中的格式字符串若被意外改为 `%s`，非字符串 panic value 会导致二次 panic。
-- **建议修复**: 增加 `panic(nil)`、`panic(123)`、结构化错误类型的测试用例。
-
 ### REF10: 包命名存在 stutter：`recovery.Recover`
 - **状态**: 无需修复
 - **位置**: `server/shared/recovery/recovery.go`

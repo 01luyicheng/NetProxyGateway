@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"bytes"
+	"errors"
 	"log"
 	"strings"
 	"testing"
@@ -283,5 +284,51 @@ func TestRecoverAction_WithBothIDs(t *testing.T) {
 	want := "Panic in test.action_both for stream stream-123 for device device-456: action panic"
 	if !strings.Contains(got, want) {
 		t.Errorf("log output does not match expected. want substring: %s, got: %s", want, got)
+	}
+}
+
+func TestRecover_WithPanic_IntValue(t *testing.T) {
+	fn := func() (err error) {
+		defer Recover("test.int_panic",
+			WithNamedReturn(nil, &err, "int panic"))
+		panic(123)
+	}
+
+	err := fn()
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "123") {
+		t.Errorf("expected error to contain '123', got: %v", err)
+	}
+}
+
+func TestRecover_WithPanic_NilValue(t *testing.T) {
+	fn := func() (err error) {
+		defer Recover("test.nil_panic",
+			WithNamedReturn(nil, &err, "nil panic"))
+		panic(nil)
+	}
+
+	err := fn()
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+func TestRecover_WithPanic_ErrorValue(t *testing.T) {
+	targetErr := errors.New("wrapped error")
+	fn := func() (err error) {
+		defer Recover("test.error_panic",
+			WithNamedReturn(nil, &err, "error panic"))
+		panic(targetErr)
+	}
+
+	err := fn()
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, targetErr) {
+		t.Errorf("expected errors.Is to find targetErr, got %v", err)
 	}
 }
