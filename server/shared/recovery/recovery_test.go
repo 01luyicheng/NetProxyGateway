@@ -455,3 +455,60 @@ func TestRecoverAction_WithPanic_ErrorValue(t *testing.T) {
 		t.Errorf("expected log to contain 'wrapped error', got: %s", got)
 	}
 }
+
+func TestWithLogger_Nil_DoesNotPanic(t *testing.T) {
+	var buf bytes.Buffer
+	oldOutput := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(oldOutput)
+
+	// WithLogger(nil) should fall back to the default logger, not cause a nil panic.
+	fn := func() (err error) {
+		defer Recover("test.nil_logger",
+			WithLogger(nil),
+			WithNamedReturn(nil, &err, "nil logger"))
+		panic("trigger")
+	}
+
+	err := fn()
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if err.Error() != "nil logger: trigger" {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	got := buf.String()
+	if !strings.Contains(got, "Panic in test.nil_logger: trigger") {
+		t.Errorf("expected default logger output, got: %s", got)
+	}
+}
+
+func TestRecoverAction_WithLogger_Nil_DoesNotPanic(t *testing.T) {
+	var buf bytes.Buffer
+	oldOutput := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(oldOutput)
+
+	actionCalled := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("RecoverAction did not recover from panic: %v", r)
+			}
+		}()
+		defer RecoverAction("test.nil_logger_action", func() {
+			actionCalled = true
+		}, WithLogger(nil))
+		panic("trigger")
+	}()
+
+	if !actionCalled {
+		t.Error("expected action to be called")
+	}
+
+	got := buf.String()
+	if !strings.Contains(got, "Panic in test.nil_logger_action: trigger") {
+		t.Errorf("expected default logger output, got: %s", got)
+	}
+}
