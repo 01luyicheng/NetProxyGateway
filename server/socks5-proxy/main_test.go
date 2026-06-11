@@ -943,34 +943,6 @@ func (p *panicConn) Read(b []byte) (int, error) {
 	panic("simulated read panic")
 }
 
-func (p *panicConn) Write(b []byte) (int, error) {
-	return p.Conn.Write(b)
-}
-
-func (p *panicConn) Close() error {
-	return p.Conn.Close()
-}
-
-func (p *panicConn) LocalAddr() net.Addr {
-	return p.Conn.LocalAddr()
-}
-
-func (p *panicConn) RemoteAddr() net.Addr {
-	return p.Conn.RemoteAddr()
-}
-
-func (p *panicConn) SetDeadline(t time.Time) error {
-	return p.Conn.SetDeadline(t)
-}
-
-func (p *panicConn) SetReadDeadline(t time.Time) error {
-	return p.Conn.SetReadDeadline(t)
-}
-
-func (p *panicConn) SetWriteDeadline(t time.Time) error {
-	return p.Conn.SetWriteDeadline(t)
-}
-
 // TestRelay_RecoversFromCopyStreamPanic verifies that relay does not deadlock
 // when copyStream panics. It acts as a regression test: if copyStream is ever
 // changed to only recover without writing to errChan, relay will deadlock and

@@ -851,13 +851,6 @@
 
 > 以下问题由 subagent 交叉审查第 6-10 次修复提交时发现；**待修复**。
 
-### XREF7: `panicConn` 方法重写冗余
-- **状态**: 建议优化
-- **位置**: `server/socks5-proxy/main_test.go` (L946-L972)
-- **问题描述**: `panicConn` 嵌入 `net.Conn` 接口并显式重写了全部 8 个方法。除 `Read` 外，其余方法均直接委托给 `p.Conn`，嵌入接口已隐式实现这些方法，显式重写是冗余的。
-- **风险**: **低**。不影响功能，增加代码噪音。
-- **建议修复**: 仅保留 `Read` 的 panic 重写，删除其他显式委托方法。
-
 ### XREF9: `RecoverAction` 的非字符串 panic value 未直接测试
 - **状态**: 建议优化
 - **位置**: `server/shared/recovery/recovery_test.go`
