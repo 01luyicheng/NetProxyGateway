@@ -856,6 +856,40 @@
 
 ---
 
+## 交叉审查发现（2026-06-11，审查范围：5次修复提交）
+
+> 以下问题由 subagent 交叉审查前 5 次修复提交时发现；**待修复**。
+
+### XREF1: `relay` panic 场景缺少回归测试
+- **状态**: 待修复
+- **位置**: `server/socks5-proxy/main.go` (L1436-L1466)
+- **问题描述**: REF1 修复了 `copyStream` panic 导致的死锁，但 `server/socks5-proxy/main_test.go` 中没有任何测试覆盖 goroutine panic 时 `relay` 是否能在超时内正常返回。如果未来有人将 `copyStream` 重新改为 `recovery.RecoverAction`，现有测试不会失败，死锁会重新引入。
+- **风险**: **中**。核心 panic 恢复路径缺乏回归保护。
+- **建议修复**: 补充一个注入 panic 的测试（通过自定义 `net.Conn` 在 `Read` 中 panic），验证 `relay` 在 panic 后仍正常返回且不阻塞。
+
+### XREF2: `RecoverAction` 文档注释未声明 action panic 捕获语义
+- **状态**: 待修复
+- **位置**: `server/shared/recovery/recovery.go` (L92-L102)
+- **问题描述**: REF5 为 `RecoverAction` 增加了内部 panic 屏障，但函数文档注释仍然只说 "recovers from panics, logs them, and executes the provided action function"，未说明 **action 函数自身的 panic 也会被捕获并记录**。调用者可能误以为 action panic 会向上传播，从而在外层包裹额外的 recover，导致行为不符合预期。
+- **风险**: **低**。文档与实现不一致，增加调用方困惑。
+- **建议修复**: 在注释中补充说明，例如 "If the action itself panics, the panic is also recovered and logged; it is not propagated to the caller."
+
+### XREF3: `TestRecoverAction_ActionPanics_Recovered` 未验证日志输出
+- **状态**: 待修复
+- **位置**: `server/shared/recovery/recovery_test.go` (L146-L164)
+- **问题描述**: REF5 新增的测试验证了 action panic 被捕获且 action 被调用，但未验证 `log.Printf` 是否正确输出 `"recovery action: ..."`。如果未来有人误删了内层的 `log.Printf`，测试仍会通过，日志能力退化不会被发现。
+- **风险**: **低**。日志逻辑缺乏回归保护。
+- **建议修复**: 使用 `log.SetOutput` 临时捕获日志输出，断言日志字符串包含 `"recovery action: action panic"`。
+
+### XREF4: `%w` 错误包装语义缺少回归保护测试
+- **状态**: 待修复
+- **位置**: `server/shared/recovery/recovery_test.go`
+- **问题描述**: REF3 恢复了 `%w` 包装语义，但 `TestRecover_WithNamedReturn` 仅断言 `err.Error()` 字符串内容。如果未来有人无意中将 `%w` 改回 `%v`，测试仍然会通过，但 `errors.Is`/`errors.As` 的 unwrap 能力会丢失。
+- **风险**: **低**。语义回归缺乏保护。
+- **建议修复**: 增加 `TestRecover_WithNamedReturn_ErrorType`，验证 `panic(targetErr)` 后 `errors.Is(err, targetErr)` 返回 `true`。
+
+---
+
 ## 提交审查发现（2026-06-06，审查提交 07aaa3b..0bf8c97）
 
 > 以下问题由今日提交审查发现；**待验证修复**。
