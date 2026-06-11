@@ -178,6 +178,11 @@ func TestRecover_NilNamedReturnPointers(t *testing.T) {
 }
 
 func TestRecoverAction_ActionPanics_Recovered(t *testing.T) {
+	var buf bytes.Buffer
+	oldOutput := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(oldOutput)
+
 	actionCalled := false
 	func() {
 		defer func() {
@@ -194,6 +199,11 @@ func TestRecoverAction_ActionPanics_Recovered(t *testing.T) {
 
 	if !actionCalled {
 		t.Error("expected action to be called")
+	}
+
+	got := buf.String()
+	if !strings.Contains(got, "recovery action: action panic") {
+		t.Errorf("expected log to contain action panic message, got: %s", got)
 	}
 }
 

@@ -839,13 +839,6 @@
 
 > 以下问题由 subagent 交叉审查前 5 次修复提交时发现；**待修复**。
 
-### XREF3: `TestRecoverAction_ActionPanics_Recovered` 未验证日志输出
-- **状态**: 待修复
-- **位置**: `server/shared/recovery/recovery_test.go` (L146-L164)
-- **问题描述**: REF5 新增的测试验证了 action panic 被捕获且 action 被调用，但未验证 `log.Printf` 是否正确输出 `"recovery action: ..."`。如果未来有人误删了内层的 `log.Printf`，测试仍会通过，日志能力退化不会被发现。
-- **风险**: **低**。日志逻辑缺乏回归保护。
-- **建议修复**: 使用 `log.SetOutput` 临时捕获日志输出，断言日志字符串包含 `"recovery action: action panic"`。
-
 ### XREF4: `%w` 错误包装语义缺少回归保护测试
 - **状态**: 已修复（被 REF9 覆盖）
 - **位置**: `server/shared/recovery/recovery_test.go`
