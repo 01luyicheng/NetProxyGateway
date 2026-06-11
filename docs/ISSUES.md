@@ -839,13 +839,6 @@
 
 > 以下问题由 subagent 交叉审查前 5 次修复提交时发现；**待修复**。
 
-### XREF2: `RecoverAction` 文档注释未声明 action panic 捕获语义
-- **状态**: 待修复
-- **位置**: `server/shared/recovery/recovery.go` (L92-L102)
-- **问题描述**: REF5 为 `RecoverAction` 增加了内部 panic 屏障，但函数文档注释仍然只说 "recovers from panics, logs them, and executes the provided action function"，未说明 **action 函数自身的 panic 也会被捕获并记录**。调用者可能误以为 action panic 会向上传播，从而在外层包裹额外的 recover，导致行为不符合预期。
-- **风险**: **低**。文档与实现不一致，增加调用方困惑。
-- **建议修复**: 在注释中补充说明，例如 "If the action itself panics, the panic is also recovered and logged; it is not propagated to the caller."
-
 ### XREF3: `TestRecoverAction_ActionPanics_Recovered` 未验证日志输出
 - **状态**: 待修复
 - **位置**: `server/shared/recovery/recovery_test.go` (L146-L164)

@@ -90,7 +90,9 @@ func Recover(component string, opts ...Option) {
 }
 
 // RecoverAction must be called via defer. It recovers from panics, logs them,
-// and executes the provided action function.
+// and executes the provided action function. If the action function itself
+// panics, that panic is also recovered and logged; it will not propagate
+// to the caller.
 //
 // Usage:
 //
