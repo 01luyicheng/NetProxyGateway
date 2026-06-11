@@ -860,6 +860,26 @@
 
 ---
 
+## 交叉审查发现（2026-06-11，审查范围：第11-15次修复提交）
+
+> 以下问题由 subagent 交叉审查第 11-15 次修复提交时发现；**待修复/建议优化**。
+
+### XREF10: `relay()` 使用字符串前缀匹配识别 panic 错误，建议升级为自定义错误类型
+- **状态**: 建议优化
+- **位置**: `server/socks5-proxy/main.go` (L1465 附近)
+- **问题描述**: `relay()` 通过 `strings.Contains(err.Error(), "copyStream panic:")` 识别 panic 错误。虽然该前缀是内部闭包专用的，但字符串匹配在重构时容易不一致（例如修改了 `copyStream` 中的错误格式但忘记同步修改 `relay()` 的识别逻辑）。
+- **风险**: **低**。当前功能正确，但存在未来重构不同步的脆弱性。
+- **建议修复**: 定义自定义错误类型（如 `type copyStreamPanicError struct{ cause any }`），在 `copyStream` 中使用该类型包装 panic，在 `relay()` 中使用 `errors.As` 识别。
+
+### XREF11: `TestRecoverAction_ActionPanics_Recovered` 日志断言粒度偏粗
+- **状态**: 建议优化
+- **位置**: `server/shared/recovery/recovery_test.go` (L204-L207)
+- **问题描述**: 测试仅验证日志包含 `"recovery action: action panic"` 子串，未验证日志中包含正确的 component 名称（`"test.action_panics"`）和 `"Panic in"` 前缀。如果未来有人重构日志格式时保留了该子串但移除了前面结构，测试会误通过。
+- **风险**: **低**。当前无害，但断言精度不足。
+- **建议修复**: 将断言改为验证完整前缀，例如 `"Panic in test.action_panics recovery action: action panic"`。
+
+---
+
 ## 提交审查发现（2026-06-06，审查提交 07aaa3b..0bf8c97）
 
 > 以下问题由今日提交审查发现；**待验证修复**。
