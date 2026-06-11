@@ -804,13 +804,6 @@
 - **风险**: **中**。库包的可观测性和可集成性受限，但需与项目整体日志策略统一规划。
 - **建议修复**: 若项目未来需要统一日志收集，应在 `shared` 层面引入最小化 `Logger` 接口（如 `type Logger interface { Printf(format string, v ...any) }`），并将 `recovery`、`ratelimit` 等包一并改造；当前单点改动意义不大。
 
-### REF7: 未验证日志输出内容
-- **状态**: 待修复
-- **位置**: `server/shared/recovery/recovery_test.go`
-- **问题描述**: `TestRecover_WithStreamID`、`TestRecover_WithDeviceID`、`TestRecover_WithBothIDs` 仅在注释中写明预期日志格式，但没有任何测试实际捕获和断言 `log.Printf` 的输出。这导致 `formatMessage()` 的实现缺陷无法被检测到。
-- **风险**: **中**。日志格式化逻辑缺乏回归保护。
-- **建议修复**: 使用 `log.Writer()` 或 `slog` 可替换 writer 机制捕获输出，并断言日志字符串包含预期的 `streamID`、`deviceID` 和 panic value。
-
 ### REF8: `RecoverAction` 与 `Option` 的组合未测试
 - **状态**: 待修复
 - **位置**: `server/shared/recovery/recovery_test.go`

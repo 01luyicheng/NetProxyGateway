@@ -1,6 +1,9 @@
 package recovery
 
 import (
+	"bytes"
+	"log"
+	"strings"
 	"testing"
 )
 
@@ -43,6 +46,11 @@ func TestRecover_WithNamedReturn(t *testing.T) {
 }
 
 func TestRecover_WithStreamID(t *testing.T) {
+	var buf bytes.Buffer
+	oldOutput := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(oldOutput)
+
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -52,10 +60,20 @@ func TestRecover_WithStreamID(t *testing.T) {
 		defer Recover("test.stream", WithStreamID("stream-123"))
 		panic("test panic")
 	}()
-	// Should log: "Panic in test.stream for stream stream-123: test panic"
+
+	got := buf.String()
+	want := "Panic in test.stream for stream stream-123: test panic"
+	if !strings.Contains(got, want) {
+		t.Errorf("log output does not match expected. want substring: %s, got: %s", want, got)
+	}
 }
 
 func TestRecover_WithDeviceID(t *testing.T) {
+	var buf bytes.Buffer
+	oldOutput := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(oldOutput)
+
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -65,10 +83,20 @@ func TestRecover_WithDeviceID(t *testing.T) {
 		defer Recover("test.device", WithDeviceID("device-456"))
 		panic("test panic")
 	}()
-	// Should log: "Panic in test.device for device device-456: test panic"
+
+	got := buf.String()
+	want := "Panic in test.device for device device-456: test panic"
+	if !strings.Contains(got, want) {
+		t.Errorf("log output does not match expected. want substring: %s, got: %s", want, got)
+	}
 }
 
 func TestRecover_WithBothIDs(t *testing.T) {
+	var buf bytes.Buffer
+	oldOutput := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(oldOutput)
+
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -80,7 +108,12 @@ func TestRecover_WithBothIDs(t *testing.T) {
 			WithDeviceID("device-456"))
 		panic("test panic")
 	}()
-	// Should log: "Panic in test.both for stream stream-123 for device device-456: test panic"
+
+	got := buf.String()
+	want := "Panic in test.both for stream stream-123 for device device-456: test panic"
+	if !strings.Contains(got, want) {
+		t.Errorf("log output does not match expected. want substring: %s, got: %s", want, got)
+	}
 }
 
 func TestRecoverAction_WithPanic_ExecutesAction(t *testing.T) {
