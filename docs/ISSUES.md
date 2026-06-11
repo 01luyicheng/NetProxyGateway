@@ -854,11 +854,10 @@
 - **建议修复**: 使用 `log.SetOutput` 临时捕获日志输出，断言日志字符串包含 `"recovery action: action panic"`。
 
 ### XREF4: `%w` 错误包装语义缺少回归保护测试
-- **状态**: 待修复
+- **状态**: 已修复（被 REF9 覆盖）
 - **位置**: `server/shared/recovery/recovery_test.go`
 - **问题描述**: REF3 恢复了 `%w` 包装语义，但 `TestRecover_WithNamedReturn` 仅断言 `err.Error()` 字符串内容。如果未来有人无意中将 `%w` 改回 `%v`，测试仍然会通过，但 `errors.Is`/`errors.As` 的 unwrap 能力会丢失。
-- **风险**: **低**。语义回归缺乏保护。
-- **建议修复**: 增加 `TestRecover_WithNamedReturn_ErrorType`，验证 `panic(targetErr)` 后 `errors.Is(err, targetErr)` 返回 `true`。
+- **验证结论**: Round 9 修复 REF9 时新增的 `TestRecover_WithPanic_ErrorValue` 已验证 `panic(targetErr)` 后 `errors.Is(err, targetErr)` 返回 `true`，完整覆盖了 `%w` 的 unwrap 回归保护。因此 XREF4 无需额外修复。
 
 ---
 
