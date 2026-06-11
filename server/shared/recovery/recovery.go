@@ -3,6 +3,7 @@
 package recovery
 
 import (
+	"errors"
 	"fmt"
 	"log"
 )
@@ -76,7 +77,13 @@ func Recover(component string, opts ...Option) {
 				*ctx.namedReturn.nPtr = 0
 			}
 			if ctx.namedReturn.errPtr != nil {
-				*ctx.namedReturn.errPtr = fmt.Errorf("%s: %v", ctx.namedReturn.prefix, r)
+				var panicErr error
+				if e, ok := r.(error); ok {
+					panicErr = e
+				} else {
+					panicErr = errors.New(fmt.Sprint(r))
+				}
+				*ctx.namedReturn.errPtr = fmt.Errorf("%s: %w", ctx.namedReturn.prefix, panicErr)
 			}
 		}
 	}

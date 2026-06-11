@@ -797,13 +797,6 @@
 
 > 以下问题由 subagent 多维度代码审查发现；**待验证修复**。
 
-### REF3: 错误包装语义从 `%w` 降级为 `%v`
-- **状态**: 待修复
-- **位置**: `server/shared/recovery/recovery.go` (L79)
-- **问题描述**: 原始内联代码使用 `fmt.Errorf("...: %w", errors.New(fmt.Sprint(r)))`，允许调用者通过 `errors.Unwrap`/`errors.Is`/`errors.As` 检查 panic 值的原始类型。新代码统一使用 `fmt.Errorf("%s: %v", prefix, r)`，仅做字符串格式化，丢失了可 unwrap 的 error 链。
-- **风险**: **中**。破坏了与原始代码的语义兼容性，调用方无法再对 panic 错误进行链式 unwrap。
-- **建议修复**: 将 `%v` 改为 `%w`，并构造一个可 unwrap 的 error：`*ctx.namedReturn.errPtr = fmt.Errorf("%s: %w", ctx.namedReturn.prefix, errors.New(fmt.Sprint(r)))`。
-
 ### REF4: `context` 结构体名遮蔽 Go 标准库
 - **状态**: 待修复
 - **位置**: `server/shared/recovery/recovery.go` (L13)
