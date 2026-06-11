@@ -865,20 +865,6 @@
 
 > 以下问题由 subagent 交叉审查第 6-10 次修复提交时发现；**待修复**。
 
-### XREF5: `TestRelay_RecoversFromCopyStreamPanic` 超时阈值可能 flaky
-- **状态**: 待修复
-- **位置**: `server/socks5-proxy/main_test.go` (L1001)
-- **问题描述**: XREF1 新增的回归测试使用 `2 * time.Second` 超时检测死锁。虽然纯内存操作通常微秒级完成，但在高负载共享 CI 节点上，goroutine 调度延迟可能达到数百毫秒甚至数秒，2 秒阈值偏紧，可能导致 flaky failure。
-- **风险**: **中**。测试在慢 CI 节点上可能偶发失败，降低开发者信心。
-- **建议修复**: 将超时放宽至 `5 * time.Second` 或 `10 * time.Second`。
-
-### XREF6: `TestRelay_RecoversFromCopyStreamPanic` 断言可能被非 panic 错误抢占
-- **状态**: 待修复
-- **位置**: `server/socks5-proxy/main_test.go` (L994-L999)
-- **问题描述**: `relay` 函数从 `errChan` 读取两个错误，只保留第一个非预期错误作为 `relayErr`。如果未来 `isExpectedRelayError` 的实现发生变化，或某些平台返回未被覆盖的错误字符串，goroutine 2 的非 panic 错误可能抢先被设置为 `relayErr`，导致 `strings.Contains(relayErr.Error(), "simulated read panic")` 断言失败。
-- **风险**: **中**。断言逻辑不够稳健，未来重构可能破坏测试。
-- **建议修复**: 显式检查 errChan 中的两个错误，确保 panic 错误被优先识别；或至少同时断言 `relayErr` 非 nil 且包含 panic 消息。
-
 ### XREF7: `panicConn` 方法重写冗余
 - **状态**: 建议优化
 - **位置**: `server/socks5-proxy/main_test.go` (L946-L972)

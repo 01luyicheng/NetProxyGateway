@@ -1459,13 +1459,21 @@ func (s *SOCKS5Server) relay(clientConn, targetConn net.Conn) error {
 	go copyStream(clientConn, targetConn)
 
 	var relayErr error
+	var panicErr error
 	for i := 0; i < 2; i++ {
 		err := <-errChan
+		if err != nil && strings.Contains(err.Error(), "copyStream panic:") {
+			panicErr = err
+			continue
+		}
 		if relayErr == nil && !isExpectedRelayError(err) {
 			relayErr = err
 		}
 	}
 
+	if panicErr != nil {
+		return panicErr
+	}
 	return relayErr
 }
 

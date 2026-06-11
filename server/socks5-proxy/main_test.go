@@ -995,10 +995,10 @@ func TestRelay_RecoversFromCopyStreamPanic(t *testing.T) {
 		if relayErr == nil {
 			t.Fatal("expected relay to return an error after panic, got nil")
 		}
-		if !strings.Contains(relayErr.Error(), "simulated read panic") {
+		if !strings.HasPrefix(relayErr.Error(), "copyStream panic:") {
 			t.Fatalf("expected relay error to contain panic message, got: %v", relayErr)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("relay did not return after copyStream panic, possible deadlock")
 	}
 }
