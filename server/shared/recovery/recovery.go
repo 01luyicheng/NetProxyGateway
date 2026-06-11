@@ -11,11 +11,18 @@ import (
 // Option configures panic recovery behavior.
 type Option func(*recoverCtx)
 
+// Logger is the minimal logging interface used by recovery functions.
+// The standard library's *log.Logger satisfies this interface.
+type Logger interface {
+	Printf(format string, v ...any)
+}
+
 type recoverCtx struct {
 	component   string
 	streamID    string
 	deviceID    string
 	namedReturn *namedReturn
+	logger      Logger
 }
 
 type namedReturn struct {
@@ -35,6 +42,14 @@ func WithStreamID(id string) Option {
 func WithDeviceID(id string) Option {
 	return func(ctx *recoverCtx) {
 		ctx.deviceID = id
+	}
+}
+
+// WithLogger sets the logger used by recovery functions.
+// If not provided, the standard library's default logger is used.
+func WithLogger(logger Logger) Option {
+	return func(ctx *recoverCtx) {
+		ctx.logger = logger
 	}
 }
 
@@ -63,14 +78,14 @@ func WithNamedReturn(nPtr *int, errPtr *error, prefix string) Option {
 //	    // ...
 //	}
 func Recover(component string, opts ...Option) {
-	ctx := &recoverCtx{component: component}
+	ctx := &recoverCtx{component: component, logger: log.Default()}
 	for _, opt := range opts {
 		opt(ctx)
 	}
 
 	if r := recover(); r != nil {
 		msg := ctx.formatMessage()
-		log.Printf("Panic in %s: %v", msg, r)
+		ctx.logger.Printf("Panic in %s: %v", msg, r)
 
 		if ctx.namedReturn != nil {
 			if ctx.namedReturn.nPtr != nil {
@@ -103,19 +118,19 @@ func Recover(component string, opts ...Option) {
 //	    s.handleConnection(c)
 //	}(conn)
 func RecoverAction(component string, action func(), opts ...Option) {
-	ctx := &recoverCtx{component: component}
+	ctx := &recoverCtx{component: component, logger: log.Default()}
 	for _, opt := range opts {
 		opt(ctx)
 	}
 
 	if r := recover(); r != nil {
 		msg := ctx.formatMessage()
-		log.Printf("Panic in %s: %v", msg, r)
+		ctx.logger.Printf("Panic in %s: %v", msg, r)
 
 		if action != nil {
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("Panic in %s recovery action: %v", msg, r)
+					ctx.logger.Printf("Panic in %s recovery action: %v", msg, r)
 				}
 			}()
 			action()

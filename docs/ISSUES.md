@@ -797,13 +797,6 @@
 
 > 以下问题由 subagent 多维度代码审查发现；**待验证修复**。
 
-### REF6: 库包直接使用全局 `log.Printf`
-- **状态**: 待修复
-- **位置**: `server/shared/recovery/recovery.go` (L72, L104)
-- **问题描述**: 作为 `shared` 目录下的可复用库，硬编码 `log.Printf` 导致：调用方无法重定向日志输出（如写入文件、发送到日志聚合系统）；无法调整日志级别（压测时可能期望静默）；与项目未来可能引入的结构化日志（如 `slog`）不兼容。**验证发现**：项目其他 shared 包（如 `shared/ratelimit`）同样直接使用 `log.Printf`，因此该问题与项目现有实践一致，并非孤立偏离。
-- **风险**: **中**。库包的可观测性和可集成性受限，但需与项目整体日志策略统一规划。
-- **建议修复**: 若项目未来需要统一日志收集，应在 `shared` 层面引入最小化 `Logger` 接口（如 `type Logger interface { Printf(format string, v ...any) }`），并将 `recovery`、`ratelimit` 等包一并改造；当前单点改动意义不大。
-
 ### REF10: 包命名存在 stutter：`recovery.Recover`
 - **状态**: 无需修复
 - **位置**: `server/shared/recovery/recovery.go`
