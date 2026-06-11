@@ -805,20 +805,6 @@
 - **验证结论**: 虽然 Go 官方命名指南建议避免 stutter，但该项目中 `recovery` 包已有广泛依赖。重命名（如改为 `recovery.Handle` 或包名改为 `safely`）会引入大量无功能收益的破坏性变更，成本远高于收益。Go 官方也将此视为风格建议而非硬性错误。
 - **建议修复**: 保持现状。若未来有大量新代码接入且团队达成共识，再考虑统一迁移。
 
-### REF11: 指针参数命名 `nPtr`、`errPtr` 不符合 Go 惯用法
-- **状态**: 建议优化
-- **位置**: `server/shared/recovery/recovery.go` (L21-L22, L43)
-- **问题描述**: Go 社区极少在变量名中加 `Ptr` 后缀来标记指针。函数文档已明确说明它们是指向命名返回值的指针，`Ptr` 属于噪音。
-- **风险**: **低**。风格问题，不影响功能。
-- **建议修复**: 改为 `n`、`err` 或 `nOut`/`errOut`，例如 `func WithNamedReturn(n *int, err *error, prefix string) Option`。
-
-### REF12: `prefix` 为空字符串时产生不美观的错误消息
-- **状态**: 建议优化
-- **位置**: `server/shared/recovery/recovery.go` (L79)
-- **问题描述**: 若 `WithNamedReturn(&n, &err, "")` 传入空 prefix，生成的 error 为 `: <panic value>`（冒号前无内容）。
-- **风险**: **低**。边界格式化问题。
-- **建议修复**: 在 error 构造处处理空 prefix：`if ctx.namedReturn.prefix != "" { ... } else { *ctx.namedReturn.errPtr = fmt.Errorf("panic: %v", r) }`。
-
 ### REF13: `Recover` 与 `RecoverAction` 存在重复代码
 - **状态**: 建议优化
 - **位置**: `server/shared/recovery/recovery.go` (L64-L82, L96-L110)

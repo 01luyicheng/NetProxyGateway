@@ -26,8 +26,8 @@ type recoverCtx struct {
 }
 
 type namedReturn struct {
-	nPtr   *int
-	errPtr *error
+	n      *int
+	err    *error
 	prefix string
 }
 
@@ -54,13 +54,13 @@ func WithLogger(logger Logger) Option {
 }
 
 // WithNamedReturn configures recovery to set named return values on panic.
-// nPtr and errPtr are pointers to the named return values.
+// n and err are pointers to the named return values.
 // prefix is used to construct the error message: "<prefix>: <panic value>".
-func WithNamedReturn(nPtr *int, errPtr *error, prefix string) Option {
+func WithNamedReturn(n *int, err *error, prefix string) Option {
 	return func(ctx *recoverCtx) {
 		ctx.namedReturn = &namedReturn{
-			nPtr:   nPtr,
-			errPtr: errPtr,
+			n:      n,
+			err:    err,
 			prefix: prefix,
 		}
 	}
@@ -88,17 +88,21 @@ func Recover(component string, opts ...Option) {
 		ctx.logger.Printf("Panic in %s: %v", msg, r)
 
 		if ctx.namedReturn != nil {
-			if ctx.namedReturn.nPtr != nil {
-				*ctx.namedReturn.nPtr = 0
+			if ctx.namedReturn.n != nil {
+				*ctx.namedReturn.n = 0
 			}
-			if ctx.namedReturn.errPtr != nil {
+			if ctx.namedReturn.err != nil {
 				var panicErr error
 				if e, ok := r.(error); ok {
 					panicErr = e
 				} else {
 					panicErr = errors.New(fmt.Sprint(r))
 				}
-				*ctx.namedReturn.errPtr = fmt.Errorf("%s: %w", ctx.namedReturn.prefix, panicErr)
+				if ctx.namedReturn.prefix != "" {
+					*ctx.namedReturn.err = fmt.Errorf("%s: %w", ctx.namedReturn.prefix, panicErr)
+				} else {
+					*ctx.namedReturn.err = panicErr
+				}
 			}
 		}
 	}

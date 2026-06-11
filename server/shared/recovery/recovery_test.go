@@ -329,6 +329,28 @@ func TestRecover_WithPanic_NilValue(t *testing.T) {
 	}
 }
 
+func TestRecover_WithNamedReturn_EmptyPrefix(t *testing.T) {
+	fn := func() (n int, err error) {
+		defer Recover("test.empty_prefix",
+			WithNamedReturn(&n, &err, ""))
+		panic("boom")
+	}
+
+	n, err := fn()
+	if n != 0 {
+		t.Errorf("expected n=0, got %d", n)
+	}
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if strings.HasPrefix(err.Error(), ":") {
+		t.Errorf("error should not start with colon, got: %v", err)
+	}
+	if err.Error() != "boom" {
+		t.Errorf("expected error 'boom', got: %v", err)
+	}
+}
+
 func TestRecover_WithPanic_ErrorValue(t *testing.T) {
 	targetErr := errors.New("wrapped error")
 	fn := func() (err error) {
