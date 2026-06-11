@@ -861,6 +861,47 @@
 
 ---
 
+## 交叉审查发现（2026-06-11，审查范围：第6-10次修复提交）
+
+> 以下问题由 subagent 交叉审查第 6-10 次修复提交时发现；**待修复**。
+
+### XREF5: `TestRelay_RecoversFromCopyStreamPanic` 超时阈值可能 flaky
+- **状态**: 待修复
+- **位置**: `server/socks5-proxy/main_test.go` (L1001)
+- **问题描述**: XREF1 新增的回归测试使用 `2 * time.Second` 超时检测死锁。虽然纯内存操作通常微秒级完成，但在高负载共享 CI 节点上，goroutine 调度延迟可能达到数百毫秒甚至数秒，2 秒阈值偏紧，可能导致 flaky failure。
+- **风险**: **中**。测试在慢 CI 节点上可能偶发失败，降低开发者信心。
+- **建议修复**: 将超时放宽至 `5 * time.Second` 或 `10 * time.Second`。
+
+### XREF6: `TestRelay_RecoversFromCopyStreamPanic` 断言可能被非 panic 错误抢占
+- **状态**: 待修复
+- **位置**: `server/socks5-proxy/main_test.go` (L994-L999)
+- **问题描述**: `relay` 函数从 `errChan` 读取两个错误，只保留第一个非预期错误作为 `relayErr`。如果未来 `isExpectedRelayError` 的实现发生变化，或某些平台返回未被覆盖的错误字符串，goroutine 2 的非 panic 错误可能抢先被设置为 `relayErr`，导致 `strings.Contains(relayErr.Error(), "simulated read panic")` 断言失败。
+- **风险**: **中**。断言逻辑不够稳健，未来重构可能破坏测试。
+- **建议修复**: 显式检查 errChan 中的两个错误，确保 panic 错误被优先识别；或至少同时断言 `relayErr` 非 nil 且包含 panic 消息。
+
+### XREF7: `panicConn` 方法重写冗余
+- **状态**: 建议优化
+- **位置**: `server/socks5-proxy/main_test.go` (L946-L972)
+- **问题描述**: `panicConn` 嵌入 `net.Conn` 接口并显式重写了全部 8 个方法。除 `Read` 外，其余方法均直接委托给 `p.Conn`，嵌入接口已隐式实现这些方法，显式重写是冗余的。
+- **风险**: **低**。不影响功能，增加代码噪音。
+- **建议修复**: 仅保留 `Read` 的 panic 重写，删除其他显式委托方法。
+
+### XREF8: `TestRecover_WithPanic_NilValue` 断言过于保守
+- **状态**: 建议优化
+- **位置**: `server/shared/recovery/recovery_test.go` (L306-L317)
+- **问题描述**: REF9 新增的 `TestRecover_WithPanic_NilValue` 仅验证 `err != nil`，未检查错误消息内容。如果 Go 编译器或运行时出现极端变化导致 `panic(nil)` 行为再次改变，该测试无法提供更多诊断信息。
+- **风险**: **低**。断言强度不足，诊断能力弱。
+- **建议修复**: 增加对错误消息内容的检查，例如 `strings.Contains(err.Error(), "nil")`，同时保持跨 Go 版本兼容性。
+
+### XREF9: `RecoverAction` 的非字符串 panic value 未直接测试
+- **状态**: 建议优化
+- **位置**: `server/shared/recovery/recovery_test.go`
+- **问题描述**: REF9 的三个非字符串 panic value 测试均针对 `Recover` 函数。`RecoverAction` 与 `Recover` 共享相同的 `log.Printf("Panic in %s: %v", msg, r)` 格式化路径，但如果未来 `RecoverAction` 的日志路径被独立修改，此覆盖缺口可能转化为回归风险。
+- **风险**: **低**。当前无害，但测试覆盖不对称。
+- **建议修复**: 后续补充 `TestRecoverAction_WithPanic_ErrorValue` 等测试，使 `RecoverAction` 的 panic value 覆盖度与 `Recover` 对齐。
+
+---
+
 ## 提交审查发现（2026-06-06，审查提交 07aaa3b..0bf8c97）
 
 > 以下问题由今日提交审查发现；**待验证修复**。
