@@ -142,3 +142,23 @@ func TestRecover_NilNamedReturnPointers(t *testing.T) {
 	}()
 	// Should not panic when pointers are nil
 }
+
+func TestRecoverAction_ActionPanics_Recovered(t *testing.T) {
+	actionCalled := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("RecoverAction did not recover from original or action panic: %v", r)
+			}
+		}()
+		defer RecoverAction("test.action_panics", func() {
+			actionCalled = true
+			panic("action panic")
+		})
+		panic("original panic")
+	}()
+
+	if !actionCalled {
+		t.Error("expected action to be called")
+	}
+}

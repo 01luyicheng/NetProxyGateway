@@ -111,6 +111,11 @@ func RecoverAction(component string, action func(), opts ...Option) {
 		log.Printf("Panic in %s: %v", msg, r)
 
 		if action != nil {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("Panic in %s recovery action: %v", msg, r)
+				}
+			}()
 			action()
 		}
 	}

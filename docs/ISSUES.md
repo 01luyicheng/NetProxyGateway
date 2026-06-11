@@ -804,13 +804,6 @@
 - **风险**: **中**。当前无害，但命名阴影是 Go 工程常见陷阱，增加未来维护的脆弱性。
 - **建议修复**: 改名为 `recoveryContext`、`recoverCtx`、`settings`、`params` 或 `cfg`。
 
-### REF5: `RecoverAction` 的 action 回调缺乏 panic 二次保护
-- **状态**: 待修复
-- **位置**: `server/shared/recovery/recovery.go` (L106-L108)
-- **问题描述**: `action()` 通常在 panic 后的清理阶段执行（如关闭连接）。如果清理逻辑本身 panic，此时外层的 `recover()` 已经消费完毕，新的 panic 将直接导致程序崩溃。原始内联代码同样存在此问题，但作为统一恢复组件，其设计目标应是"绝对安全的 panic 屏障"。
-- **风险**: **中**。清理动作 panic 时无法被捕获，可能从 recover 后的可控状态升级为进程崩溃。
-- **建议修复**: 在调用 `action()` 时内部再包一层 `defer/recover`，或至少在文档中明确声明 "action must not panic"。
-
 ### REF6: 库包直接使用全局 `log.Printf`
 - **状态**: 待修复
 - **位置**: `server/shared/recovery/recovery.go` (L72, L104)
