@@ -78,14 +78,9 @@ func WithNamedReturn(n *int, err *error, prefix string) Option {
 //	    // ...
 //	}
 func Recover(component string, opts ...Option) {
-	ctx := &recoverCtx{component: component, logger: log.Default()}
-	for _, opt := range opts {
-		opt(ctx)
-	}
-
+	ctx := setupCtx(component, opts...)
 	if r := recover(); r != nil {
-		msg := ctx.formatMessage()
-		ctx.logger.Printf("Panic in %s: %v", msg, r)
+		ctx.logPanic(r, "")
 
 		if ctx.namedReturn != nil {
 			if ctx.namedReturn.n != nil {
@@ -108,6 +103,14 @@ func Recover(component string, opts ...Option) {
 	}
 }
 
+func setupCtx(component string, opts ...Option) *recoverCtx {
+	ctx := &recoverCtx{component: component, logger: log.Default()}
+	for _, opt := range opts {
+		opt(ctx)
+	}
+	return ctx
+}
+
 // RecoverAction must be called via defer. It recovers from panics, logs them,
 // and executes the provided action function. If the action function itself
 // panics, that panic is also recovered and logged; it will not propagate
@@ -122,23 +125,26 @@ func Recover(component string, opts ...Option) {
 //	    s.handleConnection(c)
 //	}(conn)
 func RecoverAction(component string, action func(), opts ...Option) {
-	ctx := &recoverCtx{component: component, logger: log.Default()}
-	for _, opt := range opts {
-		opt(ctx)
-	}
-
+	ctx := setupCtx(component, opts...)
 	if r := recover(); r != nil {
-		msg := ctx.formatMessage()
-		ctx.logger.Printf("Panic in %s: %v", msg, r)
-
+		ctx.logPanic(r, "")
 		if action != nil {
 			defer func() {
 				if r := recover(); r != nil {
-					ctx.logger.Printf("Panic in %s recovery action: %v", msg, r)
+					ctx.logPanic(r, "recovery action")
 				}
 			}()
 			action()
 		}
+	}
+}
+
+func (ctx *recoverCtx) logPanic(r any, suffix string) {
+	msg := ctx.formatMessage()
+	if suffix != "" {
+		ctx.logger.Printf("Panic in %s %s: %v", msg, suffix, r)
+	} else {
+		ctx.logger.Printf("Panic in %s: %v", msg, r)
 	}
 }
 
