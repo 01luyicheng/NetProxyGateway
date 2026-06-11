@@ -823,13 +823,6 @@
 
 > 以下问题由 subagent 交叉审查第 6-10 次修复提交时发现；**待修复**。
 
-### XREF9: `RecoverAction` 的非字符串 panic value 未直接测试
-- **状态**: 建议优化
-- **位置**: `server/shared/recovery/recovery_test.go`
-- **问题描述**: REF9 的三个非字符串 panic value 测试均针对 `Recover` 函数。`RecoverAction` 与 `Recover` 共享相同的 `log.Printf("Panic in %s: %v", msg, r)` 格式化路径，但如果未来 `RecoverAction` 的日志路径被独立修改，此覆盖缺口可能转化为回归风险。
-- **风险**: **低**。当前无害，但测试覆盖不对称。
-- **建议修复**: 后续补充 `TestRecoverAction_WithPanic_ErrorValue` 等测试，使 `RecoverAction` 的 panic value 覆盖度与 `Recover` 对齐。
-
 ---
 
 ## 交叉审查发现（2026-06-11，审查范围：第11-15次修复提交）

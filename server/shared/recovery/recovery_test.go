@@ -367,3 +367,91 @@ func TestRecover_WithPanic_ErrorValue(t *testing.T) {
 		t.Errorf("expected errors.Is to find targetErr, got %v", err)
 	}
 }
+
+func TestRecoverAction_WithPanic_IntValue(t *testing.T) {
+	var buf bytes.Buffer
+	oldOutput := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(oldOutput)
+
+	actionCalled := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("RecoverAction did not recover from panic: %v", r)
+			}
+		}()
+		defer RecoverAction("test.action_int", func() {
+			actionCalled = true
+		})
+		panic(123)
+	}()
+
+	if !actionCalled {
+		t.Error("expected action to be called")
+	}
+
+	got := buf.String()
+	if !strings.Contains(got, "123") {
+		t.Errorf("expected log to contain '123', got: %s", got)
+	}
+}
+
+func TestRecoverAction_WithPanic_NilValue(t *testing.T) {
+	var buf bytes.Buffer
+	oldOutput := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(oldOutput)
+
+	actionCalled := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("RecoverAction did not recover from panic: %v", r)
+			}
+		}()
+		defer RecoverAction("test.action_nil", func() {
+			actionCalled = true
+		})
+		panic(nil)
+	}()
+
+	if !actionCalled {
+		t.Error("expected action to be called")
+	}
+
+	got := buf.String()
+	if !strings.Contains(got, "panic called with nil argument") {
+		t.Errorf("expected log to contain 'panic called with nil argument', got: %s", got)
+	}
+}
+
+func TestRecoverAction_WithPanic_ErrorValue(t *testing.T) {
+	targetErr := errors.New("wrapped error")
+	var buf bytes.Buffer
+	oldOutput := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(oldOutput)
+
+	actionCalled := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("RecoverAction did not recover from panic: %v", r)
+			}
+		}()
+		defer RecoverAction("test.action_error", func() {
+			actionCalled = true
+		})
+		panic(targetErr)
+	}()
+
+	if !actionCalled {
+		t.Error("expected action to be called")
+	}
+
+	got := buf.String()
+	if !strings.Contains(got, "wrapped error") {
+		t.Errorf("expected log to contain 'wrapped error', got: %s", got)
+	}
+}
