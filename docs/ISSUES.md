@@ -845,6 +845,40 @@
 
 ---
 
+## 交叉审查发现（2026-06-11，审查范围：第16-20次修复提交）
+
+> 以下问题由 subagent 交叉审查第 16-20 次修复提交时发现；**待修复/建议优化**。
+
+### XREF12: `WithLogger(nil)` 会导致 recovery 自身 panic
+- **状态**: 待修复
+- **位置**: `server/shared/recovery/recovery.go` (L50-L53, L142-L148)
+- **问题描述**: REF6 引入 `WithLogger` Option 后，若调用方误传 `WithLogger(nil)`，`recoverCtx.logger` 会被设为 `nil`。后续 `logPanic` 中调用 `ctx.logger.Printf(...)` 会产生 nil 指针解引用 panic，导致 recovery 机制自身在 defer 中 panic，覆盖或破坏原 panic 的处理。
+- **风险**: **中**。这是 REF6 修复引入的新防御性编程缺陷。
+- **建议修复**: 在 `WithLogger` 中增加 nil 防御：`if logger != nil { ctx.logger = logger }`。
+
+### XREF13: 空 prefix + panic error 的 unwrap 场景缺少测试
+- **状态**: 建议优化
+- **位置**: `server/shared/recovery/recovery_test.go`
+- **问题描述**: REF12 新增的 `TestRecover_WithNamedReturn_EmptyPrefix` 仅测试了 `panic("boom")`（字符串值）。未验证当 prefix 为空且 panic value 为 `error` 类型时，返回的错误是否保留了 `errors.Is`/`errors.As` 的 unwrap 能力。
+- **风险**: **低**。当前无害，但边界测试覆盖不完整。
+- **建议修复**: 增加 `TestRecover_WithNamedReturn_EmptyPrefix_ErrorValue`，验证 `errors.Is(err, targetErr)`。
+
+### XREF14: `TestRecoverAction_WithPanic_*` 日志断言过于宽松
+- **状态**: 建议优化
+- **位置**: `server/shared/recovery/recovery_test.go` (L371-L460)
+- **问题描述**: XREF9 新增的三个测试使用 `strings.Contains(got, "123")` 等宽松断言，未验证完整的日志前缀（如 `"Panic in test.action_int: 123"`）。如果未来 `logPanic` 被修改（例如删除 `"Panic in"` 前缀），宽松断言可能漏检。
+- **风险**: **低**。断言精度不足。
+- **建议修复**: 将断言提升为精确子串匹配，与同文件中现有测试（如 `TestRecoverAction_WithStreamID`）风格保持一致。
+
+### XREF15: `setupCtx` 缺少内部文档注释
+- **状态**: 建议优化
+- **位置**: `server/shared/recovery/recovery.go` (L106-L112)
+- **问题描述**: REF13 提取的 `setupCtx` 辅助函数没有文档注释，后续维护者需要阅读函数体才能理解其职责。
+- **风险**: **低**。可读性问题。
+- **建议修复**: 添加简短注释，例如 `// setupCtx creates a recoverCtx with default logger and applies all options.`
+
+---
+
 ## 提交审查发现（2026-06-06，审查提交 07aaa3b..0bf8c97）
 
 > 以下问题由今日提交审查发现；**待验证修复**。
