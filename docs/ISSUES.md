@@ -860,13 +860,6 @@
 
 > 以下问题由 subagent 交叉审查前 5 次修复提交时发现；**待修复**。
 
-### XREF1: `relay` panic 场景缺少回归测试
-- **状态**: 待修复
-- **位置**: `server/socks5-proxy/main.go` (L1436-L1466)
-- **问题描述**: REF1 修复了 `copyStream` panic 导致的死锁，但 `server/socks5-proxy/main_test.go` 中没有任何测试覆盖 goroutine panic 时 `relay` 是否能在超时内正常返回。如果未来有人将 `copyStream` 重新改为 `recovery.RecoverAction`，现有测试不会失败，死锁会重新引入。
-- **风险**: **中**。核心 panic 恢复路径缺乏回归保护。
-- **建议修复**: 补充一个注入 panic 的测试（通过自定义 `net.Conn` 在 `Read` 中 panic），验证 `relay` 在 panic 后仍正常返回且不阻塞。
-
 ### XREF2: `RecoverAction` 文档注释未声明 action panic 捕获语义
 - **状态**: 待修复
 - **位置**: `server/shared/recovery/recovery.go` (L92-L102)
