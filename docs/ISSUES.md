@@ -858,13 +858,6 @@
 - **风险**: **低**。不影响功能，增加代码噪音。
 - **建议修复**: 仅保留 `Read` 的 panic 重写，删除其他显式委托方法。
 
-### XREF8: `TestRecover_WithPanic_NilValue` 断言过于保守
-- **状态**: 建议优化
-- **位置**: `server/shared/recovery/recovery_test.go` (L306-L317)
-- **问题描述**: REF9 新增的 `TestRecover_WithPanic_NilValue` 仅验证 `err != nil`，未检查错误消息内容。如果 Go 编译器或运行时出现极端变化导致 `panic(nil)` 行为再次改变，该测试无法提供更多诊断信息。
-- **风险**: **低**。断言强度不足，诊断能力弱。
-- **建议修复**: 增加对错误消息内容的检查，例如 `strings.Contains(err.Error(), "nil")`，同时保持跨 Go 版本兼容性。
-
 ### XREF9: `RecoverAction` 的非字符串 panic value 未直接测试
 - **状态**: 建议优化
 - **位置**: `server/shared/recovery/recovery_test.go`

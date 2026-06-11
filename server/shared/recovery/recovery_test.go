@@ -324,6 +324,9 @@ func TestRecover_WithPanic_NilValue(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
+	if !strings.Contains(err.Error(), "nil panic:") {
+		t.Errorf("expected error to contain 'nil panic:', got: %v", err)
+	}
 }
 
 func TestRecover_WithPanic_ErrorValue(t *testing.T) {
