@@ -797,13 +797,6 @@
 
 > 以下问题由 subagent 多维度代码审查发现；**待验证修复**。
 
-### REF4: `context` 结构体名遮蔽 Go 标准库
-- **状态**: 待修复
-- **位置**: `server/shared/recovery/recovery.go` (L13)
-- **问题描述**: 未导出结构体名为 `context`，与 Go 标准库 `context` 包同名。当前 `recovery.go` 及其同包测试文件均未导入标准库 `context`，因此**当前无编译冲突**。但该命名占用了包内标识符，一旦未来需要引入标准库 `context`（例如支持上下文超时或取消），必须对该结构体重命名，否则将产生编译错误。属于不良命名实践，为后续扩展埋下隐患。
-- **风险**: **中**。当前无害，但命名阴影是 Go 工程常见陷阱，增加未来维护的脆弱性。
-- **建议修复**: 改名为 `recoveryContext`、`recoverCtx`、`settings`、`params` 或 `cfg`。
-
 ### REF6: 库包直接使用全局 `log.Printf`
 - **状态**: 待修复
 - **位置**: `server/shared/recovery/recovery.go` (L72, L104)

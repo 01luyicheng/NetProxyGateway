@@ -9,9 +9,9 @@ import (
 )
 
 // Option configures panic recovery behavior.
-type Option func(*context)
+type Option func(*recoverCtx)
 
-type context struct {
+type recoverCtx struct {
 	component   string
 	streamID    string
 	deviceID    string
@@ -26,14 +26,14 @@ type namedReturn struct {
 
 // WithStreamID adds stream ID context to panic logs.
 func WithStreamID(id string) Option {
-	return func(ctx *context) {
+	return func(ctx *recoverCtx) {
 		ctx.streamID = id
 	}
 }
 
 // WithDeviceID adds device ID context to panic logs.
 func WithDeviceID(id string) Option {
-	return func(ctx *context) {
+	return func(ctx *recoverCtx) {
 		ctx.deviceID = id
 	}
 }
@@ -42,7 +42,7 @@ func WithDeviceID(id string) Option {
 // nPtr and errPtr are pointers to the named return values.
 // prefix is used to construct the error message: "<prefix>: <panic value>".
 func WithNamedReturn(nPtr *int, errPtr *error, prefix string) Option {
-	return func(ctx *context) {
+	return func(ctx *recoverCtx) {
 		ctx.namedReturn = &namedReturn{
 			nPtr:   nPtr,
 			errPtr: errPtr,
@@ -63,7 +63,7 @@ func WithNamedReturn(nPtr *int, errPtr *error, prefix string) Option {
 //	    // ...
 //	}
 func Recover(component string, opts ...Option) {
-	ctx := &context{component: component}
+	ctx := &recoverCtx{component: component}
 	for _, opt := range opts {
 		opt(ctx)
 	}
@@ -101,7 +101,7 @@ func Recover(component string, opts ...Option) {
 //	    s.handleConnection(c)
 //	}(conn)
 func RecoverAction(component string, action func(), opts ...Option) {
-	ctx := &context{component: component}
+	ctx := &recoverCtx{component: component}
 	for _, opt := range opts {
 		opt(ctx)
 	}
@@ -121,7 +121,7 @@ func RecoverAction(component string, action func(), opts ...Option) {
 	}
 }
 
-func (ctx *context) formatMessage() string {
+func (ctx *recoverCtx) formatMessage() string {
 	msg := ctx.component
 	if ctx.streamID != "" {
 		msg += fmt.Sprintf(" for stream %s", ctx.streamID)
