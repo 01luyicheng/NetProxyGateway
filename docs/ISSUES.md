@@ -804,13 +804,6 @@
 - **风险**: **中**。库包的可观测性和可集成性受限，但需与项目整体日志策略统一规划。
 - **建议修复**: 若项目未来需要统一日志收集，应在 `shared` 层面引入最小化 `Logger` 接口（如 `type Logger interface { Printf(format string, v ...any) }`），并将 `recovery`、`ratelimit` 等包一并改造；当前单点改动意义不大。
 
-### REF8: `RecoverAction` 与 `Option` 的组合未测试
-- **状态**: 待修复
-- **位置**: `server/shared/recovery/recovery_test.go`
-- **问题描述**: `RecoverAction` 的签名接受 `opts ...Option`，但现有测试中均没有传入任何 `Option`。`RecoverAction` 与 `WithStreamID`、`WithDeviceID` 组合使用的场景（如 goroutine 中关闭连接并记录 stream ID）完全没有覆盖。
-- **风险**: **中**。组合行为缺乏回归保护。
-- **建议修复**: 增加 `TestRecoverAction_WithStreamID` 等测试，验证 `formatMessage` 在 `RecoverAction` 中的正确应用。
-
 ### REF9: 缺少非字符串 panic value 的边界测试
 - **状态**: 待修复
 - **位置**: `server/shared/recovery/recovery_test.go`

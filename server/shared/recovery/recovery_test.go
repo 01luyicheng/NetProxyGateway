@@ -195,3 +195,93 @@ func TestRecoverAction_ActionPanics_Recovered(t *testing.T) {
 		t.Error("expected action to be called")
 	}
 }
+
+func TestRecoverAction_WithStreamID(t *testing.T) {
+	var buf bytes.Buffer
+	oldOutput := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(oldOutput)
+
+	actionCalled := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("RecoverAction did not recover from panic: %v", r)
+			}
+		}()
+		defer RecoverAction("test.action_stream", func() {
+			actionCalled = true
+		}, WithStreamID("stream-123"))
+		panic("action panic")
+	}()
+
+	if !actionCalled {
+		t.Error("expected action to be called")
+	}
+
+	got := buf.String()
+	want := "Panic in test.action_stream for stream stream-123: action panic"
+	if !strings.Contains(got, want) {
+		t.Errorf("log output does not match expected. want substring: %s, got: %s", want, got)
+	}
+}
+
+func TestRecoverAction_WithDeviceID(t *testing.T) {
+	var buf bytes.Buffer
+	oldOutput := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(oldOutput)
+
+	actionCalled := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("RecoverAction did not recover from panic: %v", r)
+			}
+		}()
+		defer RecoverAction("test.action_device", func() {
+			actionCalled = true
+		}, WithDeviceID("device-456"))
+		panic("action panic")
+	}()
+
+	if !actionCalled {
+		t.Error("expected action to be called")
+	}
+
+	got := buf.String()
+	want := "Panic in test.action_device for device device-456: action panic"
+	if !strings.Contains(got, want) {
+		t.Errorf("log output does not match expected. want substring: %s, got: %s", want, got)
+	}
+}
+
+func TestRecoverAction_WithBothIDs(t *testing.T) {
+	var buf bytes.Buffer
+	oldOutput := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(oldOutput)
+
+	actionCalled := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("RecoverAction did not recover from panic: %v", r)
+			}
+		}()
+		defer RecoverAction("test.action_both", func() {
+			actionCalled = true
+		}, WithStreamID("stream-123"), WithDeviceID("device-456"))
+		panic("action panic")
+	}()
+
+	if !actionCalled {
+		t.Error("expected action to be called")
+	}
+
+	got := buf.String()
+	want := "Panic in test.action_both for stream stream-123 for device device-456: action panic"
+	if !strings.Contains(got, want) {
+		t.Errorf("log output does not match expected. want substring: %s, got: %s", want, got)
+	}
+}
