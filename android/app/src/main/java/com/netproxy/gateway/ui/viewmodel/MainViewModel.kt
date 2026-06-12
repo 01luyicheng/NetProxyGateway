@@ -307,22 +307,24 @@ class MainViewModel @Inject constructor(
             val authTokenArray = code.toCharArray()
             _uiState.update { it.copy(peerId = code, isPairingInProgress = true, errorMessage = null, authToken = authTokenArray.copyOf()) }
 
-            if (networkStateManager.isCellularConnected()) {
-                val deviceIdSnapshot = _uiState.value.deviceId
-                authSessionStore.update(
-                    deviceId = deviceIdSnapshot,
-                    authToken = authTokenArray
-                )
-                mqttConnectionManager.connect(
-                    deviceId = deviceIdSnapshot,
-                    authToken = authTokenArray
-                )
-                authTokenArray.fill('\u0000')
-            } else {
-                authTokenArray.fill('\u0000')
-                _uiState.update {
-                    it.copy(isPairingInProgress = false, errorMessage = AppLocale.getString(context, R.string.error_cellular_required), authToken = CharArray(0))
+            try {
+                if (networkStateManager.isCellularConnected()) {
+                    val deviceIdSnapshot = _uiState.value.deviceId
+                    authSessionStore.update(
+                        deviceId = deviceIdSnapshot,
+                        authToken = authTokenArray
+                    )
+                    mqttConnectionManager.connect(
+                        deviceId = deviceIdSnapshot,
+                        authToken = authTokenArray
+                    )
+                } else {
+                    _uiState.update {
+                        it.copy(isPairingInProgress = false, errorMessage = AppLocale.getString(context, R.string.error_cellular_required), authToken = CharArray(0))
+                    }
                 }
+            } finally {
+                authTokenArray.fill('\u0000')
             }
         }
     }
