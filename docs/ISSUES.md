@@ -323,7 +323,7 @@
 - **状态**: 已修复
 - **修复提交**: `07aaa3b`
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/ConnectionSessionManager.kt`
-- **修复内容**: 
+- **修复内容**:
   - `ConnectionSession` 新增 `TcpState` 枚举和 seq/ack 管理
   - `VpnPacketProcessor` 支持动态 TCP 标志位（SYN+ACK, FIN+ACK, ACK, RST, PSH+ACK）
   - `processTcpReturn` 处理无数据但需控制包场景（`needsControlPacket()`）
@@ -334,7 +334,7 @@
 - **状态**: 已修复
 - **修复提交**: `d74dd42`
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt`
-- **修复内容**: 
+- **修复内容**:
   - 提取 `ConnectionSession` 为独立数据类
   - 提取 `VpnPacketProcessor` 和 `ConnectionSessionManager` 为 `internal` 类
   - 测试直接实例化新提取的类，无需反射
@@ -344,7 +344,7 @@
 - **状态**: 已修复
 - **修复提交**: `d74dd42`
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt`
-- **修复内容**: 
+- **修复内容**:
   - 删除所有反射工具方法（`invokeConstructReturnPacket`、`invokeProcessTcpReturn` 等）
   - 改为直接调用 `VpnPacketProcessor` 和 `ConnectionSessionManager` 的 `internal` 方法
   - 新增 `VpnPacketProcessorTest.kt` 和 `ConnectionSessionManagerTest.kt`
@@ -953,7 +953,7 @@
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (connect, startHeartbeat, disconnect)
 - **问题描述**: `connect()` 中 `val tokenSnapshot = authToken.copyOf()` 和 `startHeartbeat()` 中 `val tokenSnapshot = authToken.copyOf()` 创建了 CharArray 副本，但这些副本在整个协程生命周期内持续存在，从未被 `fill('\u0000')` 清零。这是 N37 CharArray 安全修复的最大泄漏点——token 明文在内存中长时间驻留。
 - **风险**: **高**。直接抵消 CharArray 安全设计的核心目的，内存转储可提取明文 token。
-- **修复方式**: 
+- **修复方式**:
   1. 在 `connect()` 中将 `tokenSnapshot` 存储为 `activeTokenSnapshot` 实例变量
   2. 在 `disconnect()` 中清零 `activeTokenSnapshot`
   3. 在 `startHeartbeat()` 的协程中添加 `try-finally`，在 `finally` 中清零 `tokenSnapshot`
@@ -1015,7 +1015,8 @@
 > 以下问题由 subagent 多维度代码审查发现；**待修复**。
 
 ### C81: `connect()` 传递原始 `authToken` 给 `startHeartbeat()`
-- **状态**: 待修复
+- **状态**: 已修复
+- **修复提交**: `4af0826`
 - **提交哈希**: `4c0cea6`
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (connect, L454)
 - **问题描述**: `connect()` 内部已创建 `tokenSnapshot = authToken.copyOf()`，但调用 `startHeartbeat()` 时传递的是原始 `authToken` 参数而非 `tokenSnapshot`。如果调用方在 `connect()` 返回后立即清零 `authToken`，`startHeartbeat()` 内部的 `copyOf()` 将复制空数组，导致心跳失败后的重连使用空 token。
@@ -1023,7 +1024,8 @@
 - **修复方式**: 将 `startHeartbeat(deviceId, authToken, generation)` 改为 `startHeartbeat(deviceId, tokenSnapshot, generation)`。
 
 ### C82: `pairWithCode()` 成功路径未清零局部 `authTokenArray`
-- **状态**: 待修复
+- **状态**: 已修复
+- **修复提交**: `7ecdb58`
 - **提交哈希**: `4c0cea6`
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (pairWithCode, L305-326)
 - **问题描述**: `pairWithCode()` 成功路径（蜂窝网络可用分支）中，`authTokenArray` 被传递给 `authSessionStore.update()` 和 `mqttConnectionManager.connect()`（两者内部会 copy），但 `authTokenArray` 本身在方法结束前从未被清零。只有 `else` 分支（失败路径）中执行了 `authTokenArray.fill('\u0000')`。
