@@ -359,7 +359,7 @@ class Socks5ConnectionPoolTest {
             // borrowConnection will fail because there's no real SOCKS5 proxy,
             // but the credentialProvider will be called and the password should be zeroed
             pool.borrowConnection("10.0.0.1", 443)
-        } catch (_: Exception) {
+        } catch (e: java.io.IOException) {
             // expected: no real SOCKS5 proxy
         }
 
