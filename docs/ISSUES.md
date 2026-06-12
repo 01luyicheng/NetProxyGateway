@@ -1033,7 +1033,8 @@
 - **修复方式**: 在成功路径末尾（`mqttConnectionManager.connect()` 调用后）添加 `authTokenArray.fill('\u0000')`。
 
 ### T1: `Socks5ConnectionPoolTest` N37-B10 测试虚假通过
-- **状态**: 待修复
+- **状态**: 已修复
+- **修复提交**: `d0d19d3`
 - **提交哈希**: `4c0cea6`
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/proxy/Socks5ConnectionPoolTest.kt` (n37b10_createNewConnection_zerosCredentialPasswordAfterUse, L341-L371)
 - **问题描述**: 测试声明验证 `credentialPassword` 在使用后被清零，但断言仅检查原始 `secretPassword` 未被修改，完全没有捕获 `credentialProvider` 返回的 **copy** 的引用。即使生产代码中 `credentialPassword?.fill('\u0000')` 被意外删除，该测试仍会通过。
@@ -1041,7 +1042,8 @@
 - **修复方式**: 在 `credentialProvider` lambda 中将返回的 copy 捕获到外部变量，在 `borrowConnection` 后断言该 copy 已被 zeroed。
 
 ### T2: `AuthSessionStoreTest` 测试名与断言矛盾
-- **状态**: 待修复
+- **状态**: 已修复
+- **修复提交**: `7918b3a`
 - **提交哈希**: `4c0cea6`
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/connection/AuthSessionStoreTest.kt` (isValid_withEmptyToken_shouldReturnFalse, L406-L415)
 - **问题描述**: 测试方法名明确声明 `shouldReturnFalse`，但实际断言为 `assertTrue(result)`。注释说明意图是"空字符串应该匹配"，但名实严重不符，会导致维护者误解。
@@ -1049,7 +1051,8 @@
 - **修复方式**: 将方法重命名为 `isValid_withEmptyToken_shouldReturnTrue`，或根据业务需求修正断言和注释。
 
 ### T3: `AuthSessionStoreTest` `@Synchronized` 检查未完成
-- **状态**: 待修复
+- **状态**: 已修复
+- **修复提交**: `7151507`
 - **提交哈希**: `4c0cea6`
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/connection/AuthSessionStoreTest.kt` (authSessionStore_methodsAreSynchronized, L838-L852)
 - **问题描述**: 测试注释声称"Check that key methods have @Synchronized annotation"，但代码仅使用 `assertNotNull` 验证四个方法存在，完全没有检查方法上是否有 `@Synchronized` 注解。
