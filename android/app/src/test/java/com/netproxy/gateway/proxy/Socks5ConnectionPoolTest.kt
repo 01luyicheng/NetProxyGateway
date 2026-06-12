@@ -14,6 +14,7 @@ import java.lang.reflect.Modifier
 import java.net.Socket
 import java.net.SocketTimeoutException
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -80,10 +81,20 @@ class Socks5ConnectionPoolTest {
                 val queue = availableConnections[destKey]
                     ?: throw AssertionError("Expected destination queue to exist")
 
-                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
-                while (queue.isNotEmpty() && System.nanoTime() < deadline) {
-                    Thread.yield()
-                }
+                // Deterministic synchronization: wait until borrowThread finishes read phase
+                // and blocks trying to acquire the write lock for cleanup.
+                val cleanupReached = CountDownLatch(1)
+                Thread {
+                    while (!poolLock.hasQueuedThread(borrowThread)) {
+                        Thread.sleep(10)
+                    }
+                    cleanupReached.countDown()
+                }.start()
+
+                assertTrue(
+                    "Expected borrow thread to reach cleanup phase",
+                    cleanupReached.await(10, TimeUnit.SECONDS)
+                )
                 assertTrue("Expected borrow thread to poll the connection", queue.isEmpty())
 
                 // Simulate the connection becoming available again before cleanup runs.
@@ -92,7 +103,7 @@ class Socks5ConnectionPoolTest {
                 poolLock.readLock().unlock()
             }
 
-            borrowThread.join(2_000)
+            borrowThread.join(10_000)
             if (borrowThread.isAlive) {
                 borrowThread.interrupt()
             }
