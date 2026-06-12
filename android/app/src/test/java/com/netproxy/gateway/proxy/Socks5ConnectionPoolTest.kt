@@ -348,7 +348,9 @@ class Socks5ConnectionPoolTest {
                 cleanupIntervalMs = 60_000
             ),
             credentialProvider = {
-                Pair("user", secretPassword.copyOf())
+                val copy = secretPassword.copyOf()
+                capturedPassword = copy
+                Pair("user", copy)
             }
         )
 
@@ -356,11 +358,19 @@ class Socks5ConnectionPoolTest {
             // borrowConnection will fail because there's no real SOCKS5 proxy,
             // but the credentialProvider will be called and the password should be zeroed
             pool.borrowConnection("10.0.0.1", 443)
+        } catch (_: Exception) {
+            // expected: no real SOCKS5 proxy
+        }
 
-            // The secretPassword copy provided by credentialProvider should have been zeroed
-            // in createNewConnection's finally block after the socket connection failed.
-            // We verify by checking that the original secretPassword is still intact
-            // (proving we zero the copy, not the original).
+        try {
+            // The copy returned by credentialProvider should have been zeroed
+            assertNotNull("capturedPassword should not be null", capturedPassword)
+            assertTrue(
+                "Credential password copy should be zeroed after use",
+                capturedPassword!!.all { it == '\u0000' }
+            )
+
+            // Original secretPassword must remain intact
             assertTrue(
                 "Original secretPassword should remain intact",
                 secretPassword.contentEquals("super-secret-token".toCharArray()),
