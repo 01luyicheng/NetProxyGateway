@@ -11,6 +11,7 @@ import io.mockk.mockk
 import io.mockk.mockkConstructor
 import io.mockk.mockkStatic
 import io.mockk.runs
+import io.mockk.spyk
 import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.CoroutineScope
@@ -893,5 +894,63 @@ class AuthSessionStoreTest {
         session1.authToken.fill('\u0000')
         assertFalse(session2.authToken.contentEquals(CharArray("secret-token".length)))
         assertTrue(session2.authToken.contentEquals("secret-token".toCharArray()))
+    }
+
+    // ==================== CharArray zeroing 安全测试 (T5) ====================
+
+    @Test
+    fun update_shouldZeroOldInMemoryTokenBeforeReplacing() = runTest {
+        // Set initial token
+        authSessionStore.update("device-1", "old-token".toCharArray())
+        advanceUntilIdle()
+
+        // Capture reference to old inMemoryToken via reflection
+        val field = AuthSessionStore::class.java.getDeclaredField("inMemoryToken")
+        field.isAccessible = true
+        val oldTokenRef = field.get(authSessionStore) as CharArray
+
+        // Update with new token
+        authSessionStore.update("device-2", "new-token".toCharArray())
+        advanceUntilIdle()
+
+        // Old token should be zeroed
+        assertTrue("Old inMemoryToken should be zeroed before replacing", oldTokenRef.all { it == '\u0000' })
+    }
+
+    @Test
+    fun clear_shouldZeroInMemoryToken() = runTest {
+        // Set initial token
+        authSessionStore.update("device-1", "secret-token".toCharArray())
+        advanceUntilIdle()
+
+        // Capture reference to inMemoryToken via reflection
+        val field = AuthSessionStore::class.java.getDeclaredField("inMemoryToken")
+        field.isAccessible = true
+        val tokenRef = field.get(authSessionStore) as CharArray
+
+        // Clear session
+        authSessionStore.clear()
+
+        // Token should be zeroed
+        assertTrue("inMemoryToken should be zeroed after clear", tokenRef.all { it == '\u0000' })
+    }
+
+    @Test
+    fun isValid_shouldZeroTemporarySessionAuthToken() = runTest {
+        every { encryptedPrefs.getString("device_id", null) } returns "device-123"
+        every { encryptedPrefs.getString("auth_token", null) } returns "secret-token"
+
+        // Create a mock session to intercept the one used internally by isValid
+        val mockSession = ProxyAuthSession("device-123", "secret-token".toCharArray())
+
+        // Spy the store and mock private loadSession to return our mock session
+        val spyStore = spyk(authSessionStore)
+        every { spyStore["loadSession"]() } returns mockSession
+
+        // Call isValid
+        spyStore.isValid("device-123", "secret-token".toCharArray())
+
+        // The mock session's authToken should have been zeroed in finally
+        assertTrue("Temporary session authToken should be zeroed after isValid", mockSession.authToken.all { it == '\u0000' })
     }
 }
