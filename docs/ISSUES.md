@@ -1094,4 +1094,34 @@
 - **风险**: **低**。增加维护负担，无额外覆盖价值。
 - **修复方式**: 合并为一个测试，或删除其中一个。
 
+---
+
+## 交叉审查发现（2026-06-10，审查修复提交 4af0826, 7ecdb58, d0d19d3, 7918b3a, 7151507）
+
+> 以下问题由 subagent 对前5轮修复提交进行交叉审查发现；**待修复**。
+
+### REV1: `pairWithCode()` 异常路径未清零 `authTokenArray`
+- **状态**: 待修复
+- **关联修复提交**: `7ecdb58`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (pairWithCode, L310-320)
+- **问题描述**: C82 修复在成功路径末尾添加了 `authTokenArray.fill('\u0000')`，但如果 `authSessionStore.update()` 或 `mqttConnectionManager.connect()` 抛出异常，`authTokenArray.fill('\u0000')` 将永远不会执行，导致敏感 token 残留在异常栈帧中。
+- **风险**: **中**。异常路径下局部 token 未被清零，直到 GC 回收。
+- **修复方式**: 使用 `try/finally` 包裹 `pairWithCode()` 成功路径中的关键操作，确保 `authTokenArray.fill('\u0000')` 在任何退出路径中都被执行。
+
+### REV2: `Socks5ConnectionPoolTest` `catch (_: Exception)` 过于宽泛
+- **状态**: 待修复
+- **关联修复提交**: `d0d19d3`
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/proxy/Socks5ConnectionPoolTest.kt` (n37b10_createNewConnection_zerosCredentialPasswordAfterUse, L361-363)
+- **问题描述**: T1 修复添加了 `catch (_: Exception)` 来应对 `borrowConnection` 因无真实代理而抛出的异常。但该捕获会吞掉**所有** Exception 子类（包括 NPE 等非预期异常），如果生产代码中存在 bug，测试会静默继续，错误信息无法帮助定位真正根因。
+- **风险**: **中**。可能掩盖非预期异常，增加调试成本。
+- **修复方式**: 使用 `assertThrows` 明确断言预期的异常类型（如 `IOException`），或在 `catch` 块中验证异常类型的合理性。
+
+### REV3: `AuthSessionStoreTest` `@Synchronized` 检查覆盖不完整
+- **状态**: 待修复
+- **关联修复提交**: `7151507`
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/connection/AuthSessionStoreTest.kt` (authSessionStore_methodsAreSynchronized, L838-858)
+- **问题描述**: T3 修复为4个方法添加了 `@Synchronized` 注解检查，但 `AuthSessionStore` 中实际标注了 `@Synchronized` 的方法有9个（还包括 `updateWithResult`, `clearWithResult`, `getOrCreateDeviceId`, `validateWithResult`, `getCurrentSessionWithResult`, `loadSession`）。遗漏的检查会给团队虚假的线程安全信心。
+- **风险**: **低**。若未来移除遗漏方法的 `@Synchronized`，测试不会失败。
+- **修复方式**: 扩展测试覆盖所有公共 `@Synchronized` 方法，或至少覆盖所有修改/读取会话状态的关键方法。
+
 
