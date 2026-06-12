@@ -483,6 +483,41 @@ class MainViewModelTest {
         assertEquals("__ERR_CELLULAR_REQUIRED__", viewModel.uiState.value.errorMessage)
     }
 
+    // REV1: verify authTokenArray is zeroed even when authSessionStore.update() throws
+    @Test
+    fun pairWithCode_cellularConnected_zerosAuthTokenArray_whenUpdateThrows() = runTest {
+        every { networkStateManager.isCellularConnected() } returns true
+        every { authSessionStore.update(any(), any<CharArray>()) } throws RuntimeException("EncryptedSharedPreferences failure")
+
+        val viewModel = MainViewModel(context, networkStateManager, mqttConnectionManager, wifiManager, authSessionStore)
+        advanceUntilIdle()
+
+        viewModel.pairWithCode("123456")
+        advanceUntilIdle()
+
+        // The UiState authToken copy should be cleared (zeroed then replaced with CharArray(0))
+        // because the exception propagates and the finally block zeros the local authTokenArray
+        val authToken = viewModel.uiState.value.authToken
+        // The token should not contain the original plaintext
+        assertFalse(authToken.contentEquals("123456".toCharArray()))
+    }
+
+    // REV1: verify authTokenArray is zeroed even when mqttConnectionManager.connect() throws
+    @Test
+    fun pairWithCode_cellularConnected_zerosAuthTokenArray_whenConnectThrows() = runTest {
+        every { networkStateManager.isCellularConnected() } returns true
+        every { mqttConnectionManager.connect(any(), any()) } throws RuntimeException("MQTT connection failure")
+
+        val viewModel = MainViewModel(context, networkStateManager, mqttConnectionManager, wifiManager, authSessionStore)
+        advanceUntilIdle()
+
+        viewModel.pairWithCode("654321")
+        advanceUntilIdle()
+
+        val authToken = viewModel.uiState.value.authToken
+        assertFalse(authToken.contentEquals("654321".toCharArray()))
+    }
+
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------

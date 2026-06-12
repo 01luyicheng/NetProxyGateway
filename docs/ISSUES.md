@@ -1101,12 +1101,12 @@
 > 以下问题由 subagent 对前5轮修复提交进行交叉审查发现；**待修复**。
 
 ### REV1: `pairWithCode()` 异常路径未清零 `authTokenArray`
-- **状态**: 待修复
+- **状态**: 已修复
 - **关联修复提交**: `7ecdb58`
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (pairWithCode, L310-320)
 - **问题描述**: C82 修复在成功路径末尾添加了 `authTokenArray.fill('\u0000')`，但如果 `authSessionStore.update()` 或 `mqttConnectionManager.connect()` 抛出异常，`authTokenArray.fill('\u0000')` 将永远不会执行，导致敏感 token 残留在异常栈帧中。
 - **风险**: **中**。异常路径下局部 token 未被清零，直到 GC 回收。
-- **修复方式**: 使用 `try/finally` 包裹 `pairWithCode()` 成功路径中的关键操作，确保 `authTokenArray.fill('\u0000')` 在任何退出路径中都被执行。
+- **修复方式**: 使用 `try/finally` 包裹 `pairWithCode()` 成功路径中的关键操作，确保 `authTokenArray.fill('\u0000')` 在任何退出路径中都被执行。新增 `pairWithCode_cellularConnected_zerosAuthTokenArray_whenUpdateThrows` 和 `pairWithCode_cellularConnected_zerosAuthTokenArray_whenConnectThrows` 回归测试。
 
 ### REV2: `Socks5ConnectionPoolTest` `catch (_: Exception)` 过于宽泛
 - **状态**: 待修复

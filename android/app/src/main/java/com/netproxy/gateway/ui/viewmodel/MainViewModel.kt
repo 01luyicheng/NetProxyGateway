@@ -309,15 +309,18 @@ class MainViewModel @Inject constructor(
 
             if (networkStateManager.isCellularConnected()) {
                 val deviceIdSnapshot = _uiState.value.deviceId
-                authSessionStore.update(
-                    deviceId = deviceIdSnapshot,
-                    authToken = authTokenArray
-                )
-                mqttConnectionManager.connect(
-                    deviceId = deviceIdSnapshot,
-                    authToken = authTokenArray
-                )
-                authTokenArray.fill('\u0000')
+                try {
+                    authSessionStore.update(
+                        deviceId = deviceIdSnapshot,
+                        authToken = authTokenArray
+                    )
+                    mqttConnectionManager.connect(
+                        deviceId = deviceIdSnapshot,
+                        authToken = authTokenArray
+                    )
+                } finally {
+                    authTokenArray.fill('\u0000')
+                }
             } else {
                 authTokenArray.fill('\u0000')
                 _uiState.update {
