@@ -838,23 +838,38 @@ class AuthSessionStoreTest {
     fun authSessionStore_methodsAreSynchronized() {
         val methods = AuthSessionStore::class.java.declaredMethods
 
-        // Check that key methods have @Synchronized annotation
+        // Check that all public methods have @Synchronized annotation
         val updateMethod = methods.find { it.name == "update" && it.parameterCount == 2 }
+        val updateWithResultMethod = methods.find { it.name == "updateWithResult" && it.parameterCount == 2 }
         val clearMethod = methods.find { it.name == "clear" && it.parameterCount == 0 }
-        val isValidMethod = methods.find { it.name == "isValid" }
+        val clearWithResultMethod = methods.find { it.name == "clearWithResult" && it.parameterCount == 0 }
+        val getOrCreateDeviceIdMethod = methods.find { it.name == "getOrCreateDeviceId" && it.parameterCount == 0 }
+        val isValidMethod = methods.find { it.name == "isValid" && it.parameterCount == 2 }
+        val validateWithResultMethod = methods.find { it.name == "validateWithResult" && it.parameterCount == 2 }
         val getCurrentSessionMethod = methods.find { it.name == "getCurrentSession" && it.parameterCount == 0 }
+        val getCurrentSessionWithResultMethod = methods.find { it.name == "getCurrentSessionWithResult" && it.parameterCount == 0 }
 
         // Methods should exist
         assertNotNull("update method should exist", updateMethod)
+        assertNotNull("updateWithResult method should exist", updateWithResultMethod)
         assertNotNull("clear method should exist", clearMethod)
+        assertNotNull("clearWithResult method should exist", clearWithResultMethod)
+        assertNotNull("getOrCreateDeviceId method should exist", getOrCreateDeviceIdMethod)
         assertNotNull("isValid method should exist", isValidMethod)
+        assertNotNull("validateWithResult method should exist", validateWithResultMethod)
         assertNotNull("getCurrentSession method should exist", getCurrentSessionMethod)
+        assertNotNull("getCurrentSessionWithResult method should exist", getCurrentSessionWithResultMethod)
 
         // Methods should have @Synchronized annotation
         assertTrue("update method should be @Synchronized", updateMethod!!.isAnnotationPresent(Synchronized::class.java))
+        assertTrue("updateWithResult method should be @Synchronized", updateWithResultMethod!!.isAnnotationPresent(Synchronized::class.java))
         assertTrue("clear method should be @Synchronized", clearMethod!!.isAnnotationPresent(Synchronized::class.java))
+        assertTrue("clearWithResult method should be @Synchronized", clearWithResultMethod!!.isAnnotationPresent(Synchronized::class.java))
+        assertTrue("getOrCreateDeviceId method should be @Synchronized", getOrCreateDeviceIdMethod!!.isAnnotationPresent(Synchronized::class.java))
         assertTrue("isValid method should be @Synchronized", isValidMethod!!.isAnnotationPresent(Synchronized::class.java))
+        assertTrue("validateWithResult method should be @Synchronized", validateWithResultMethod!!.isAnnotationPresent(Synchronized::class.java))
         assertTrue("getCurrentSession method should be @Synchronized", getCurrentSessionMethod!!.isAnnotationPresent(Synchronized::class.java))
+        assertTrue("getCurrentSessionWithResult method should be @Synchronized", getCurrentSessionWithResultMethod!!.isAnnotationPresent(Synchronized::class.java))
     }
 
     // ==================== CharArray 生命周期测试 (N37-B6) ====================
