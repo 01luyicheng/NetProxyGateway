@@ -317,6 +317,7 @@ class MainViewModel @Inject constructor(
                     deviceId = deviceIdSnapshot,
                     authToken = authTokenArray
                 )
+                authTokenArray.fill('\u0000')
             } else {
                 authTokenArray.fill('\u0000')
                 _uiState.update {
