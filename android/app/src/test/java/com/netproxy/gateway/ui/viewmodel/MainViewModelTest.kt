@@ -451,23 +451,9 @@ class MainViewModelTest {
         assertEquals(0, viewModel.uiState.value.authToken.size)
     }
 
+    // N37-B8: verify the UiState authToken copy is cleared and error message is set on failed pairing
     @Test
-    fun pairWithCode_withoutCellular_zerosAuthTokenArray() = runTest {
-        every { networkStateManager.isCellularConnected() } returns false
-
-        val viewModel = MainViewModel(context, networkStateManager, mqttConnectionManager, wifiManager, authSessionStore)
-        advanceUntilIdle()
-
-        viewModel.pairWithCode("111111")
-        advanceUntilIdle()
-
-        // When cellular is not connected, the token should be zeroed and not stored in UiState
-        assertTrue(viewModel.uiState.value.authToken.isEmpty())
-    }
-
-    // N37-B8: verify the UiState authToken copy is also cleared on failed pairing
-    @Test
-    fun pairWithCode_withoutCellular_clearsUiStateAuthTokenCopy() = runTest {
+    fun pairWithCode_withoutCellular_clearsUiStateAuthTokenAndSetsError() = runTest {
         every { networkStateManager.isCellularConnected() } returns false
 
         val viewModel = MainViewModel(context, networkStateManager, mqttConnectionManager, wifiManager, authSessionStore)
