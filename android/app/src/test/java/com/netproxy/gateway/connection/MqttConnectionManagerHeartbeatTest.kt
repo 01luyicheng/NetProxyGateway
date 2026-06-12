@@ -121,13 +121,6 @@ class MqttConnectionManagerHeartbeatTest {
             every { spyManager.connect(any(), any()) } answers {
                 // Capture a copy immediately before any zeroing happens
                 capturedToken = secondArg<CharArray>().copyOf()
-                // Simulate what connect() does: copy the token immediately
-                val tokenSnapshot = secondArg<CharArray>().copyOf()
-                // Set activeTokenSnapshot via reflection so disconnect can clean up
-                val field =
-                    MqttConnectionManager::class.java.getDeclaredField("activeTokenSnapshot")
-                field.isAccessible = true
-                field.set(spyManager, tokenSnapshot)
             }
 
             // Call scheduleReconnect via reflection
