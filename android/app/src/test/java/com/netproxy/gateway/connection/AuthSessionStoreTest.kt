@@ -849,6 +849,12 @@ class AuthSessionStoreTest {
         assertNotNull("clear method should exist", clearMethod)
         assertNotNull("isValid method should exist", isValidMethod)
         assertNotNull("getCurrentSession method should exist", getCurrentSessionMethod)
+
+        // Methods should have @Synchronized annotation
+        assertTrue("update method should be @Synchronized", updateMethod!!.isAnnotationPresent(Synchronized::class.java))
+        assertTrue("clear method should be @Synchronized", clearMethod!!.isAnnotationPresent(Synchronized::class.java))
+        assertTrue("isValid method should be @Synchronized", isValidMethod!!.isAnnotationPresent(Synchronized::class.java))
+        assertTrue("getCurrentSession method should be @Synchronized", getCurrentSessionMethod!!.isAnnotationPresent(Synchronized::class.java))
     }
 
     // ==================== CharArray 生命周期测试 (N37-B6) ====================
