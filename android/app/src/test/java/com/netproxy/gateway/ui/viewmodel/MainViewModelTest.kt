@@ -100,6 +100,12 @@ class MainViewModelTest {
         val stateFlow = MutableStateFlow<MqttConnectionState>(MqttConnectionState.Disconnected)
         every { mqttConnectionManager.connectionState } returns stateFlow
 
+        // Capture a copy of the token at call time before pairWithCode's finally block zeroes it
+        var capturedToken: CharArray? = null
+        every { mqttConnectionManager.connect(any(), any()) } answers {
+            capturedToken = secondArg<CharArray>().copyOf()
+        }
+
         val viewModel = MainViewModel(context, networkStateManager, mqttConnectionManager, wifiManager, authSessionStore)
 
         viewModel.pairWithCode("123456")
@@ -108,7 +114,9 @@ class MainViewModelTest {
         val uiState = viewModel.uiState.value
         assertEquals("123456", uiState.peerId)
         assertFalse(uiState.isPaired)
-        verify(exactly = 1) { mqttConnectionManager.connect("device-stable", "123456".toCharArray()) }
+        verify(exactly = 1) { mqttConnectionManager.connect("device-stable", any()) }
+        assertNotNull(capturedToken)
+        assertTrue(capturedToken!!.contentEquals("123456".toCharArray()))
     }
 
     @Test

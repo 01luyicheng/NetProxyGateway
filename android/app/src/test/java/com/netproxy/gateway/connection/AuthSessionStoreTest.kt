@@ -31,6 +31,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.lang.reflect.Modifier
 
 /**
  * AuthSessionStore 的单元测试
@@ -861,16 +862,16 @@ class AuthSessionStoreTest {
         assertNotNull("getCurrentSession method should exist", getCurrentSessionMethod)
         assertNotNull("getCurrentSessionWithResult method should exist", getCurrentSessionWithResultMethod)
 
-        // Methods should have @Synchronized annotation
-        assertTrue("update method should be @Synchronized", updateMethod!!.isAnnotationPresent(Synchronized::class.java))
-        assertTrue("updateWithResult method should be @Synchronized", updateWithResultMethod!!.isAnnotationPresent(Synchronized::class.java))
-        assertTrue("clear method should be @Synchronized", clearMethod!!.isAnnotationPresent(Synchronized::class.java))
-        assertTrue("clearWithResult method should be @Synchronized", clearWithResultMethod!!.isAnnotationPresent(Synchronized::class.java))
-        assertTrue("getOrCreateDeviceId method should be @Synchronized", getOrCreateDeviceIdMethod!!.isAnnotationPresent(Synchronized::class.java))
-        assertTrue("isValid method should be @Synchronized", isValidMethod!!.isAnnotationPresent(Synchronized::class.java))
-        assertTrue("validateWithResult method should be @Synchronized", validateWithResultMethod!!.isAnnotationPresent(Synchronized::class.java))
-        assertTrue("getCurrentSession method should be @Synchronized", getCurrentSessionMethod!!.isAnnotationPresent(Synchronized::class.java))
-        assertTrue("getCurrentSessionWithResult method should be @Synchronized", getCurrentSessionWithResultMethod!!.isAnnotationPresent(Synchronized::class.java))
+        // Methods should have @Synchronized annotation (compiled as ACC_SYNCHRONIZED modifier bit)
+        assertTrue("update method should be @Synchronized", Modifier.isSynchronized(updateMethod!!.modifiers))
+        assertTrue("updateWithResult method should be @Synchronized", Modifier.isSynchronized(updateWithResultMethod!!.modifiers))
+        assertTrue("clear method should be @Synchronized", Modifier.isSynchronized(clearMethod!!.modifiers))
+        assertTrue("clearWithResult method should be @Synchronized", Modifier.isSynchronized(clearWithResultMethod!!.modifiers))
+        assertTrue("getOrCreateDeviceId method should be @Synchronized", Modifier.isSynchronized(getOrCreateDeviceIdMethod!!.modifiers))
+        assertTrue("isValid method should be @Synchronized", Modifier.isSynchronized(isValidMethod!!.modifiers))
+        assertTrue("validateWithResult method should be @Synchronized", Modifier.isSynchronized(validateWithResultMethod!!.modifiers))
+        assertTrue("getCurrentSession method should be @Synchronized", Modifier.isSynchronized(getCurrentSessionMethod!!.modifiers))
+        assertTrue("getCurrentSessionWithResult method should be @Synchronized", Modifier.isSynchronized(getCurrentSessionWithResultMethod!!.modifiers))
     }
 
     // ==================== CharArray 生命周期测试 (N37-B6) ====================
