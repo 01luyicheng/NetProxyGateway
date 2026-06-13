@@ -477,6 +477,36 @@ class MainViewModelTest {
         assertEquals("__ERR_CELLULAR_REQUIRED__", viewModel.uiState.value.errorMessage)
     }
 
+    @Test
+    fun pairWithCode_cellularConnected_zerosAuthToken_whenUpdateThrows() = runTest {
+        every { networkStateManager.isCellularConnected() } returns true
+        every { authSessionStore.update(any(), any<CharArray>()) } throws RuntimeException("store update failed")
+
+        val viewModel = MainViewModel(context, networkStateManager, mqttConnectionManager, wifiManager, authSessionStore)
+        advanceUntilIdle()
+
+        viewModel.pairWithCode("123456")
+        advanceUntilIdle()
+
+        assertEquals(0, viewModel.uiState.value.authToken.size)
+        assertFalse(viewModel.uiState.value.isPairingInProgress)
+    }
+
+    @Test
+    fun pairWithCode_cellularConnected_zerosAuthToken_whenConnectThrows() = runTest {
+        every { networkStateManager.isCellularConnected() } returns true
+        every { mqttConnectionManager.connect(any(), any()) } throws RuntimeException("connect failed")
+
+        val viewModel = MainViewModel(context, networkStateManager, mqttConnectionManager, wifiManager, authSessionStore)
+        advanceUntilIdle()
+
+        viewModel.pairWithCode("123456")
+        advanceUntilIdle()
+
+        assertEquals(0, viewModel.uiState.value.authToken.size)
+        assertFalse(viewModel.uiState.value.isPairingInProgress)
+    }
+
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------

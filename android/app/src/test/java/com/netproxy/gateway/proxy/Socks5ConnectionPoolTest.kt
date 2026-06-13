@@ -111,6 +111,7 @@ class Socks5ConnectionPoolTest {
             watcherThread.interrupt()
             if (borrowThread.isAlive) {
                 borrowThread.interrupt()
+                borrowThread.join(1_000)
             }
             assertFalse("Expected borrow thread to finish", borrowThread.isAlive)
             verify(exactly = 0) { socket.close() }

@@ -305,7 +305,7 @@ class MainViewModel @Inject constructor(
     fun pairWithCode(code: String) {
         viewModelScope.launch {
             val authTokenArray = code.toCharArray()
-            _uiState.update { it.copy(peerId = code, isPairingInProgress = true, errorMessage = null, authToken = authTokenArray.copyOf()) }
+            _uiState.update { it.copy(peerId = code, isPairingInProgress = true, errorMessage = null) }
 
             try {
                 if (networkStateManager.isCellularConnected()) {
@@ -318,10 +318,15 @@ class MainViewModel @Inject constructor(
                         deviceId = deviceIdSnapshot,
                         authToken = authTokenArray
                     )
+                    _uiState.update { it.copy(authToken = authTokenArray.copyOf()) }
                 } else {
                     _uiState.update {
-                        it.copy(isPairingInProgress = false, errorMessage = AppLocale.getString(context, R.string.error_cellular_required), authToken = CharArray(0))
+                        it.copy(isPairingInProgress = false, errorMessage = AppLocale.getString(context, R.string.error_cellular_required))
                     }
+                }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(isPairingInProgress = false, errorMessage = e.message)
                 }
             } finally {
                 authTokenArray.fill('\u0000')
