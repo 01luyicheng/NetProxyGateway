@@ -949,9 +949,10 @@ class AuthSessionStoreTest {
         every { spyStore["loadSession"]() } returns mockSession
 
         // Call isValid
-        spyStore.isValid("device-123", "secret-token".toCharArray())
+        val result = spyStore.isValid("device-123", "secret-token".toCharArray())
 
         // The mock session's authToken should have been zeroed in finally
+        assertTrue("isValid should return true for matching device and token", result)
         assertTrue("Temporary session authToken should be zeroed after isValid", mockSession.authToken.all { it == '\u0000' })
     }
 }

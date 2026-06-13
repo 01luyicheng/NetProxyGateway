@@ -75,21 +75,25 @@ class Socks5ConnectionPoolTest {
             val borrowThread = Thread {
                 pool.borrowConnection(destinationIp, destinationPort)
             }
-            try {
-                borrowThread.start()
-
-                val queue = availableConnections[destKey]
-                    ?: throw AssertionError("Expected destination queue to exist")
-
-                // Deterministic synchronization: wait until borrowThread finishes read phase
-                // and blocks trying to acquire the write lock for cleanup.
-                val cleanupReached = CountDownLatch(1)
-                Thread {
+            val cleanupReached = CountDownLatch(1)
+            val watcherThread = Thread {
+                try {
                     while (!poolLock.hasQueuedThread(borrowThread)) {
                         Thread.sleep(10)
                     }
                     cleanupReached.countDown()
-                }.start()
+                } catch (e: InterruptedException) {
+                    // Test is ending or timed out; do not send false signal
+                    Thread.currentThread().interrupt()
+                }
+            }
+            watcherThread.isDaemon = true
+            try {
+                borrowThread.start()
+                watcherThread.start()
+
+                val queue = availableConnections[destKey]
+                    ?: throw AssertionError("Expected destination queue to exist")
 
                 assertTrue(
                     "Expected borrow thread to reach cleanup phase",
@@ -104,6 +108,7 @@ class Socks5ConnectionPoolTest {
             }
 
             borrowThread.join(10_000)
+            watcherThread.interrupt()
             if (borrowThread.isAlive) {
                 borrowThread.interrupt()
             }
