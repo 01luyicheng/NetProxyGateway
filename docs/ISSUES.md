@@ -1060,15 +1060,16 @@
 - **修复方式**: 添加 `assertTrue(method.isAnnotationPresent(Synchronized::class.java))` 断言。
 
 ### T4: `MqttConnectionManagerHeartbeatTest` 过度 mock `connect()` 内部实现
-- **状态**: 待修复
+- **状态**: 已修复
 - **提交哈希**: `4c0cea6`
-- **位置**: `android/app/src/test/java/com/netproxy/gateway/connection/MqttConnectionManagerHeartbeatTest.kt` (scheduleReconnect_createsOwnTokenCopy_originalZeroingDoesNotAffectReconnect, L121-L131)
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/connection/MqttConnectionManagerHeartbeatTest.kt` (scheduleReconnect_createsOwnTokenCopy_originalZeroingDoesNotAffectReconnect, L121-131)
 - **问题描述**: mock `connect()` 的 `answers` 块中通过反射设置 `activeTokenSnapshot` 私有字段，模拟了真实 `connect()` 的内部副作用。测试与实现细节深度耦合，若 `connect()` 重构（例如不再使用 `activeTokenSnapshot` 字段），此测试会在被测逻辑其实正确的情况下假失败。
 - **风险**: **中**。测试脆弱性高，重构成本大。
 - **修复方式**: 仅验证 `connect()` 收到的 `CharArray` 内容正确且未被 zeroed，不要在 mock 中复制真实方法的内部状态管理逻辑。
+- **验证结果**: 当前代码已移除反射设置私有字段，仅通过 `secondArg<CharArray>().copyOf()` 捕获参数进行验证。测试与实际实现解耦。
 
 ### T5: `AuthSessionStoreTest` 遗漏关键 token zeroing 验证
-- **状态**: 待修复
+- **状态**: 已修复
 - **提交哈希**: `4c0cea6`
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/connection/AuthSessionStoreTest.kt`
 - **问题描述**: 以下 N37 核心安全行为没有任何测试覆盖：
@@ -1077,51 +1078,57 @@
   3. `isValid()` / `validateWithResult()` 中临时 `session.authToken` 是否在 `finally` 中被 zeroed。
 - **风险**: **中**。安全行为缺乏回归保护，未来重构可能意外移除 zeroing 逻辑。
 - **修复方式**: 为上述三种场景补充直接测试，通过反射读取 `inMemoryToken` 或捕获返回的 `session.authToken` 引用进行验证。
+- **验证结果**: 当前测试已补充三个 zeroing 验证用例：`update_shouldZeroOldInMemoryTokenBeforeReplacing`、`clear_shouldZeroInMemoryToken`、`isValid_shouldZeroTemporarySessionAuthToken`。全部通过。
 
 ### T6: `Socks5ConnectionPoolTest` 并发测试存在 flaky 风险
-- **状态**: 待修复
+- **状态**: 已修复
 - **提交哈希**: `4c0cea6`
-- **位置**: `android/app/src/test/java/com/netproxy/gateway/proxy/Socks5ConnectionPoolTest.kt` (borrowConnection_cleanupInvalidConnections_doesNotCloseValidConnectionWhenInUseFlips, L24-L103)
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/proxy/Socks5ConnectionPoolTest.kt` (borrowConnection_cleanupInvalidConnections_doesNotCloseValidConnectionWhenInUseFlips, L24-103)
 - **问题描述**: 测试使用真实 `Thread` 和 `ReentrantReadWriteLock`，依赖 `Thread.yield()` 和固定 2 秒超时做同步。在 CPU 负载高的 CI 环境或 Windows 系统上，线程调度顺序无法保证，可能因超时而失败。
 - **风险**: **中**。flaky test 会降低团队对 CI 的信任度，增加调试成本。
 - **修复方式**: 使用 `CountDownLatch` 或 `Semaphore` 替代 `Thread.yield()` 和固定超时，实现确定性同步。
+- **验证结果**: 当前代码已使用 `CountDownLatch` 替代 `Thread.yield()`，超时时间延长至 10 秒。测试通过且确定性提高。
 
 ### T7: `MainViewModelTest` 两个测试方法高度重复
-- **状态**: 待修复
+- **状态**: 已修复
 - **提交哈希**: `4c0cea6`
-- **位置**: `android/app/src/test/java/com/netproxy/gateway/ui/viewmodel/MainViewModelTest.kt` (pairWithCode_withoutCellular_zerosAuthTokenArray, L455-L466; pairWithCode_withoutCellular_clearsUiStateAuthTokenCopy, L470-L484)
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/ui/viewmodel/MainViewModelTest.kt` (pairWithCode_withoutCellular_zerosAuthTokenArray, L455-466; pairWithCode_withoutCellular_clearsUiStateAuthTokenCopy, L470-484)
 - **问题描述**: 两个测试测试了完全相同的场景（无蜂窝网络时 `pairWithCode` 的行为），且断言内容几乎一致（`authToken.isEmpty()` 与 `authToken.size == 0` 等价）。
 - **风险**: **低**。增加维护负担，无额外覆盖价值。
 - **修复方式**: 合并为一个测试，或删除其中一个。
+- **验证结果**: 当前代码已将两个重复测试合并为 `pairWithCode_withoutCellular_clearsUiStateAuthTokenAndSetsError`（L456-470）。
 
 ---
 
 ## 交叉审查发现（2026-06-10，审查修复提交 4af0826, 7ecdb58, d0d19d3, 7918b3a, 7151507）
 
-> 以下问题由 subagent 对前5轮修复提交进行交叉审查发现；**待修复**。
+> 以下问题由 subagent 对前5轮修复提交进行交叉审查发现；**已全部修复**。
 
 ### REV1: `pairWithCode()` 异常路径未清零 `authTokenArray`
-- **状态**: 待修复
-- **关联修复提交**: `7ecdb58`
+- **状态**: 已修复
+- **关联修复提交**: `7ecdb58`（生产代码添加 try/finally）；`5518906`（修复 MockK CharArray 验证回归）
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (pairWithCode, L310-320)
 - **问题描述**: C82 修复在成功路径末尾添加了 `authTokenArray.fill('\u0000')`，但如果 `authSessionStore.update()` 或 `mqttConnectionManager.connect()` 抛出异常，`authTokenArray.fill('\u0000')` 将永远不会执行，导致敏感 token 残留在异常栈帧中。
 - **风险**: **中**。异常路径下局部 token 未被清零，直到 GC 回收。
 - **修复方式**: 使用 `try/finally` 包裹 `pairWithCode()` 成功路径中的关键操作，确保 `authTokenArray.fill('\u0000')` 在任何退出路径中都被执行。
+- **回归说明**: `try/finally` 清零导致 `MainViewModelTest.pairWithCode_cellularConnected_doesNotMarkPairedBeforeMqttConnected` 中 MockK 对 CharArray 的 `eq` 验证失败（MockK 存储引用，finally 清零后验证时内容已变）。已在 `5518906` 中通过 `answers` 块捕获 `copyOf()` 副本来修复。
 
 ### REV2: `Socks5ConnectionPoolTest` `catch (_: Exception)` 过于宽泛
-- **状态**: 待修复
+- **状态**: 已修复
 - **关联修复提交**: `d0d19d3`
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/proxy/Socks5ConnectionPoolTest.kt` (n37b10_createNewConnection_zerosCredentialPasswordAfterUse, L361-363)
 - **问题描述**: T1 修复添加了 `catch (_: Exception)` 来应对 `borrowConnection` 因无真实代理而抛出的异常。但该捕获会吞掉**所有** Exception 子类（包括 NPE 等非预期异常），如果生产代码中存在 bug，测试会静默继续，错误信息无法帮助定位真正根因。
 - **风险**: **中**。可能掩盖非预期异常，增加调试成本。
 - **修复方式**: 使用 `assertThrows` 明确断言预期的异常类型（如 `IOException`），或在 `catch` 块中验证异常类型的合理性。
+- **验证结果**: 当前代码已使用 `catch (e: java.io.IOException)`（L373），捕获范围已收窄。无需进一步修改。
 
 ### REV3: `AuthSessionStoreTest` `@Synchronized` 检查覆盖不完整
-- **状态**: 待修复
-- **关联修复提交**: `7151507`
+- **状态**: 已修复
+- **关联修复提交**: `7151507`（扩展为9个方法）；`5518906`（修正检查方式）
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/connection/AuthSessionStoreTest.kt` (authSessionStore_methodsAreSynchronized, L838-858)
-- **问题描述**: T3 修复为4个方法添加了 `@Synchronized` 注解检查，但 `AuthSessionStore` 中实际标注了 `@Synchronized` 的方法有9个（还包括 `updateWithResult`, `clearWithResult`, `getOrCreateDeviceId`, `validateWithResult`, `getCurrentSessionWithResult`, `loadSession`）。遗漏的检查会给团队虚假的线程安全信心。
+- **问题描述**: T3 修复为4个方法添加了 `@Synchronized` 注解检查，但 `AuthSessionStore` 中实际标注了 `@Synchronized` 的方法有9个（还包括 `updateWithResult`, `clearWithResult`, `getOrCreateDeviceId`, `validateWithResult`, `getCurrentSessionWithResult`, `loadSession`）。遗漏的检查会给团队虚假的线程安全信心。此外，原始检查使用 `isAnnotationPresent(Synchronized::class.java)`，但 Kotlin 的 `@Synchronized` 编译为 `ACC_SYNCHRONIZED` JVM 标志而非运行时保留注解，导致该断言永远失败。
 - **风险**: **低**。若未来移除遗漏方法的 `@Synchronized`，测试不会失败。
-- **修复方式**: 扩展测试覆盖所有公共 `@Synchronized` 方法，或至少覆盖所有修改/读取会话状态的关键方法。
+- **修复方式**: 扩展测试覆盖所有公共 `@Synchronized` 方法；将 `isAnnotationPresent(Synchronized::class.java)` 替换为 `Modifier.isSynchronized(method.modifiers)`。
+- **验证结果**: 当前测试已覆盖9个公共方法，且使用正确的 `Modifier.isSynchronized()` 检查。全部通过。
 
 
