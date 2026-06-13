@@ -283,7 +283,7 @@ class MqttConnectionManager @Inject constructor(
         val tokenSnapshot = authToken.copyOf()
         synchronized(this@MqttConnectionManager) {
             activeTokenSnapshot?.fill('\u0000')
-            activeTokenSnapshot = tokenSnapshot
+            activeTokenSnapshot = tokenSnapshot.copyOf()
         }
         var generation = 0L
         lateinit var jobToStart: Job
@@ -482,6 +482,8 @@ class MqttConnectionManager @Inject constructor(
                         onReconnectAttemptFailed()
                         scheduleReconnect(deviceId, tokenSnapshot, generation)
                     }
+                } finally {
+                    tokenSnapshot.fill('\u0000')
                 }
             }
 

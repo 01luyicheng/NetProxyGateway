@@ -1131,4 +1131,38 @@
 - **修复方式**: 扩展测试覆盖所有公共 `@Synchronized` 方法；将 `isAnnotationPresent(Synchronized::class.java)` 替换为 `Modifier.isSynchronized(method.modifiers)`。
 - **验证结果**: 当前测试已覆盖9个公共方法，且使用正确的 `Modifier.isSynchronized()` 检查。全部通过。
 
+---
+
+## 提交后审查发现（2026-06-13，审查提交 94a0a9c..cb61160）
+
+> 以下问题由多 subagent 对 PR #25 最近24小时的6个提交进行交叉审查发现。
+
+### REV4: `pairWithCode()` update 成功后 connect 失败 → AuthSessionStore 孤儿 session
+- **状态**: 已修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (pairWithCode, L322-334)
+- **问题描述**: 当 `authSessionStore.update()` 成功但 `mqttConnectionManager.connect()` 抛出异常时，session 已持久化到 AuthSessionStore 但连接未建立。catch 块将 UiState.authToken 清零，但 AuthSessionStore 中的有效 session 未被回滚，导致不一致状态：UiState 认为没有配对，但 AuthSessionStore 持有有效凭证。
+- **风险**: **中**。网络不稳定时容易触发。孤儿 session 可能被其他路径意外使用。
+- **修复方式**: 在 connect() 的 try-catch 中，当 connect 抛异常时调用 `authSessionStore.clear()` 回滚已存储的 session。
+
+### REV5: `observeMqttState()` Disconnected/Error 分支未清除 UiState 中的 authToken
+- **状态**: 已修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (observeMqttState, L233-269)
+- **问题描述**: 当 MQTT 连接意外断开（非用户主动 disconnect）时，`observeMqttState()` 的 Disconnected 和 Error 分支未清除 UiState 中的 authToken，也未清零旧引用。对比 `disconnect()` 方法正确地执行了 `oldToken.fill('\u0000')`，这两个分支遗漏了相同的安全处理。
+- **风险**: **中**。敏感 token 在内存中残留，且状态语义不一致（isPaired=false 但 authToken 非空）。
+- **修复方式**: 在 Disconnected 和 Error 分支中，仿照 `disconnect()` 的模式，先保存旧 authToken 引用，再替换为 `CharArray(0)`，最后对旧引用执行 `fill('\u0000')`。
+
+### REV6: `pairWithCode()` else/catch 分支替换 authToken 时未清零旧引用
+- **状态**: 已修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (pairWithCode, L337-352)
+- **问题描述**: 当用户已配对（UiState 中有 authToken）后再次尝试配对失败时，else 和 catch 分支将 authToken 替换为 `CharArray(0)` 但未清零旧的 CharArray 引用。对比 `disconnect()` 方法正确地执行了 `oldToken.fill('\u0000')`，这两个分支遗漏了相同的安全处理。
+- **风险**: **低-中**。触发条件较窄（需用户在已配对状态下再次配对且失败），但违反安全编码一致性。
+- **修复方式**: 在 else 和 catch 分支的 `_uiState.update` 中，仿照 `disconnect()` 的模式，先获取旧 token 引用，替换后清零。
+
+### REV7: `MqttConnectionManager.connect()` activeTokenSnapshot 与 tokenSnapshot 同一引用 + LAZY 协程无 finally 清零
+- **状态**: 已修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (connect, L282-494)
+- **问题描述**: 两个相关问题：(1) `activeTokenSnapshot = tokenSnapshot` 是直接引用赋值（非 `copyOf()`），导致 `disconnect()` 中 `activeTokenSnapshot?.fill('\u0000')` 会同时清零 LAZY 协程正在使用的 `tokenSnapshot`。虽然 Paho MQTT 内部对 password 做了 clone，且 generation 检查阻止了大部分竞态路径，但 CharArray 的并发读写在 JVM 内存模型下是数据竞争。(2) LAZY 协程没有 finally 块清零 `tokenSnapshot`，当协程因 CancellationException 或 generation 不匹配退出时，token 不会被显式清零（仅依赖 `activeTokenSnapshot` 的间接清零）。
+- **风险**: **中低**。有多层防御缓解（Paho clone、generation 检查、shouldStayConnected 标志），但违反安全编码原则，且 CharArray 并发读写是数据竞争。
+- **修复方式**: (1) 将 `activeTokenSnapshot = tokenSnapshot` 改为 `activeTokenSnapshot = tokenSnapshot.copyOf()`，使两者成为独立副本。(2) 在 LAZY 协程中添加 `finally { tokenSnapshot.fill('\u0000') }` 块。
+
 

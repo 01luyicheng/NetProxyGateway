@@ -233,30 +233,38 @@ class MainViewModel @Inject constructor(
                     is MqttConnectionState.Disconnected -> {
                         connectionStartTime = 0
                         stopDurationTimer()
-                        _uiState.update {
-                            it.copy(
+                        _uiState.update { current ->
+                            val oldToken = current.authToken
+                            val newState = current.copy(
                                 isConnected = false,
                                 isPaired = false,
                                 isPairingInProgress = false,
                                 mqttState = MqttUiState.Disconnected,
                                 mqttErrorMessage = null,
-                                connectionDurationMs = 0
+                                connectionDurationMs = 0,
+                                authToken = CharArray(0)
                             )
+                            oldToken.fill('\u0000')
+                            newState
                         }
                     }
                     is MqttConnectionState.Error -> {
                         connectionStartTime = 0
                         stopDurationTimer()
-                        _uiState.update {
-                            it.copy(
+                        _uiState.update { current ->
+                            val oldToken = current.authToken
+                            val newState = current.copy(
                                 isConnected = false,
                                 isPaired = false,
                                 isPairingInProgress = false,
                                 errorMessage = state.message,
                                 mqttState = MqttUiState.Error,
                                 mqttErrorMessage = state.message,
-                                connectionDurationMs = 0
+                                connectionDurationMs = 0,
+                                authToken = CharArray(0)
                             )
+                            oldToken.fill('\u0000')
+                            newState
                         }
                     }
                 }
@@ -315,20 +323,32 @@ class MainViewModel @Inject constructor(
                         deviceId = deviceIdSnapshot,
                         authToken = authTokenArray
                     )
-                    mqttConnectionManager.connect(
-                        deviceId = deviceIdSnapshot,
-                        authToken = authTokenArray
-                    )
+                    try {
+                        mqttConnectionManager.connect(
+                            deviceId = deviceIdSnapshot,
+                            authToken = authTokenArray
+                        )
+                    } catch (e: Exception) {
+                        // connect failed after update succeeded — rollback stored session
+                        authSessionStore.clear()
+                        throw e
+                    }
                     _uiState.update { it.copy(authToken = authTokenArray.copyOf()) }
                 } else {
-                    _uiState.update {
-                        it.copy(isPairingInProgress = false, errorMessage = AppLocale.getString(context, R.string.error_cellular_required), authToken = CharArray(0))
+                    _uiState.update { current ->
+                        val oldToken = current.authToken
+                        val newState = current.copy(isPairingInProgress = false, errorMessage = AppLocale.getString(context, R.string.error_cellular_required), authToken = CharArray(0))
+                        oldToken.fill('\u0000')
+                        newState
                     }
                 }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
-                _uiState.update {
-                    it.copy(isPairingInProgress = false, errorMessage = e.message, authToken = CharArray(0))
+                _uiState.update { current ->
+                    val oldToken = current.authToken
+                    val newState = current.copy(isPairingInProgress = false, errorMessage = e.message, authToken = CharArray(0))
+                    oldToken.fill('\u0000')
+                    newState
                 }
             } finally {
                 authTokenArray.fill('\u0000')
