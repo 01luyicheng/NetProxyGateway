@@ -490,6 +490,7 @@ class MainViewModelTest {
 
         assertEquals(0, viewModel.uiState.value.authToken.size)
         assertFalse(viewModel.uiState.value.isPairingInProgress)
+        assertEquals("store update failed", viewModel.uiState.value.errorMessage)
     }
 
     @Test
@@ -505,6 +506,7 @@ class MainViewModelTest {
 
         assertEquals(0, viewModel.uiState.value.authToken.size)
         assertFalse(viewModel.uiState.value.isPairingInProgress)
+        assertEquals("connect failed", viewModel.uiState.value.errorMessage)
     }
 
     // -------------------------------------------------------------------------

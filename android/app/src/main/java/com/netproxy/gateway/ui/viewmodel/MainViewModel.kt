@@ -28,6 +28,7 @@ import com.netproxy.gateway.vpn.VpnStatus
 import com.netproxy.gateway.wifi.GatewayWifiManager
 import com.netproxy.gateway.wifi.WifiNetwork
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
@@ -321,12 +322,13 @@ class MainViewModel @Inject constructor(
                     _uiState.update { it.copy(authToken = authTokenArray.copyOf()) }
                 } else {
                     _uiState.update {
-                        it.copy(isPairingInProgress = false, errorMessage = AppLocale.getString(context, R.string.error_cellular_required))
+                        it.copy(isPairingInProgress = false, errorMessage = AppLocale.getString(context, R.string.error_cellular_required), authToken = CharArray(0))
                     }
                 }
             } catch (e: Exception) {
+                if (e is CancellationException) throw e
                 _uiState.update {
-                    it.copy(isPairingInProgress = false, errorMessage = e.message)
+                    it.copy(isPairingInProgress = false, errorMessage = e.message, authToken = CharArray(0))
                 }
             } finally {
                 authTokenArray.fill('\u0000')
