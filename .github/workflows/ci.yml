@@ -60,15 +60,15 @@ jobs:
 
       - name: Generate JaCoCo coverage report
         run: ./android/gradlew -p android jacocoTestReport --stacktrace --no-daemon
-        continue-on-error: true
+        continue-on-error: false
 
       - name: Run Lint check
         run: ./android/gradlew -p android lintDebug --no-daemon
-        continue-on-error: true
+        continue-on-error: false
 
       - name: Run dependency vulnerability check
         run: ./android/gradlew -p android dependencyCheckAnalyze --no-daemon
-        continue-on-error: true
+        continue-on-error: false
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
@@ -108,7 +108,7 @@ jobs:
         uses: wagoid/commitlint-github-action@v6
         with:
           configFile: .commitlintrc.json
-        continue-on-error: true
+        continue-on-error: false
 
   go-build:
     name: Go Server Build
@@ -151,7 +151,7 @@ jobs:
         if: always()
         working-directory: server/${{ matrix.component }}
         run: govulncheck ./...
-        continue-on-error: true
+        continue-on-error: false
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4

@@ -159,7 +159,11 @@ func NewServer() (*Server, error) {
 				log.Fatalf("FATAL: failed to generate random INTERNAL_API_KEY: %v", err)
 			}
 			internalAPIKey = key
-			log.Printf("  INTERNAL_API_KEY generated (first 8 chars: %s...)", internalAPIKey[:8])
+			prefix := internalAPIKey
+			if len(prefix) > 4 {
+				prefix = prefix[:4]
+			}
+			log.Printf("  INTERNAL_API_KEY generated (first 4 chars: %s...)", prefix)
 		} else {
 			if appEnv != "" && appEnv != "production" {
 				log.Printf("WARNING: APP_ENV is set to %q but only \"development\" enables dev mode. Treating as production.", appEnv)

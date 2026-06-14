@@ -63,6 +63,11 @@ cover_*
 .trae/
 .windsurf/
 
+# Environment variables
+.env
+.env.*
+!.env.example
+
 # AI skills are tracked in version control
 # skills/
 # skills-lock.json
