@@ -531,7 +531,7 @@ class MainViewModelTest {
     @Test
     fun mqttState_Disconnected_clearsAuthToken() = runTest {
         every { networkStateManager.isCellularConnected() } returns true
-        val stateFlow = MutableStateFlow<MqttConnectionState>(MqttConnectionState.Disconnected)
+        val stateFlow = MutableStateFlow<MqttConnectionState>(MqttConnectionState.Connected)
         every { mqttConnectionManager.connectionState } returns stateFlow
 
         val viewModel = MainViewModel(context, networkStateManager, mqttConnectionManager, wifiManager, authSessionStore)
