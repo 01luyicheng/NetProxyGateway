@@ -871,3 +871,56 @@ func TestNotifyDeviceStatusAfterStopIsIgnored(t *testing.T) {
 		t.Fatalf("expected no requests after Stop(), got %d", got)
 	}
 }
+
+// TestSendLoopNoPanicOnConcurrentClose verifies that sendLoop does not panic
+// when Close() is called concurrently. This is a regression test for the
+// sendLoop WriteMessage race with Close() — without connMu protection,
+// Close() could set t.Conn = nil between the nil-check and WriteMessage call.
+func TestSendLoopNoPanicOnConcurrentClose(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer wsServer.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(wsServer.URL, "http")
+	clientConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("failed to dial websocket server: %v", err)
+	}
+
+	tunnelServer := NewServer(&Config{
+		HeartbeatInterval: time.Second,
+		HeartbeatTimeout:  2 * time.Second,
+	})
+	tunnel := NewTunnelConn("device-sendloop-race", clientConn)
+
+	// Start sendLoop in background
+	sendLoopDone := make(chan struct{})
+	go func() {
+		tunnelServer.sendLoop(tunnel)
+		close(sendLoopDone)
+	}()
+
+	// Send a message and then close concurrently
+	tunnel.Send([]byte("test-message"))
+	time.Sleep(10 * time.Millisecond)
+	tunnel.Close()
+
+	// sendLoop should exit without panicking
+	select {
+	case <-sendLoopDone:
+		// Success: sendLoop exited cleanly
+	case <-time.After(2 * time.Second):
+		t.Fatal("sendLoop did not exit after Close()")
+	}
+}

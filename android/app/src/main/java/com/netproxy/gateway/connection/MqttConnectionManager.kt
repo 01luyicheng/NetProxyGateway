@@ -283,7 +283,7 @@ class MqttConnectionManager @Inject constructor(
         val tokenSnapshot = authToken.copyOf()
         synchronized(this@MqttConnectionManager) {
             activeTokenSnapshot?.fill('\u0000')
-            activeTokenSnapshot = tokenSnapshot
+            activeTokenSnapshot = tokenSnapshot.copyOf()
         }
         var generation = 0L
         lateinit var jobToStart: Job
@@ -474,14 +474,18 @@ class MqttConnectionManager @Inject constructor(
                     }
                     logger.error("MQTT connection error", e)
                     AppAuditLogStore.error("MQTT", buildConnectionErrorAuditMessage(e))
-                    if (!shouldStayConnected || generation != connectionGeneration.get()) {
-                        return@launch
+                    synchronized(this@MqttConnectionManager) {
+                        if (!shouldStayConnected || generation != connectionGeneration.get()) {
+                            return@synchronized
+                        }
+                        _connectionState.value = MqttConnectionState.Error(e.message ?: "Connection failed")
+                        if (shouldStayConnected) {
+                            onReconnectAttemptFailed()
+                            scheduleReconnect(deviceId, activeTokenSnapshot ?: CharArray(0), generation)
+                        }
                     }
-                    _connectionState.value = MqttConnectionState.Error(e.message ?: "Connection failed")
-                    if (shouldStayConnected) {
-                        onReconnectAttemptFailed()
-                        scheduleReconnect(deviceId, tokenSnapshot, generation)
-                    }
+                } finally {
+                    tokenSnapshot.fill('\u0000')
                 }
             }
 
@@ -538,8 +542,8 @@ class MqttConnectionManager @Inject constructor(
         }
 
         heartbeatJob?.cancel()
+        val tokenSnapshot = authToken.copyOf()
         heartbeatJob = scope.launch {
-            val tokenSnapshot = authToken.copyOf()
             try {
             var consecutiveFailures = 0
             while (

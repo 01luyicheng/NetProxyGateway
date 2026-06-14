@@ -1083,7 +1083,9 @@ func (s *Server) login(c *gin.Context) {
 	adminUser := os.Getenv("ADMIN_USER")
 	adminPass := os.Getenv("ADMIN_PASS")
 
-	if req.Username != adminUser || req.Password != adminPass {
+	// Use constant-time comparison to prevent timing side-channel attacks
+	if subtle.ConstantTimeCompare([]byte(req.Username), []byte(adminUser)) != 1 ||
+		subtle.ConstantTimeCompare([]byte(req.Password), []byte(adminPass)) != 1 {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToAuthenticate.Error()})
 		return
 	}
