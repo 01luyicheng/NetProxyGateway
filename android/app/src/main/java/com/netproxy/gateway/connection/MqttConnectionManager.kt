@@ -540,8 +540,8 @@ class MqttConnectionManager @Inject constructor(
         }
 
         heartbeatJob?.cancel()
+        val tokenSnapshot = authToken.copyOf()
         heartbeatJob = scope.launch {
-            val tokenSnapshot = authToken.copyOf()
             try {
             var consecutiveFailures = 0
             while (
