@@ -416,6 +416,11 @@ class MainViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
-        _uiState.value.authToken.fill('\u0000')
+        _uiState.update { current ->
+            val oldToken = current.authToken
+            val newState = current.copy(authToken = CharArray(0))
+            oldToken.fill('\u0000')
+            newState
+        }
     }
 }
