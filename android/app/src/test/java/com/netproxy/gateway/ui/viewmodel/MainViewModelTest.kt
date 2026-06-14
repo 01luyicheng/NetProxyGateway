@@ -491,6 +491,7 @@ class MainViewModelTest {
         assertEquals(0, viewModel.uiState.value.authToken.size)
         assertFalse(viewModel.uiState.value.isPairingInProgress)
         assertEquals("store update failed", viewModel.uiState.value.errorMessage)
+        verify(exactly = 0) { mqttConnectionManager.connect(any(), any()) }
     }
 
     @Test

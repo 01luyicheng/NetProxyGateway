@@ -319,16 +319,27 @@ class MainViewModel @Inject constructor(
                         deviceId = deviceIdSnapshot,
                         authToken = authTokenArray
                     )
-                    _uiState.update { it.copy(authToken = authTokenArray.copyOf()) }
+                    _uiState.update { current ->
+                        val oldToken = current.authToken
+                        val newState = current.copy(authToken = authTokenArray.copyOf())
+                        oldToken.fill('\u0000')
+                        newState
+                    }
                 } else {
-                    _uiState.update {
-                        it.copy(isPairingInProgress = false, errorMessage = AppLocale.getString(context, R.string.error_cellular_required), authToken = CharArray(0))
+                    _uiState.update { current ->
+                        val oldToken = current.authToken
+                        val newState = current.copy(isPairingInProgress = false, errorMessage = AppLocale.getString(context, R.string.error_cellular_required), authToken = CharArray(0))
+                        oldToken.fill('\u0000')
+                        newState
                     }
                 }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
-                _uiState.update {
-                    it.copy(isPairingInProgress = false, errorMessage = e.message, authToken = CharArray(0))
+                _uiState.update { current ->
+                    val oldToken = current.authToken
+                    val newState = current.copy(isPairingInProgress = false, errorMessage = e.message, authToken = CharArray(0))
+                    oldToken.fill('\u0000')
+                    newState
                 }
             } finally {
                 authTokenArray.fill('\u0000')

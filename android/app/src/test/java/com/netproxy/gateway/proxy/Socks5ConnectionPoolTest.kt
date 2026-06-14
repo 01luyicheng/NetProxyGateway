@@ -373,14 +373,14 @@ class Socks5ConnectionPoolTest {
         )
 
         try {
-            // borrowConnection will fail because there's no real SOCKS5 proxy,
-            // but the credentialProvider will be called and the password should be zeroed
-            pool.borrowConnection("10.0.0.1", 443)
-        } catch (e: java.io.IOException) {
-            // expected: no real SOCKS5 proxy
-        }
+            try {
+                // borrowConnection will fail because there's no real SOCKS5 proxy,
+                // but the credentialProvider will be called and the password should be zeroed
+                pool.borrowConnection("10.0.0.1", 443)
+            } catch (e: java.io.IOException) {
+                // expected: no real SOCKS5 proxy
+            }
 
-        try {
             // The copy returned by credentialProvider should have been zeroed
             assertNotNull("capturedPassword should not be null", capturedPassword)
             assertTrue(
