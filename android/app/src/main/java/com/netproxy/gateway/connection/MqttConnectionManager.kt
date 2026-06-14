@@ -480,7 +480,7 @@ class MqttConnectionManager @Inject constructor(
                     _connectionState.value = MqttConnectionState.Error(e.message ?: "Connection failed")
                     if (shouldStayConnected) {
                         onReconnectAttemptFailed()
-                        scheduleReconnect(deviceId, activeTokenSnapshot ?: CharArray(0), generation)
+                        scheduleReconnect(deviceId, tokenSnapshot, generation)
                     }
                 } finally {
                     tokenSnapshot.fill('\u0000')
