@@ -281,13 +281,11 @@ class MqttConnectionManager @Inject constructor(
 
     fun connect(deviceId: String, authToken: CharArray) {
         val tokenSnapshot = authToken.copyOf()
-        synchronized(this@MqttConnectionManager) {
-            activeTokenSnapshot?.fill('\u0000')
-            activeTokenSnapshot = tokenSnapshot.copyOf()
-        }
         var generation = 0L
         lateinit var jobToStart: Job
         synchronized(this@MqttConnectionManager) {
+            activeTokenSnapshot?.fill('\u0000')
+            activeTokenSnapshot = tokenSnapshot.copyOf()
             shouldStayConnected = true
             reconnectJob?.cancel()
             reconnectJob = null
