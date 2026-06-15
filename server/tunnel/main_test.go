@@ -871,3 +871,75 @@ func TestNotifyDeviceStatusAfterStopIsIgnored(t *testing.T) {
 		t.Fatalf("expected no requests after Stop(), got %d", got)
 	}
 }
+
+// TestSendLoopClosesTunnelOnWriteError verifies that sendLoop calls tunnel.Close()
+// when WriteMessage fails. Without Close(), subsequent Send() calls would succeed
+// (buffering data in sendChan) but the data would never be delivered — silent data
+// loss. This is a regression test for the sendLoop-not-closing-on-error bug.
+func TestSendLoopClosesTunnelOnWriteError(t *testing.T) {
+	// Create a WebSocket server that closes the connection immediately
+	upgrader := websocket.Upgrader{}
+	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		// Close immediately to cause write errors on the client
+		conn.Close()
+	}))
+	defer wsServer.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(wsServer.URL, "http")
+	clientConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("failed to dial websocket server: %v", err)
+	}
+
+	tunnelServer := NewServer(&Config{
+		HeartbeatInterval: time.Second,
+		HeartbeatTimeout:  2 * time.Second,
+	})
+	tunnel := NewTunnelConn("device-sendloop-close", clientConn)
+
+	// Start sendLoop in background
+	sendLoopDone := make(chan struct{})
+	go func() {
+		tunnelServer.sendLoop(tunnel)
+		close(sendLoopDone)
+	}()
+
+	// Send messages — the server has already closed, so WriteMessage should fail
+	// and sendLoop should call tunnel.Close() and return
+	for i := 0; i < 5; i++ {
+		tunnel.Send([]byte("test-message"))
+	}
+
+	// Wait for sendLoop to exit
+	select {
+	case <-sendLoopDone:
+		// Success: sendLoop exited after write error
+	case <-time.After(5 * time.Second):
+		t.Fatal("sendLoop did not exit after write error")
+	}
+
+	// Verify tunnel.closed flag is set — this is the key invariant that prevents
+	// silent data loss. When closed=true, future sendLoop iterations and Send()
+	// calls will detect the closed state.
+	//
+	// Note: Send() uses a select with closeChan and sendChan. After Close(),
+	// closeChan is closed, but Send() may still succeed if sendChan has buffer
+	// space (Go select chooses randomly between ready cases). The closed flag
+	// and closeChan ensure that sendLoop won't attempt further writes, and
+	// callers will eventually see the error once the buffer drains.
+	if !tunnel.closed {
+		t.Error("expected tunnel.closed to be true after sendLoop write error")
+	}
+
+	// Verify closeChan is closed
+	select {
+	case <-tunnel.closeChan:
+		// Expected: closeChan is closed
+	default:
+		t.Error("expected closeChan to be closed after sendLoop write error")
+	}
+}

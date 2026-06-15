@@ -678,6 +678,11 @@ func (s *Server) heartbeat(tunnel *TunnelConn, stop chan struct{}) {
 }
 
 // sendLoop sends messages from the send channel to the tunnel.
+// On any write error or nil connection, sendLoop closes the tunnel and returns.
+// This prevents silent data loss: without Close(), subsequent Send() calls would
+// buffer data in sendChan that no goroutine consumes, causing up to 100 messages
+// to be silently dropped. This is consistent with heartbeat's error handling,
+// which also calls tunnel.Close() on WritePing failure.
 func (s *Server) sendLoop(tunnel *TunnelConn) {
 	for {
 		select {
@@ -690,11 +695,13 @@ func (s *Server) sendLoop(tunnel *TunnelConn) {
 
 			if tunnel.Conn == nil {
 				log.Printf("Cannot write message: connection is nil")
+				tunnel.Close()
 				return
 			}
 
 			if err := tunnel.Conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
 				log.Printf("Failed to write message: %v", err)
+				tunnel.Close()
 				return
 			}
 		case <-tunnel.closeChan:

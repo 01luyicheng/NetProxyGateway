@@ -1187,4 +1187,17 @@
 - **风险**: **低**。增加维护负担，无额外覆盖价值。
 - **修复方式**: 合并为一个测试，或删除其中一个。
 
+---
+
+## 提交后审查发现（审查提交 2c35abc..96e7a98）
+
+> 以下问题由多 subagent 对过去 24 小时内各分支的提交进行深度审查发现。
+
+### REV14: `sendLoop` 写失败不调用 `Close()` 导致静默数据丢失
+- **状态**: 已修复
+- **位置**: `server/tunnel/main.go` (sendLoop, L680-L711)
+- **问题描述**: `sendLoop` 在 `WriteMessage` 返回错误或 `Conn` 为 nil 时，仅记录日志并返回，不调用 `tunnel.Close()`。这导致：(1) `closeChan` 未关闭，`closed` 标志未设置；(2) 后续 `Send()` 调用仍能成功将数据放入 `sendChan`（缓冲区容量 100），调用方认为发送成功；(3) 但 `sendLoop` 已退出，无人消费 `sendChan`，数据被静默丢弃；(4) 直到缓冲区满后 `Send()` 才返回 `"send buffer full"` 错误。对比同文件中 `heartbeat()` 在 `WritePing` 失败时正确调用 `tunnel.Close()`，`sendLoop` 的错误处理不一致。窗口期最长可达 `HeartbeatInterval`（默认 30 秒），期间所有通过 `Send()` 发送的数据均被静默丢失。`closeOnce` 保护确保多次调用 `Close()` 安全，不会引入双重关闭或死锁问题。
+- **风险**: **高**。作为公共 API，`Send()` 的调用方无法感知数据丢失。虽然当前生产代码中 `Send()` 仅在测试中使用，但作为 `TunnelConn` 的公开方法，未来使用时将导致不可检测的数据丢失。`SetWriteDeadline`（commit cbea5f6）使得写超时错误更容易触发此路径。
+- **修复方式**: 在 `sendLoop` 的写错误和 nil 连接返回路径中添加 `tunnel.Close()` 调用，与 `heartbeat()` 的错误处理模式保持一致。
+
 
