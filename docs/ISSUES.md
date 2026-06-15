@@ -646,6 +646,24 @@
 - **验证结果**: **潜在风险（建议修复）**。IP 池大小为 254（MAX_IP - START_IP + 1）。AtomicInteger 溢出后会自然回绕，且 `Math.floorMod` 能将任何整数映射回有效范围，功能上不会出问题。但 `nextVirtualIp` 值会无意义漂移，若后续代码依赖其原始值做判断可能导致意外行为。
 - **建议修复**: 将 `getAndIncrement()` 移到确认分配成功后再调用，避免漂移。优先级：**低**。
 
+---
+
+## CodeRabbit 后续审查修复批次中发现的问题（提交 63eaea6 之前已存在）
+
+### N68: MainViewModelTest `pairWithCode_cellularConnected_doesNotMarkPairedBeforeMqttConnected` 预存失败
+- **提交哈希**: `c7875a1`
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/ui/viewmodel/MainViewModelTest.kt` (L99-L112)
+- **问题描述**: `verify(exactly = 1) { mqttConnectionManager.connect("device-stable", "123456".toCharArray()) }` 断言失败。该测试在本批次修复前已持续失败，非本次修改引入。
+- **风险**: 中。测试失效掩盖 `pairWithCode` 与 `connect` 的交互契约回归风险
+- **建议修复**: 排查 `connect` 实际调用参数与预期不匹配的原因（可能与协程调度、`deviceId` 来源或 `connect` mock 覆盖有关）
+
+### N69: MainViewModelTest `mqttState_Disconnected_clearsAuthToken` 预存失败
+- **提交哈希**: `c7875a1`
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/ui/viewmodel/MainViewModelTest.kt` (L493-L510)
+- **问题描述**: 断言失败。该测试在本批次修复前已持续失败，非本次修改引入。
+- **风险**: 中。测试失效掩盖 MQTT Disconnected 状态下 `authToken` 清理逻辑的回归风险
+- **建议修复**: 检查断开连接时 `uiState.authToken` 的实际状态与测试预期不一致的根因
+
 
 
 ### N70: `StreamConn.SetReadDeadline` 更新无法被阻塞中的 `Read` 感知
