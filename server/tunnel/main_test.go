@@ -874,8 +874,11 @@ func TestNotifyDeviceStatusAfterStopIsIgnored(t *testing.T) {
 
 // TestSendLoopNoPanicOnConcurrentClose verifies that sendLoop does not panic
 // when Close() is called concurrently. This is a regression test for the
-// sendLoop WriteMessage race with Close() — without connMu protection,
-// Close() could set t.Conn = nil between the nil-check and WriteMessage call.
+// sendLoop WriteMessage race with Close(). Close() acquires connMu and calls
+// t.Conn.Close() (closing the underlying connection); it does NOT set t.Conn
+// to nil. sendLoop now also acquires connMu before WriteMessage, so the race
+// is eliminated. The test floods sendChan to maximise the chance that sendLoop
+// is inside WriteMessage when Close() is called.
 func TestSendLoopNoPanicOnConcurrentClose(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -911,9 +914,17 @@ func TestSendLoopNoPanicOnConcurrentClose(t *testing.T) {
 		close(sendLoopDone)
 	}()
 
-	// Send a message and then close concurrently
-	tunnel.Send([]byte("test-message"))
-	time.Sleep(10 * time.Millisecond)
+	// Flood sendChan so sendLoop is likely inside WriteMessage when Close()
+	// is called. Using a WaitGroup ensures all sends complete before Close().
+	var floodWg sync.WaitGroup
+	floodWg.Add(1)
+	go func() {
+		defer floodWg.Done()
+		for i := 0; i < 100; i++ {
+			tunnel.Send([]byte("test-message"))
+		}
+	}()
+	floodWg.Wait()
 	tunnel.Close()
 
 	// sendLoop should exit without panicking

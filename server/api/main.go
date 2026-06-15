@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
 	"encoding/binary"
@@ -1083,10 +1084,17 @@ func (s *Server) login(c *gin.Context) {
 	adminUser := os.Getenv("ADMIN_USER")
 	adminPass := os.Getenv("ADMIN_PASS")
 
-	// Use constant-time comparison to prevent timing side-channel attacks
-	userOK := subtle.ConstantTimeCompare([]byte(req.Username), []byte(adminUser)) == 1
-	passOK := subtle.ConstantTimeCompare([]byte(req.Password), []byte(adminPass)) == 1
-	if !userOK || !passOK {
+	// Use SHA256-hashed constant-time comparison to prevent timing side-channel
+	// attacks. Hashing ensures subtle.ConstantTimeCompare does not leak length
+	// information (it returns immediately for slices of different lengths).
+	userHash := sha256.Sum256([]byte(req.Username))
+	passHash := sha256.Sum256([]byte(req.Password))
+	expectedUserHash := sha256.Sum256([]byte(adminUser))
+	expectedPassHash := sha256.Sum256([]byte(adminPass))
+
+	userOK := subtle.ConstantTimeCompare(userHash[:], expectedUserHash[:])
+	passOK := subtle.ConstantTimeCompare(passHash[:], expectedPassHash[:])
+	if userOK&passOK != 1 {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToAuthenticate.Error()})
 		return
 	}
