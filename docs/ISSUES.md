@@ -1220,6 +1220,7 @@
 - **位置**: `server/tunnel/main.go` (sendLoop, L680-L704)
 - **问题描述**: `sendLoop` 直接调用 `tunnel.Conn.WriteMessage()` 而未持有 `connMu` 锁。`Close()` 在 `connMu` 保护下将 `t.Conn` 设为 nil 并关闭底层连接。存在竞态窗口：`sendLoop` 检查 `Conn != nil` 后、调用 `WriteMessage` 前，`Close()` 可能已将 `Conn` 置 nil，导致 nil pointer panic。
 - **风险**: **高**。高并发下设备断连时，`heartbeat` 超时调用 `tunnel.Close()`，同时 `sendLoop` 正在写入，可导致 panic 或数据损坏。
+- **修复难度**: 低
 - **修复方式**: 在 `sendLoop` 中通过 `connMu` 保护 `WriteMessage` 调用，与 `WritePing` 和 `Close()` 保持一致的锁保护模式。
 
 ### REV9: `MqttConnectionManager.connect()` catch 块中 `activeTokenSnapshot` 无同步读取
@@ -1227,6 +1228,7 @@
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (connect LAZY 协程 catch 块, L472-L486)
 - **问题描述**: catch 块中 `scheduleReconnect(deviceId, activeTokenSnapshot ?: CharArray(0), generation)` 在 `synchronized` 块外读取 `activeTokenSnapshot`。`disconnect()` 可能在另一个线程同时执行 `activeTokenSnapshot?.fill('\u0000')`，导致：(1) 读到非 null 但内容全零的 CharArray（`fill` 完成但 `= null` 还没执行）；(2) `copyOf()` 复制全零数组；(3) 重连使用全零 token → 认证失败 → 无限重连循环。对比 `connectionLost` 回调中同样的代码在 `synchronized` 块内，是安全的。
 - **风险**: **中高**。虽然 `shouldStayConnected` 的 `@Volatile` 和 `connectionGeneration` 提供了部分缓解，但 `activeTokenSnapshot` 非 volatile 且无同步保护，JMM 下行为未定义。
+- **修复难度**: 中
 - **修复方式**: 将 catch 块中的状态更新和 `scheduleReconnect` 调用包装在 `synchronized` 块内，与 `connectionLost` 回调保持一致。同时将 `activeTokenSnapshot = tokenSnapshot` 改为 `activeTokenSnapshot = tokenSnapshot.copyOf()`，使两者成为独立副本，防止 `disconnect()` 清零 `activeTokenSnapshot` 时影响 LAZY 协程的 `tokenSnapshot`。在 LAZY 协程中添加 `finally { tokenSnapshot.fill('\u0000') }` 块确保 token 在任何退出路径下都被清零。
 
 ### REV10: `MainViewModel.onCleared()` 直接 `fill` 导致与 collect 协程的数据竞争
@@ -1234,6 +1236,7 @@
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (onCleared, L396-L399)
 - **问题描述**: `onCleared()` 直接读取 `_uiState.value.authToken` 并执行 `fill('\u0000')`，没有通过 `_uiState.update` 先替换再清零。`_uiState` 是 `MutableStateFlow`，其 `value` 读取是原子的，但 `fill` 修改的是 CharArray 的内容，不是 StateFlow 的值。如果 `observeMqttState` 的 collect 协程正在 `_uiState.update` lambda 内部处理 Disconnected/Error 状态，两者操作的是同一个 CharArray 实例，导致并发修改。此外，`onCleared()` 只清零了 CharArray 内容，未将 UiState 中的 `authToken` 替换为 `CharArray(0)`，与 Disconnected/Error 分支的处理不一致。
 - **风险**: **高**。ViewModel 销毁时 MQTT 连接恰好断开或出错，弱网环境下退出应用时容易触发。
+- **修复难度**: 中
 - **修复方式**: 改为通过 `_uiState.update { current -> val oldToken = current.authToken; val newState = current.copy(authToken = CharArray(0)); oldToken.fill('\u0000'); newState }` 先原子替换再清零旧引用。
 
 ### REV11: `observeMqttState()` Disconnected/Error 分支未清除 UiState 中的 authToken
@@ -1241,6 +1244,7 @@
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (observeMqttState, L232-L268)
 - **问题描述**: 当 MQTT 连接意外断开（非用户主动 disconnect）时，`observeMqttState()` 的 Disconnected 和 Error 分支未清除 UiState 中的 authToken，也未清零旧引用。对比 `disconnect()` 方法正确地执行了 `oldToken.fill('\u0000')`，这两个分支遗漏了相同的安全处理。敏感 token 在内存中残留，且状态语义不一致（isPaired=false 但 authToken 非空）。
 - **风险**: **中**。敏感 token 在内存中残留，且状态语义不一致。
+- **修复难度**: 低
 - **修复方式**: 在 Disconnected 和 Error 分支中，仿照 `disconnect()` 的模式，先保存旧 authToken 引用，再替换为 `CharArray(0)`，最后对旧引用执行 `fill('\u0000')`。
 
 ### REV12: `pairWithCode()` 中 `authSessionStore.clear()` 可能吞掉原始异常
@@ -1248,6 +1252,7 @@
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (pairWithCode, L330-L334)
 - **问题描述**: 当 `mqttConnectionManager.connect()` 抛出异常时，catch 块调用 `authSessionStore.clear()` 回滚已存储的 session。但 `clear()` 内部调用 `EncryptedSharedPreferences.edit()...apply()`，在加密密钥损坏时可抛出 `GeneralSecurityException`，导致原始的 connect 异常被吞掉，用户看到的是 SharedPreferences 加密错误而非网络错误。`AuthSessionStore` 已提供 `clearWithResult(): AppResult<Unit>` 方法（内部 try-catch 包装），但未使用。
 - **风险**: **中**。网络不稳定时容易触发 connect 失败，如果同时加密密钥被锁定（如设备锁屏后密钥被回收），错误信息会误导用户。
+- **修复难度**: 中
 - **修复方式**: 使用 `authSessionStore.clearWithResult()` 替代 `authSessionStore.clear()`，避免异常传播。同时在 pairWithCode 中添加 try/finally 确保 `authTokenArray.fill('\u0000')` 在任何退出路径下都被执行，并在 else/catch 分支的 `_uiState.update` 中清零旧 authToken 引用。
 
 ### REV13: `server/api/main.go` login 端点使用 `!=` 比较密码，存在时序侧信道
@@ -1255,6 +1260,7 @@
 - **位置**: `server/api/main.go` (login, L1086)
 - **问题描述**: `login` 端点使用 `req.Username != adminUser || req.Password != adminPass` 比较凭据，而非 `subtle.ConstantTimeCompare`。Go 的 `!=` 对字符串进行逐字符比较，遇到第一个不匹配字符即返回，攻击者可通过响应时间差异推断正确凭据的部分内容。对比同文件中 `authorizeStats` 和 `validateSession` 均使用 `subtle.ConstantTimeCompare`，login 端点未遵循相同的安全标准。
 - **风险**: **中**。作为安全产品，login 端点应遵循自身代码库已建立的 `constantTimeCompare` 模式。修复成本极低。
+- **修复难度**: 低
 - **修复方式**: 改用 `subtle.ConstantTimeCompare([]byte(req.Username), []byte(adminUser)) != 1 || subtle.ConstantTimeCompare([]byte(req.Password), []byte(adminPass)) != 1`。
 
 
