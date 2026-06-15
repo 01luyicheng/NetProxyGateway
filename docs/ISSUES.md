@@ -652,6 +652,8 @@
 
 ### N68: MainViewModelTest `pairWithCode_cellularConnected_doesNotMarkPairedBeforeMqttConnected` 预存失败
 - **提交哈希**: `c7875a1`
+- **修复难度**: 中
+- **修复状态**: 已修复 (`15ff406`)
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/ui/viewmodel/MainViewModelTest.kt` (L99-L112)
 - **问题描述**: `verify(exactly = 1) { mqttConnectionManager.connect("device-stable", "123456".toCharArray()) }` 断言失败。该测试在本批次修复前已持续失败，非本次修改引入。
 - **风险**: 中。测试失效掩盖 `pairWithCode` 与 `connect` 的交互契约回归风险
@@ -659,6 +661,8 @@
 
 ### N69: MainViewModelTest `mqttState_Disconnected_clearsAuthToken` 预存失败
 - **提交哈希**: `c7875a1`
+- **修复难度**: 中
+- **修复状态**: 已修复 (`15ff406`)
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/ui/viewmodel/MainViewModelTest.kt` (L493-L510)
 - **问题描述**: 断言失败。该测试在本批次修复前已持续失败，非本次修改引入。
 - **风险**: 中。测试失效掩盖 MQTT Disconnected 状态下 `authToken` 清理逻辑的回归风险
@@ -1214,7 +1218,7 @@
 ### REV8: `sendLoop` 中 `WriteMessage` 无锁保护，与 `Close()` 存在竞态可导致 nil panic
 - **状态**: 已修复
 - **位置**: `server/tunnel/main.go` (sendLoop, L680-L704)
-- **问题描述**: `sendLoop` 直接调用 `tunnel.Conn.WriteMessage()` 而未持有 `connMu` 锁。`Close()` 在 `connMu` 保护下将 `t.Conn` 设为 nil 并关闭底层连接。存在竞态窗口：`sendLoop` 检查 `Conn != nil` 后、调用 `WriteMessage` 前，`Close()` 可能已将 `Conn` 置 nil，导致 nil pointer panic。此外，`sendLoop` 的 `WriteMessage` 和 `heartbeat` 的 `WritePing` 可并发执行，违反 gorilla/websocket 的"one concurrent writer"约束，可导致数据帧交错和连接损坏。
+- **问题描述**: `sendLoop` 直接调用 `tunnel.Conn.WriteMessage()` 而未持有 `connMu` 锁。`Close()` 在 `connMu` 保护下将 `t.Conn` 设为 nil 并关闭底层连接。存在竞态窗口：`sendLoop` 检查 `Conn != nil` 后、调用 `WriteMessage` 前，`Close()` 可能已将 `Conn` 置 nil，导致 nil pointer panic。
 - **风险**: **高**。高并发下设备断连时，`heartbeat` 超时调用 `tunnel.Close()`，同时 `sendLoop` 正在写入，可导致 panic 或数据损坏。
 - **修复方式**: 在 `sendLoop` 中通过 `connMu` 保护 `WriteMessage` 调用，与 `WritePing` 和 `Close()` 保持一致的锁保护模式。
 
