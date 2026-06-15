@@ -232,9 +232,9 @@ class MainViewModel @Inject constructor(
                     is MqttConnectionState.Disconnected -> {
                         connectionStartTime = 0
                         stopDurationTimer()
+                        val oldToken = _uiState.value.authToken
                         _uiState.update { current ->
-                            val oldToken = current.authToken
-                            val newState = current.copy(
+                            current.copy(
                                 isConnected = false,
                                 isPaired = false,
                                 isPairingInProgress = false,
@@ -243,16 +243,15 @@ class MainViewModel @Inject constructor(
                                 connectionDurationMs = 0,
                                 authToken = CharArray(0)
                             )
-                            oldToken.fill('\u0000')
-                            newState
                         }
+                        oldToken.fill('\u0000')
                     }
                     is MqttConnectionState.Error -> {
                         connectionStartTime = 0
                         stopDurationTimer()
+                        val oldToken = _uiState.value.authToken
                         _uiState.update { current ->
-                            val oldToken = current.authToken
-                            val newState = current.copy(
+                            current.copy(
                                 isConnected = false,
                                 isPaired = false,
                                 isPairingInProgress = false,
@@ -262,9 +261,8 @@ class MainViewModel @Inject constructor(
                                 connectionDurationMs = 0,
                                 authToken = CharArray(0)
                             )
-                            oldToken.fill('\u0000')
-                            newState
                         }
+                        oldToken.fill('\u0000')
                     }
                 }
             }
@@ -329,31 +327,31 @@ class MainViewModel @Inject constructor(
                         )
                     } catch (e: Exception) {
                         // connect failed after update succeeded — rollback stored session
-                        authSessionStore.clearWithResult()
+                        val clearResult = authSessionStore.clearWithResult()
+                        if (clearResult is com.netproxy.gateway.result.AppResult.Error) {
+                            e.addSuppressed(clearResult.exception)
+                        }
                         throw e
                     }
+                    val oldTokenSuccess = _uiState.value.authToken
                     _uiState.update { current ->
-                        val oldToken = current.authToken
-                        val newState = current.copy(authToken = authTokenArray.copyOf())
-                        oldToken.fill('\u0000')
-                        newState
+                        current.copy(authToken = authTokenArray.copyOf())
                     }
+                    oldTokenSuccess.fill('\u0000')
                 } else {
+                    val oldTokenElse = _uiState.value.authToken
                     _uiState.update { current ->
-                        val oldToken = current.authToken
-                        val newState = current.copy(isPairingInProgress = false, errorMessage = AppLocale.getString(context, R.string.error_cellular_required), authToken = CharArray(0))
-                        oldToken.fill('\u0000')
-                        newState
+                        current.copy(isPairingInProgress = false, errorMessage = AppLocale.getString(context, R.string.error_cellular_required), authToken = CharArray(0))
                     }
+                    oldTokenElse.fill('\u0000')
                 }
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
+                val oldTokenCatch = _uiState.value.authToken
                 _uiState.update { current ->
-                    val oldToken = current.authToken
-                    val newState = current.copy(isPairingInProgress = false, errorMessage = e.message, authToken = CharArray(0))
-                    oldToken.fill('\u0000')
-                    newState
+                    current.copy(isPairingInProgress = false, errorMessage = e.message, authToken = CharArray(0))
                 }
+                oldTokenCatch.fill('\u0000')
             } finally {
                 authTokenArray.fill('\u0000')
             }
@@ -414,26 +412,24 @@ class MainViewModel @Inject constructor(
         mqttConnectionManager.disconnect()
         authSessionStore.clear()
         toggleVpn(false)
+        val oldToken = _uiState.value.authToken
         _uiState.update { current ->
-            val oldToken = current.authToken
-            val newState = current.copy(
+            current.copy(
                 isConnected = false,
                 isPaired = false,
                 peerId = "",
                 authToken = CharArray(0)
             )
-            oldToken.fill('\u0000')
-            newState
         }
+        oldToken.fill('\u0000')
     }
 
     override fun onCleared() {
         super.onCleared()
+        val oldToken = _uiState.value.authToken
         _uiState.update { current ->
-            val oldToken = current.authToken
-            val newState = current.copy(authToken = CharArray(0))
-            oldToken.fill('\u0000')
-            newState
+            current.copy(authToken = CharArray(0))
         }
+        oldToken.fill('\u0000')
     }
 }

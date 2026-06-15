@@ -100,6 +100,9 @@ class MainViewModelTest {
         every { networkStateManager.isCellularConnected() } returns true
         val stateFlow = MutableStateFlow<MqttConnectionState>(MqttConnectionState.Disconnected)
         every { mqttConnectionManager.connectionState } returns stateFlow
+        every { mqttConnectionManager.connect("device-stable", any()) } answers {
+            assertTrue(secondArg<CharArray>().contentEquals("123456".toCharArray()))
+        }
 
         val viewModel = MainViewModel(context, networkStateManager, mqttConnectionManager, wifiManager, authSessionStore)
 
