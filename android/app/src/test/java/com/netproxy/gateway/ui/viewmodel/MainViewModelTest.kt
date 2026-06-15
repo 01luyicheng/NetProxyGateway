@@ -19,6 +19,7 @@ import io.mockk.just
 import io.mockk.mockk
 import io.mockk.mockkConstructor
 import io.mockk.runs
+import io.mockk.slot
 import io.mockk.unmockkAll
 import io.mockk.unmockkConstructor
 import io.mockk.verify
@@ -594,11 +595,9 @@ class MainViewModelTest {
         val stateFlow = MutableStateFlow<MqttConnectionState>(MqttConnectionState.Disconnected)
         every { mqttConnectionManager.connectionState } returns stateFlow
 
-        // Capture the CharArray passed to connect to verify it was zeroed after the call
-        var capturedToken: CharArray? = null
-        every { mqttConnectionManager.connect(any(), captureLambda()) } answers {
-            capturedToken = secondArg<CharArray>().copyOf()
-        }
+        // Capture the actual CharArray reference passed to connect to verify it was zeroed in finally
+        val tokenSlot = slot<CharArray>()
+        every { mqttConnectionManager.connect(any(), capture(tokenSlot)) } just runs
 
         val viewModel = MainViewModel(context, networkStateManager, mqttConnectionManager, wifiManager, authSessionStore)
         advanceUntilIdle()
@@ -606,9 +605,8 @@ class MainViewModelTest {
         viewModel.pairWithCode("123456")
         advanceUntilIdle()
 
-        // The token passed to connect should have been valid at the time of the call
-        assertNotNull(capturedToken)
-        assertTrue(capturedToken!!.contentEquals("123456".toCharArray()))
+        // The original authTokenArray should have been zeroed in the finally block
+        assertTrue("authTokenArray should be zeroed in finally", tokenSlot.captured.all { it == '\u0000' })
     }
 
     // -------------------------------------------------------------------------

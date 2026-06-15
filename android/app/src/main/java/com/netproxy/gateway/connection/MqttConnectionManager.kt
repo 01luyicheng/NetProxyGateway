@@ -372,7 +372,7 @@ class MqttConnectionManager @Inject constructor(
                             }
                             _connectionState.value = MqttConnectionState.Error(cause?.message ?: "Connection lost")
                             if (shouldStayConnected) {
-                                scheduleReconnect(deviceId, tokenSnapshot, generation)
+                                scheduleReconnect(deviceId, activeTokenSnapshot ?: CharArray(0), generation)
                             }
                         }
                     }

@@ -1084,8 +1084,9 @@ func (s *Server) login(c *gin.Context) {
 	adminPass := os.Getenv("ADMIN_PASS")
 
 	// Use constant-time comparison to prevent timing side-channel attacks
-	if subtle.ConstantTimeCompare([]byte(req.Username), []byte(adminUser)) != 1 ||
-		subtle.ConstantTimeCompare([]byte(req.Password), []byte(adminPass)) != 1 {
+	userOK := subtle.ConstantTimeCompare([]byte(req.Username), []byte(adminUser)) == 1
+	passOK := subtle.ConstantTimeCompare([]byte(req.Password), []byte(adminPass)) == 1
+	if !userOK || !passOK {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToAuthenticate.Error()})
 		return
 	}
