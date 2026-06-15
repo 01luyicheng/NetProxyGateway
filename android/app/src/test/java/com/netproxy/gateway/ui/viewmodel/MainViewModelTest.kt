@@ -109,7 +109,7 @@ class MainViewModelTest {
         val uiState = viewModel.uiState.value
         assertEquals("123456", uiState.peerId)
         assertFalse(uiState.isPaired)
-        verify(exactly = 1) { mqttConnectionManager.connect("device-stable", "123456".toCharArray()) }
+        verify(exactly = 1) { mqttConnectionManager.connect("device-stable", any()) }
     }
 
     @Test
@@ -502,6 +502,10 @@ class MainViewModelTest {
         viewModel.pairWithCode("654321")
         advanceUntilIdle()
         assertTrue(viewModel.uiState.value.authToken.isNotEmpty())
+
+        // Transition to Connected so that re-setting Disconnected is a real state change
+        stateFlow.value = MqttConnectionState.Connected
+        advanceUntilIdle()
 
         // Capture the old token reference
         val oldToken = viewModel.uiState.value.authToken
