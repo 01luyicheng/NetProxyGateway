@@ -1269,4 +1269,28 @@
 - **修复难度**: 低
 - **修复方式**: 改用 `subtle.ConstantTimeCompare([]byte(req.Username), []byte(adminUser)) != 1 || subtle.ConstantTimeCompare([]byte(req.Password), []byte(adminPass)) != 1`。
 
+### REV15: `sendLoop` 在 `closed || Conn == nil` 路径未调用 `Close()` 导致资源泄漏
+- **状态**: 已修复
+- **位置**: `server/tunnel/main.go` (sendLoop, L690-L695)
+- **问题描述**: PR #27 的 `sendLoop` 在检测到 `tunnel.closed || tunnel.Conn == nil` 时直接 `return`，不调用 `tunnel.Close()`。虽然 `tunnel.closed == true` 意味着 `Close()` 大概率已被调用，但 `Conn == nil` 路径（防御性检查）下 `Close()` 可能从未被调用。遗漏 `Close()` 导致：(1) `closeChan` 未关闭，`heartbeat()` 和 `readLoop()` 不会被通知退出，持续占用资源；(2) 后续 `Send()` 调用仍能将数据放入 `sendChan`（缓冲区容量 100），但 `sendLoop` 已退出无人消费，导致静默数据丢失。对比 `WriteMessage` 错误路径正确调用了 `tunnel.Close()`，此路径处理不一致。`closeOnce` 保证 `Close()` 幂等，调用安全。
+- **风险**: **中高**。`Conn == nil` 在当前代码中为防御性路径（`Close()` 不将 `Conn` 设为 nil），但违反防御性编程原则，且与同函数内 `WriteMessage` 错误路径的处理不一致。
+- **修复难度**: 低
+- **修复方式**: 在 `closed || Conn == nil` 路径的 `connMu.Unlock()` 后添加 `tunnel.Close()` 调用。
+
+### REV16: `Send()` 在 `closeChan` 关闭后仍可能返回 nil，导致静默数据丢失
+- **状态**: 已修复
+- **位置**: `server/tunnel/main.go` (Send, L169-L185)
+- **问题描述**: `Send()` 使用三路 `select`（`sendChan`/`closeChan`/`default`）。当 `closeChan` 已关闭且 `sendChan` 缓冲区仍有空位时，Go 的 `select` 在两个就绪分支间均匀随机选择。若选中 `sendChan`，数据被放入通道、`Send()` 返回 `nil`（成功），但 `sendLoop` 已退出无人消费，数据被静默丢弃。作为公开 API，`Send()` 返回 `nil` 意味着"发送成功"的语义契约被违反。
+- **风险**: **中**。当前无生产代码调用 `Send()`，但作为 `TunnelConn` 的导出方法，未来使用时将导致不可检测的数据丢失。竞态窗口在 REV14 修复后从"最长 30 秒"缩小到纳秒级瞬间，但语义缺陷仍然存在。
+- **修复难度**: 低
+- **修复方式**: 将 `closed` 字段改为 `atomic.Bool`，在 `Send()` 的 `select` 前添加 `if t.closed.Load() { return fmt.Errorf("tunnel closed") }` 原子检查，确保 `Close()` 后 `Send()` 不再返回 nil。
+
+### REV17: `closed` 字段为普通 `bool`，无锁读取存在数据竞争
+- **状态**: 已修复
+- **位置**: `server/tunnel/main.go` (TunnelConn struct, L128)
+- **问题描述**: `closed` 在 `Close()` 中于 `connMu.Lock()` 保护下设置，但 `sendLoop` 和 `WritePing` 在 `connMu` 保护下读取，`Send()` 需要在无锁情况下检查 `closed`。普通 `bool` 的无锁读写构成数据竞争（Go memory model），在 `-race` 检测下会被报告。改为 `atomic.Bool` 后，`Send()` 可安全地进行无锁检查，`Close()` 中使用 `Store(true)` 保证原子性。
+- **风险**: **低**。当前 `closed` 的所有读取都在 `connMu` 保护下（除未来 `Send()` 的检查），但 `atomic.Bool` 是更正确的做法，且为 REV16 的修复提供基础。
+- **修复难度**: 低
+- **修复方式**: 将 `closed bool` 改为 `closed atomic.Bool`，所有赋值改为 `Store(true)`，所有读取改为 `Load()`。
+
 

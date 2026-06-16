@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -124,7 +125,7 @@ type TunnelConn struct {
 	messageLimiter *tokenBucketLimiter
 	closeChan      chan struct{}
 	closeOnce      sync.Once
-	closed         bool
+	closed         atomic.Bool
 }
 
 var errTunnelClosed = errors.New("tunnel closed")
@@ -166,7 +167,13 @@ func (t *TunnelConn) IsAlive(timeout time.Duration) bool {
 }
 
 // Send sends a message through the tunnel.
+// The atomic closed check before select prevents a race where closeChan is
+// already closed but Go's select randomly picks the sendChan branch, causing
+// Send() to return nil (success) for data that will never be consumed.
 func (t *TunnelConn) Send(data []byte) error {
+	if t.closed.Load() {
+		return fmt.Errorf("tunnel closed")
+	}
 	select {
 	case t.sendChan <- data:
 		return nil
@@ -181,7 +188,7 @@ func (t *TunnelConn) Send(data []byte) error {
 func (t *TunnelConn) Close() {
 	t.closeOnce.Do(func() {
 		t.connMu.Lock()
-		t.closed = true
+		t.closed.Store(true)
 		close(t.closeChan)
 		if t.Conn != nil {
 			_ = t.Conn.Close()
@@ -199,7 +206,7 @@ func (t *TunnelConn) WritePing(deadline time.Time) error {
 	t.connMu.Lock()
 	defer t.connMu.Unlock()
 
-	if t.closed || t.Conn == nil {
+	if t.closed.Load() || t.Conn == nil {
 		return errTunnelClosed
 	}
 
@@ -688,8 +695,9 @@ func (s *Server) sendLoop(tunnel *TunnelConn) {
 		select {
 		case data := <-tunnel.sendChan:
 			tunnel.connMu.Lock()
-			if tunnel.closed || tunnel.Conn == nil {
+			if tunnel.closed.Load() || tunnel.Conn == nil {
 				tunnel.connMu.Unlock()
+				tunnel.Close()
 				return
 			}
 			tunnel.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))

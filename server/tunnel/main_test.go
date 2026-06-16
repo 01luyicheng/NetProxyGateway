@@ -935,3 +935,91 @@ func TestSendLoopNoPanicOnConcurrentClose(t *testing.T) {
 		t.Fatal("sendLoop did not exit after Close()")
 	}
 }
+
+// TestSendLoopClosesOnNilConn verifies that sendLoop calls tunnel.Close() when
+// it detects Conn == nil, preventing resource leaks and silent data loss.
+// This is a regression test for REV15.
+func TestSendLoopClosesOnNilConn(t *testing.T) {
+	tunnelServer := NewServer(&Config{
+		HeartbeatInterval: time.Second,
+		HeartbeatTimeout:  2 * time.Second,
+	})
+	// Create tunnel with nil Conn (defensive path)
+	tunnel := NewTunnelConn("device-nil-conn", nil)
+
+	// Start sendLoop in background
+	sendLoopDone := make(chan struct{})
+	go func() {
+		tunnelServer.sendLoop(tunnel)
+		close(sendLoopDone)
+	}()
+
+	// Send a message to trigger sendLoop to process the nil Conn path
+	tunnel.sendChan <- []byte("test-message")
+
+	// Wait for sendLoop to exit
+	select {
+	case <-sendLoopDone:
+		// Success: sendLoop exited after detecting nil Conn
+	case <-time.After(2 * time.Second):
+		t.Fatal("sendLoop did not exit after detecting nil Conn")
+	}
+
+	// Verify tunnel.closed flag is set
+	if !tunnel.closed.Load() {
+		t.Error("expected tunnel.closed to be true after sendLoop detected nil Conn")
+	}
+
+	// Verify closeChan is closed
+	select {
+	case <-tunnel.closeChan:
+		// Expected: closeChan is closed
+	default:
+		t.Error("expected closeChan to be closed after sendLoop detected nil Conn")
+	}
+}
+
+// TestSendReturnsErrorAfterClose verifies that Send() returns an error after
+// the tunnel is closed, never returning nil (which would indicate success but
+// the data would be silently dropped). This is a regression test for REV16.
+func TestSendReturnsErrorAfterClose(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer wsServer.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(wsServer.URL, "http")
+	clientConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("failed to dial websocket server: %v", err)
+	}
+
+	tunnel := NewTunnelConn("device-send-after-close", clientConn)
+
+	// Before close, Send should succeed
+	if err := tunnel.Send([]byte("before-close")); err != nil {
+		t.Fatalf("Send before close should succeed, got: %v", err)
+	}
+
+	// Close the tunnel
+	tunnel.Close()
+
+	// After close, Send must never return nil — the atomic closed check
+	// ensures this regardless of sendChan buffer space or select randomness.
+	for i := 0; i < 200; i++ {
+		err := tunnel.Send([]byte("after-close"))
+		if err == nil {
+			t.Fatalf("Send after close returned nil on iteration %d — data would be silently lost", i)
+		}
+	}
+}
