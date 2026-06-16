@@ -232,8 +232,9 @@ class MainViewModel @Inject constructor(
                     is MqttConnectionState.Disconnected -> {
                         connectionStartTime = 0
                         stopDurationTimer()
-                        val oldToken = _uiState.value.authToken
+                        var tokenToZero: CharArray? = null
                         _uiState.update { current ->
+                            tokenToZero = current.authToken
                             current.copy(
                                 isConnected = false,
                                 isPaired = false,
@@ -244,13 +245,14 @@ class MainViewModel @Inject constructor(
                                 authToken = CharArray(0)
                             )
                         }
-                        oldToken.fill('\u0000')
+                        tokenToZero?.fill('\u0000')
                     }
                     is MqttConnectionState.Error -> {
                         connectionStartTime = 0
                         stopDurationTimer()
-                        val oldToken = _uiState.value.authToken
+                        var tokenToZero: CharArray? = null
                         _uiState.update { current ->
+                            tokenToZero = current.authToken
                             current.copy(
                                 isConnected = false,
                                 isPaired = false,
@@ -262,7 +264,7 @@ class MainViewModel @Inject constructor(
                                 authToken = CharArray(0)
                             )
                         }
-                        oldToken.fill('\u0000')
+                        tokenToZero?.fill('\u0000')
                     }
                 }
             }
@@ -326,25 +328,28 @@ class MainViewModel @Inject constructor(
                         deviceId = deviceIdSnapshot,
                         authToken = authTokenArray
                     )
-                    val oldTokenSuccess = _uiState.value.authToken
+                    var tokenToZero: CharArray? = null
                     _uiState.update { current ->
+                        tokenToZero = current.authToken
                         current.copy(authToken = authTokenArray.copyOf())
                     }
-                    oldTokenSuccess.fill('\u0000')
+                    tokenToZero?.fill('\u0000')
                 } else {
-                    val oldTokenElse = _uiState.value.authToken
+                    var tokenToZero: CharArray? = null
                     _uiState.update { current ->
+                        tokenToZero = current.authToken
                         current.copy(isPairingInProgress = false, errorMessage = AppLocale.getString(context, R.string.error_cellular_required), authToken = CharArray(0))
                     }
-                    oldTokenElse.fill('\u0000')
+                    tokenToZero?.fill('\u0000')
                 }
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
-                val oldTokenCatch = _uiState.value.authToken
+                var tokenToZero: CharArray? = null
                 _uiState.update { current ->
+                    tokenToZero = current.authToken
                     current.copy(isPairingInProgress = false, errorMessage = e.message, authToken = CharArray(0))
                 }
-                oldTokenCatch.fill('\u0000')
+                tokenToZero?.fill('\u0000')
                 if (sessionUpdated) {
                     val clearResult = authSessionStore.clearWithResult()
                     if (clearResult is com.netproxy.gateway.result.AppResult.Error) {
@@ -411,8 +416,9 @@ class MainViewModel @Inject constructor(
         mqttConnectionManager.disconnect()
         authSessionStore.clear()
         toggleVpn(false)
-        val oldToken = _uiState.value.authToken
+        var tokenToZero: CharArray? = null
         _uiState.update { current ->
+            tokenToZero = current.authToken
             current.copy(
                 isConnected = false,
                 isPaired = false,
@@ -420,15 +426,16 @@ class MainViewModel @Inject constructor(
                 authToken = CharArray(0)
             )
         }
-        oldToken.fill('\u0000')
+        tokenToZero?.fill('\u0000')
     }
 
     override fun onCleared() {
         super.onCleared()
-        val oldToken = _uiState.value.authToken
+        var tokenToZero: CharArray? = null
         _uiState.update { current ->
+            tokenToZero = current.authToken
             current.copy(authToken = CharArray(0))
         }
-        oldToken.fill('\u0000')
+        tokenToZero?.fill('\u0000')
     }
 }

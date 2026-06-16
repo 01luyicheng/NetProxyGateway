@@ -697,6 +697,7 @@ func (s *Server) sendLoop(tunnel *TunnelConn) {
 			tunnel.connMu.Unlock()
 			if err != nil {
 				log.Printf("Failed to write message: %v", err)
+				tunnel.Close()
 				return
 			}
 		case <-tunnel.closeChan:
