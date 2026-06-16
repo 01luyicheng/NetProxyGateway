@@ -313,6 +313,7 @@ class MainViewModel @Inject constructor(
             val authTokenArray = code.toCharArray()
             _uiState.update { it.copy(peerId = code, isPairingInProgress = true, errorMessage = null) }
 
+            var sessionUpdated = false
             try {
                 if (networkStateManager.isCellularConnected()) {
                     val deviceIdSnapshot = _uiState.value.deviceId
@@ -320,19 +321,11 @@ class MainViewModel @Inject constructor(
                         deviceId = deviceIdSnapshot,
                         authToken = authTokenArray
                     )
-                    try {
-                        mqttConnectionManager.connect(
-                            deviceId = deviceIdSnapshot,
-                            authToken = authTokenArray
-                        )
-                    } catch (e: Exception) {
-                        // connect failed after update succeeded — rollback stored session
-                        val clearResult = authSessionStore.clearWithResult()
-                        if (clearResult is com.netproxy.gateway.result.AppResult.Error) {
-                            e.addSuppressed(clearResult.exception)
-                        }
-                        throw e
-                    }
+                    sessionUpdated = true
+                    mqttConnectionManager.connect(
+                        deviceId = deviceIdSnapshot,
+                        authToken = authTokenArray
+                    )
                     val oldTokenSuccess = _uiState.value.authToken
                     _uiState.update { current ->
                         current.copy(authToken = authTokenArray.copyOf())
@@ -352,6 +345,12 @@ class MainViewModel @Inject constructor(
                     current.copy(isPairingInProgress = false, errorMessage = e.message, authToken = CharArray(0))
                 }
                 oldTokenCatch.fill('\u0000')
+                if (sessionUpdated) {
+                    val clearResult = authSessionStore.clearWithResult()
+                    if (clearResult is com.netproxy.gateway.result.AppResult.Error) {
+                        e.addSuppressed(clearResult.exception)
+                    }
+                }
             } finally {
                 authTokenArray.fill('\u0000')
             }

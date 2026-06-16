@@ -488,9 +488,8 @@ class MqttConnectionManager @Inject constructor(
             }
 
             connectJob = jobToStart
+            jobToStart.start()
         }
-
-        jobToStart.start()
     }
 
     private fun onReconnectAttemptFailed() {
