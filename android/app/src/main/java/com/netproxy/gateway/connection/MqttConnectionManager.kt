@@ -532,8 +532,8 @@ class MqttConnectionManager @Inject constructor(
                 }
             }
             reconnectJob = jobToStart
+            jobToStart.start()
         }
-        jobToStart.start()
     }
 
     private fun startHeartbeat(deviceId: String, authToken: CharArray, generation: Long) {

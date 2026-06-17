@@ -1274,7 +1274,7 @@
 - **修复提交**: `e42094b`
 - **提交哈希**: `c7875a1`
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (`connect()`, L282-L492)
-- **问题描述**: ~~旧代码在 LAZY 协程外创建 `tokenSnapshot`，协程取消时 `finally` 不执行导致泄漏。~~ `e42094b` 已将 `tokenSnapshot` 的创建完全移入 LAZY 协程体内（从 `activeTokenSnapshot` 复制）。若协程被取消（`disconnect()` 在协程体执行前调用），`tokenSnapshot` 根本不会被创建，消除了泄漏路径。协程正常执行时，`finally { tokenSnapshot.fill('\u0000') }` 保证退出时清零。`disconnect()` 仍负责清零 `activeTokenSnapshot`。
+- **问题描述**: `connect()` 方法使用 `CoroutineStart.LAZY` 启动协程，并在协程体内从 `activeTokenSnapshot` 复制 `tokenSnapshot`。若协程被取消（例如 `disconnect()` 在协程体执行前调用），`tokenSnapshot` 不会被创建，因此不存在泄漏路径。协程正常执行或异常退出时，`finally { tokenSnapshot.fill('\u0000') }` 保证副本被清零。`disconnect()` 同时负责清零 `activeTokenSnapshot`。
 - **风险**: **已消除**。token 副本仅在协程体内存在，取消时无副本创建，正常退出时 `finally` 清零。
 
 ### REV18: `MqttConnectionManager.scheduleReconnect()` LAZY 协程取消导致 `tokenCopy` 泄漏 [已修复]
@@ -1282,7 +1282,7 @@
 - **修复提交**: `e42094b`
 - **提交哈希**: `1371601`（引入 `tokenCopy`）
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (`scheduleReconnect()`, L505-L534)
-- **问题描述**: ~~旧代码在 `scheduleReconnect()` 入口处创建 `tokenCopy`，协程取消时 `finally` 不执行导致泄漏。~~ `e42094b` 已将 `tokenCopy` 的创建移入 LAZY 协程体内（从 `activeTokenSnapshot` 复制）。若协程被取消，协程体不会执行，`tokenCopy` 不会被创建，消除了泄漏路径。协程正常执行时，`finally { tokenCopy.fill('\u0000') }` 保证退出时清零。与 REV14 采用一致的修复模式。
+- **问题描述**: `scheduleReconnect()` 方法使用 `CoroutineStart.LAZY` 启动协程，并在协程体内从 `activeTokenSnapshot` 复制 `tokenCopy`。若协程被取消（例如 `disconnect()` 在协程体执行前调用），`tokenCopy` 不会被创建，因此不存在泄漏路径。协程正常执行或异常退出时，`finally { tokenCopy.fill('\u0000') }` 保证副本被清零。该修复模式与 REV14 一致。
 - **风险**: **已消除**。token 副本仅在协程体内存在，取消时无副本创建，正常退出时 `finally` 清零。
 
 ### REV19: `server/api/main.go` login 端点每次请求重复计算 SHA256 [已修复]
