@@ -925,7 +925,19 @@ func TestSendLoopNoPanicOnConcurrentClose(t *testing.T) {
 		}
 	}()
 	floodWg.Wait()
-	tunnel.Close()
+
+	// Wrap Close() in a goroutine with a timeout to fail fast on deadlock regressions.
+	closeDone := make(chan struct{})
+	go func() {
+		tunnel.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+		// Success: Close() completed
+	case <-time.After(5 * time.Second):
+		t.Fatal("tunnel.Close() deadlocked")
+	}
 
 	// sendLoop should exit without panicking
 	select {

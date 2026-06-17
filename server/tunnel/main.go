@@ -692,7 +692,11 @@ func (s *Server) sendLoop(tunnel *TunnelConn) {
 				tunnel.connMu.Unlock()
 				return
 			}
-			tunnel.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := tunnel.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+				tunnel.connMu.Unlock()
+				tunnel.Close()
+				return
+			}
 			err := tunnel.Conn.WriteMessage(websocket.BinaryMessage, data)
 			tunnel.connMu.Unlock()
 			if err != nil {
