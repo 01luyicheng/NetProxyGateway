@@ -1269,4 +1269,40 @@
 - **修复难度**: 低
 - **修复方式**: 改用 `subtle.ConstantTimeCompare([]byte(req.Username), []byte(adminUser)) != 1 || subtle.ConstantTimeCompare([]byte(req.Password), []byte(adminPass)) != 1`。
 
+### REV14: `MqttConnectionManager.connect()` LAZY 协程取消导致 `tokenSnapshot` 泄漏
+- **状态**: 待修复
+- **提交哈希**: `c7875a1`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (`connect()`, L282-L492)
+- **问题描述**: `c7875a1` 将 `activeTokenSnapshot = tokenSnapshot` 改为 `activeTokenSnapshot = tokenSnapshot.copyOf()`，使两者成为独立副本。同时添加了 `finally { tokenSnapshot.fill('\u0000') }` 确保 LAZY 协程退出时清零。但如果 `disconnect()` 在 `jobToStart.start()` 之后、协程体实际执行之前被调用（如用户快速退出应用），`connectJob?.cancel()` 会阻止协程启动，LAZY 协程的 `finally` 块**不会执行**，`tokenSnapshot` 永远不会被清零。原始代码中 `activeTokenSnapshot` 与 `tokenSnapshot` 指向同一数组，`disconnect()` 清零 `activeTokenSnapshot` 可间接清零 `tokenSnapshot`；当前修改切断了这条清理路径。
+- **风险**: **高**。敏感认证令牌在内存中残留，可被内存转储攻击读取。
+- **修复难度**: 中
+- **修复建议**: 将 `tokenSnapshot` 的创建移到 LAZY 协程体内（从 `activeTokenSnapshot` 复制），或引入实例级 `pendingConnectToken` 变量由 `disconnect()` 统一清理。
+
+### REV18: `MqttConnectionManager.scheduleReconnect()` LAZY 协程取消导致 `tokenCopy` 泄漏
+- **状态**: 待修复
+- **提交哈希**: `1371601`（引入 `tokenCopy`）；当前分支仍存在
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (`scheduleReconnect()`, L505-L534)
+- **问题描述**: `scheduleReconnect()` 在入口处 `val tokenCopy = authToken.copyOf()`，并在 LAZY 协程的 `finally` 中清零。与 REV14 同类问题：若 `disconnect()` 在 `jobToStart.start()` 之后、协程体执行之前调用，`reconnectJob?.cancel()` 阻止协程启动，`finally` 不执行，`tokenCopy` 泄漏。此问题随 `0e4b6a83`/`1371601` 引入 N37-B7 修复时产生，当前未被记录。
+- **风险**: **高**。心跳失败触发重连后若用户立即断开连接，token 副本可能永久残留内存。
+- **修复难度**: 中
+- **修复建议**: 与 REV14 统一处理，将 `tokenCopy` 改为实例变量或在协程体内从 `activeTokenSnapshot` 复制。
+
+### REV19: `server/api/main.go` login 端点每次请求重复计算 SHA256
+- **状态**: 待修复
+- **提交哈希**: `cbea5f6`
+- **位置**: `server/api/main.go` (`login`, L1087-L1096)
+- **问题描述**: `expectedUserHash` 和 `expectedPassHash` 在每次 HTTP 请求时从环境变量重新计算 SHA256。环境变量在进程生命周期内不变，哈希值可以安全缓存。当前实现增加了不必要的 CPU 开销（每次登录 4 次 SHA256 计算）。
+- **风险**: **低**。性能开销而非安全问题；登录端点调用频率通常较低。
+- **修复难度**: 低
+- **修复建议**: 在 `Server` 初始化时计算并缓存 `expectedUserHash` / `expectedPassHash`，`login` 中直接使用缓存值。
+
+### REV20: `TestSendLoopNoPanicOnConcurrentClose` 未检查 `tunnel.Send()` 错误
+- **状态**: 待修复
+- **提交哈希**: `c7875a1`
+- **位置**: `server/tunnel/main_test.go` (`TestSendLoopNoPanicOnConcurrentClose`, L900-L920)
+- **问题描述**: 洪水 goroutine 中 `tunnel.Send([]byte("test-message"))` 的返回值被忽略。若 `sendChan` 缓冲满（容量 100，恰好发送 100 条，但在 `sendLoop` 消费速度滞后时仍可能满），`Send` 返回 `send buffer full` 错误，部分消息实际未入队。测试仍会通过，但"100 条消息"的假设不成立，削弱了并发覆盖的置信度。
+- **风险**: **低**。测试可靠性问题，不影响生产代码。
+- **修复难度**: 低
+- **修复建议**: 检查 `tunnel.Send()` 返回值，若返回错误则通过 `t.Fatalf` 提前失败；或增大 `sendChan` 容量确保 100 条消息全部入队。
+
 

@@ -116,6 +116,12 @@ class MqttConnectionManagerHeartbeatTest {
             val generation = spyManager.getPrivateConnectionGeneration()
             val originalToken = "secret-token".toCharArray()
 
+            // Set activeTokenSnapshot so scheduleReconnect can copy from it
+            val activeTokenField =
+                MqttConnectionManager::class.java.getDeclaredField("activeTokenSnapshot")
+            activeTokenField.isAccessible = true
+            activeTokenField.set(spyManager, originalToken.copyOf())
+
             // Mock connect() to capture the token argument
             var capturedToken: CharArray? = null
             every { spyManager.connect(any(), any()) } answers {

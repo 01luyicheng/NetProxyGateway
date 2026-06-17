@@ -921,7 +921,9 @@ func TestSendLoopNoPanicOnConcurrentClose(t *testing.T) {
 	go func() {
 		defer floodWg.Done()
 		for i := 0; i < 100; i++ {
-			tunnel.Send([]byte("test-message"))
+			if err := tunnel.Send([]byte("test-message")); err != nil {
+				t.Fatalf("tunnel.Send failed: %v", err)
+			}
 		}
 	}()
 	floodWg.Wait()
