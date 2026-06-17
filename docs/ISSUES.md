@@ -1269,40 +1269,76 @@
 - **修复难度**: 低
 - **修复方式**: 改用 `subtle.ConstantTimeCompare([]byte(req.Username), []byte(adminUser)) != 1 || subtle.ConstantTimeCompare([]byte(req.Password), []byte(adminPass)) != 1`。
 
-### REV14: `MqttConnectionManager.connect()` LAZY 协程取消导致 `tokenSnapshot` 泄漏
-- **状态**: 待修复
+### REV14: `MqttConnectionManager.connect()` LAZY 协程取消导致 `tokenSnapshot` 泄漏 [已修复]
+- **状态**: 已修复
+- **修复提交**: `e42094b`
 - **提交哈希**: `c7875a1`
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (`connect()`, L282-L492)
-- **问题描述**: `c7875a1` 将 `activeTokenSnapshot = tokenSnapshot` 改为 `activeTokenSnapshot = tokenSnapshot.copyOf()`，使两者成为独立副本。同时添加了 `finally { tokenSnapshot.fill('\u0000') }` 确保 LAZY 协程退出时清零。但如果 `disconnect()` 在 `jobToStart.start()` 之后、协程体实际执行之前被调用（如用户快速退出应用），`connectJob?.cancel()` 会阻止协程启动，LAZY 协程的 `finally` 块**不会执行**，`tokenSnapshot` 永远不会被清零。原始代码中 `activeTokenSnapshot` 与 `tokenSnapshot` 指向同一数组，`disconnect()` 清零 `activeTokenSnapshot` 可间接清零 `tokenSnapshot`；当前修改切断了这条清理路径。
-- **风险**: **高**。敏感认证令牌在内存中残留，可被内存转储攻击读取。
-- **修复难度**: 中
-- **修复建议**: 将 `tokenSnapshot` 的创建移到 LAZY 协程体内（从 `activeTokenSnapshot` 复制），或引入实例级 `pendingConnectToken` 变量由 `disconnect()` 统一清理。
+- **问题描述**: ~~旧代码在 LAZY 协程外创建 `tokenSnapshot`，协程取消时 `finally` 不执行导致泄漏。~~ `e42094b` 已将 `tokenSnapshot` 的创建完全移入 LAZY 协程体内（从 `activeTokenSnapshot` 复制）。若协程被取消（`disconnect()` 在协程体执行前调用），`tokenSnapshot` 根本不会被创建，消除了泄漏路径。协程正常执行时，`finally { tokenSnapshot.fill('\u0000') }` 保证退出时清零。`disconnect()` 仍负责清零 `activeTokenSnapshot`。
+- **风险**: **已消除**。token 副本仅在协程体内存在，取消时无副本创建，正常退出时 `finally` 清零。
 
-### REV18: `MqttConnectionManager.scheduleReconnect()` LAZY 协程取消导致 `tokenCopy` 泄漏
-- **状态**: 待修复
-- **提交哈希**: `1371601`（引入 `tokenCopy`）；当前分支仍存在
+### REV18: `MqttConnectionManager.scheduleReconnect()` LAZY 协程取消导致 `tokenCopy` 泄漏 [已修复]
+- **状态**: 已修复
+- **修复提交**: `e42094b`
+- **提交哈希**: `1371601`（引入 `tokenCopy`）
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (`scheduleReconnect()`, L505-L534)
-- **问题描述**: `scheduleReconnect()` 在入口处 `val tokenCopy = authToken.copyOf()`，并在 LAZY 协程的 `finally` 中清零。与 REV14 同类问题：若 `disconnect()` 在 `jobToStart.start()` 之后、协程体执行之前调用，`reconnectJob?.cancel()` 阻止协程启动，`finally` 不执行，`tokenCopy` 泄漏。此问题随 `0e4b6a83`/`1371601` 引入 N37-B7 修复时产生，当前未被记录。
-- **风险**: **高**。心跳失败触发重连后若用户立即断开连接，token 副本可能永久残留内存。
-- **修复难度**: 中
-- **修复建议**: 与 REV14 统一处理，将 `tokenCopy` 改为实例变量或在协程体内从 `activeTokenSnapshot` 复制。
+- **问题描述**: ~~旧代码在 `scheduleReconnect()` 入口处创建 `tokenCopy`，协程取消时 `finally` 不执行导致泄漏。~~ `e42094b` 已将 `tokenCopy` 的创建移入 LAZY 协程体内（从 `activeTokenSnapshot` 复制）。若协程被取消，协程体不会执行，`tokenCopy` 不会被创建，消除了泄漏路径。协程正常执行时，`finally { tokenCopy.fill('\u0000') }` 保证退出时清零。与 REV14 采用一致的修复模式。
+- **风险**: **已消除**。token 副本仅在协程体内存在，取消时无副本创建，正常退出时 `finally` 清零。
 
-### REV19: `server/api/main.go` login 端点每次请求重复计算 SHA256
-- **状态**: 待修复
+### REV19: `server/api/main.go` login 端点每次请求重复计算 SHA256 [已修复]
+- **状态**: 已修复
+- **修复提交**: `e42094b`
 - **提交哈希**: `cbea5f6`
 - **位置**: `server/api/main.go` (`login`, L1087-L1096)
-- **问题描述**: `expectedUserHash` 和 `expectedPassHash` 在每次 HTTP 请求时从环境变量重新计算 SHA256。环境变量在进程生命周期内不变，哈希值可以安全缓存。当前实现增加了不必要的 CPU 开销（每次登录 4 次 SHA256 计算）。
-- **风险**: **低**。性能开销而非安全问题；登录端点调用频率通常较低。
-- **修复难度**: 低
-- **修复建议**: 在 `Server` 初始化时计算并缓存 `expectedUserHash` / `expectedPassHash`，`login` 中直接使用缓存值。
+- **问题描述**: ~~旧代码在每次 HTTP 请求时从环境变量重新计算 SHA256。~~ `e42094b` 已在 `Server` 初始化时计算并缓存 `expectedUserHash` / `expectedPassHash`，`login` 中直接使用缓存值，消除了重复计算。
+- **风险**: **已消除**。登录端点不再重复计算哈希，CPU 开销已降低。
 
-### REV20: `TestSendLoopNoPanicOnConcurrentClose` 未检查 `tunnel.Send()` 错误
-- **状态**: 待修复
+### REV20: `TestSendLoopNoPanicOnConcurrentClose` 未检查 `tunnel.Send()` 错误 [已修复]
+- **状态**: 已修复
+- **修复提交**: `e42094b`
 - **提交哈希**: `c7875a1`
 - **位置**: `server/tunnel/main_test.go` (`TestSendLoopNoPanicOnConcurrentClose`, L900-L920)
-- **问题描述**: 洪水 goroutine 中 `tunnel.Send([]byte("test-message"))` 的返回值被忽略。若 `sendChan` 缓冲满（容量 100，恰好发送 100 条，但在 `sendLoop` 消费速度滞后时仍可能满），`Send` 返回 `send buffer full` 错误，部分消息实际未入队。测试仍会通过，但"100 条消息"的假设不成立，削弱了并发覆盖的置信度。
-- **风险**: **低**。测试可靠性问题，不影响生产代码。
+- **问题描述**: ~~旧代码忽略 `tunnel.Send()` 返回值。~~ `e42094b` 已在洪水 goroutine 中增加 `tunnel.Send()` 错误检查，使用 `t.Fatalf` 在发送失败时立即终止测试，确保"100 条消息全部入队"的假设成立。后续 CR9-4 进一步优化为 `t.Errorf` + 原子计数器，消除高负载下的 flaky 风险。
+- **风险**: **已修复**。发送失败不再被静默忽略，测试覆盖的置信度已恢复。
+
+## Code Review Round 9 (Cross-Review)
+
+针对提交 `e42094b`（分支 `fix/post-commit-review-concurrency-security`）的交叉审查结果。
+
+### CR9-1: ISSUES.md 中 REV14/REV18/REV19/REV20 状态未更新为已修复
+- **状态**: 待修复（文档）
+- **提交哈希**: `e42094b`
+- **位置**: `docs/ISSUES.md` (REV14, REV18, REV19, REV20)
+- **问题描述**: 提交 `e42094b` 的提交信息明确声明 "resolve cross-review issues REV14, REV18-REV20"，且代码变更确实实现了对应的修复逻辑（REV14/REV18 将 token 复制移入 LAZY 协程体；REV19 在 `Server` 初始化时缓存 SHA256 哈希；REV20 在测试中增加 `tunnel.Send()` 错误检查）。但 ISSUES.md 中这四个条目的状态仍标记为 "待修复"，且未引用 `e42094b` 作为修复提交。这会导致后续开发者误以为这些安全问题仍然存在，可能触发不必要的重复修复或混淆。
+- **风险**: **高**。文档与代码严重不一致，影响维护决策和发布判断。
 - **修复难度**: 低
-- **修复建议**: 检查 `tunnel.Send()` 返回值，若返回错误则通过 `t.Fatalf` 提前失败；或增大 `sendChan` 容量确保 100 条消息全部入队。
+- **修复建议**: 将 REV14、REV18、REV19、REV20 的状态更新为 "已修复"，并添加 `e42094b` 作为修复提交引用。更新 REV14 和 REV18 的问题描述，使其准确反映当前代码行为（而非修复前的行为）。
+
+### CR9-2: ISSUES.md 中 REV14 与 REV18 的问题描述基于修复前代码
+- **状态**: 待修复（文档）
+- **提交哈希**: `e42094b`
+- **位置**: `docs/ISSUES.md` (REV14, REV18)
+- **问题描述**: REV14 描述中提到 "`activeTokenSnapshot = tokenSnapshot.copyOf()`，使两者成为独立副本" 以及 "`finally { tokenSnapshot.fill('\u0000') }`"，这是 `c7875a1` 引入的旧代码行为。`e42094b` 已将 `tokenSnapshot` 的创建完全移入 LAZY 协程体内（从 `activeTokenSnapshot` 复制），不存在协程外独立的 `tokenSnapshot` 引用。同理，REV18 描述中 "`scheduleReconnect()` 在入口处 `val tokenCopy = authToken.copyOf()`" 也是旧代码行为。文档描述与当前代码不一致，会误导审查者认为修复尚未实施。
+- **风险**: **中**。文档描述过时，可能误导后续安全审计和代码审查。
+- **修复难度**: 低
+- **修复建议**: 重写 REV14 和 REV18 的问题描述，说明 `e42094b` 已将 token 复制移入 LAZY 协程体，并评估当前实现是否仍存在残余风险（如需要）。
+
+### CR9-3: `scheduleReconnect` 参数 `authToken` 成为孤儿参数
+- **状态**: 待修复
+- **提交哈希**: `e42094b`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (`scheduleReconnect()`, L507)
+- **问题描述**: `e42094b` 将 `tokenCopy` 的创建从 `scheduleReconnect` 入口处移入 LAZY 协程体内（从 `activeTokenSnapshot` 复制），导致参数 `authToken: CharArray` 在方法体内不再被任何代码引用。所有调用点（如 `connectionLost` 回调和 `connect()` 的 catch 块）仍然传入 `activeTokenSnapshot ?: CharArray(0)`，但该值已被忽略。这会造成维护者困惑，误以为传入的 token 仍被使用，且方法签名中携带无意义参数。
+- **风险**: **低**。不影响运行时行为，但损害代码可读性和可维护性。
+- **修复难度**: 低
+- **修复建议**: 移除 `scheduleReconnect` 的 `authToken: CharArray` 参数，同步更新所有调用点（`connectionLost` 回调 L375、`connect()` catch 块 L484、以及测试中的反射调用），使其不再传递 token 参数。
+
+### CR9-4: `TestSendLoopNoPanicOnConcurrentClose` 中 `t.Fatalf` 在子 goroutine 内可能引发偶发失败
+- **状态**: 待修复
+- **提交哈希**: `e42094b`
+- **位置**: `server/tunnel/main_test.go` (`TestSendLoopNoPanicOnConcurrentClose`, L924-L926)
+- **问题描述**: `e42094b` 按照 REV20 建议在洪水 goroutine 内增加 `if err := tunnel.Send(...); err != nil { t.Fatalf(...) }`。`sendChan` 容量为 100，测试恰好发送 100 条消息。当 `sendLoop` 因 `WriteMessage` 同步阻塞而消费速度滞后时，`Send` 的 `default` 分支可能命中，返回 `send buffer full` 错误，导致 `t.Fatalf` 立即终止测试。在本地开发环境或 CI 负载较高时，这可能造成偶发测试失败（flaky test）。虽然明确失败优于静默忽略，但当前实现以测试稳定性为代价。
+- **风险**: **低**。仅影响测试可靠性，不影响生产代码。当前多次运行（`-count=5`）均通过，但不排除高负载下的偶发失败。
+- **修复难度**: 低
+- **修复建议**: 两种方案任选其一：(a) 将洪水 goroutine 内的 `t.Fatalf` 改为 `t.Errorf` 配合 `sync/atomic` 错误计数，在主 goroutine 的 `floodWg.Wait()` 之后统一断言无错误；(b) 增大测试中的 `sendChan` 容量（例如改为 200 或更大），确保 100 条消息在 `sendLoop` 消费滞后的情况下仍能全部入队，保留 `t.Fatalf` 的严格检查。
 
 

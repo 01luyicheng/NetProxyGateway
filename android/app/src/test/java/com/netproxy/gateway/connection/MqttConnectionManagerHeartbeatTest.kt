@@ -139,7 +139,6 @@ class MqttConnectionManagerHeartbeatTest {
             // Call scheduleReconnect via reflection
             spyManager.invokePrivateScheduleReconnect(
                 "device-123",
-                originalToken,
                 generation,
             )
 
@@ -168,17 +167,15 @@ class MqttConnectionManagerHeartbeatTest {
 
     private fun MqttConnectionManager.invokePrivateScheduleReconnect(
         deviceId: String,
-        authToken: CharArray,
         generation: Long,
     ) {
         val method = MqttConnectionManager::class.java.getDeclaredMethod(
             "scheduleReconnect",
             String::class.java,
-            CharArray::class.java,
             java.lang.Long.TYPE,
         )
         method.isAccessible = true
-        method.invoke(this, deviceId, authToken, generation)
+        method.invoke(this, deviceId, generation)
     }
 
     private fun MqttConnectionManager.invokePrivateStartHeartbeat(

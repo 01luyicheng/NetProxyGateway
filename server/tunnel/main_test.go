@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -917,16 +918,20 @@ func TestSendLoopNoPanicOnConcurrentClose(t *testing.T) {
 	// Flood sendChan so sendLoop is likely inside WriteMessage when Close()
 	// is called. Using a WaitGroup ensures all sends complete before Close().
 	var floodWg sync.WaitGroup
+	var sendErrCount atomic.Int32
 	floodWg.Add(1)
 	go func() {
 		defer floodWg.Done()
 		for i := 0; i < 100; i++ {
 			if err := tunnel.Send([]byte("test-message")); err != nil {
-				t.Fatalf("tunnel.Send failed: %v", err)
+				sendErrCount.Add(1)
 			}
 		}
 	}()
 	floodWg.Wait()
+	if sendErrCount.Load() > 0 {
+		t.Fatalf("tunnel.Send failed %d time(s)", sendErrCount.Load())
+	}
 
 	// Wrap Close() in a goroutine with a timeout to fail fast on deadlock regressions.
 	closeDone := make(chan struct{})

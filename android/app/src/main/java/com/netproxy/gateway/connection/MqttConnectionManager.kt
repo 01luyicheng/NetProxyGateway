@@ -372,7 +372,7 @@ class MqttConnectionManager @Inject constructor(
                             }
                             _connectionState.value = MqttConnectionState.Error(cause?.message ?: "Connection lost")
                             if (shouldStayConnected) {
-                                scheduleReconnect(deviceId, activeTokenSnapshot ?: CharArray(0), generation)
+                                scheduleReconnect(deviceId, generation)
                             }
                         }
                     }
@@ -481,7 +481,7 @@ class MqttConnectionManager @Inject constructor(
                         _connectionState.value = MqttConnectionState.Error(e.message ?: "Connection failed")
                         if (shouldStayConnected) {
                             onReconnectAttemptFailed()
-                            scheduleReconnect(deviceId, activeTokenSnapshot ?: CharArray(0), generation)
+                            scheduleReconnect(deviceId, generation)
                         }
                     }
                 } finally {
@@ -504,7 +504,7 @@ class MqttConnectionManager @Inject constructor(
         }
     }
 
-    private fun scheduleReconnect(deviceId: String, authToken: CharArray, generation: Long) {
+    private fun scheduleReconnect(deviceId: String, generation: Long) {
         lateinit var jobToStart: Job
         synchronized(this@MqttConnectionManager) {
             reconnectJob?.cancel()
@@ -591,7 +591,7 @@ class MqttConnectionManager @Inject constructor(
                     if (shouldStayConnected && generation == connectionGeneration.get()) {
                         _connectionState.value = MqttConnectionState.Error("Max heartbeat failures reached")
                         onReconnectAttemptFailed()
-                        scheduleReconnect(deviceId, tokenSnapshot, generation)
+                        scheduleReconnect(deviceId, generation)
                     }
                     break
                 }
