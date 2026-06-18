@@ -451,7 +451,7 @@ class MqttConnectionManager @Inject constructor(
 
                 // N80: 先触发已注册的 topicCallbacks，再执行默认订阅
                 // 这样 VpnService 中通过 subscribe() 注册的 disconnect 监听器会被保留
-                startHeartbeat(deviceId, tokenSnapshot, generation)
+                startHeartbeat(deviceId, generation)
 
                 } catch (e: Exception) {
                     val clientToClose = localClient
@@ -536,15 +536,13 @@ class MqttConnectionManager @Inject constructor(
         }
     }
 
-    private fun startHeartbeat(deviceId: String, authToken: CharArray, generation: Long) {
+    private fun startHeartbeat(deviceId: String, generation: Long) {
         if (!shouldStayConnected || generation != connectionGeneration.get()) {
             return
         }
 
         heartbeatJob?.cancel()
-        val tokenSnapshot = authToken.copyOf()
         heartbeatJob = scope.launch {
-            try {
             var consecutiveFailures = 0
             while (
                 shouldStayConnected &&
@@ -595,9 +593,6 @@ class MqttConnectionManager @Inject constructor(
                     }
                     break
                 }
-            }
-            } finally {
-                tokenSnapshot.fill('\u0000')
             }
         }
     }

@@ -59,7 +59,6 @@ class MqttConnectionManagerHeartbeatTest {
         val generation = manager.getPrivateConnectionGeneration()
         manager.invokePrivateStartHeartbeat(
             deviceId = "device-123",
-            authToken = "token-abc".toCharArray(),
             generation = generation,
         )
 
@@ -83,7 +82,6 @@ class MqttConnectionManagerHeartbeatTest {
         val currentGeneration = manager.getPrivateConnectionGeneration()
         manager.invokePrivateStartHeartbeat(
             deviceId = "device-123",
-            authToken = "token-abc".toCharArray(),
             generation = currentGeneration,
         )
         testScope.runCurrent()
@@ -93,7 +91,6 @@ class MqttConnectionManagerHeartbeatTest {
 
         manager.invokePrivateStartHeartbeat(
             deviceId = "device-123",
-            authToken = "token-abc".toCharArray(),
             generation = currentGeneration + 1,
         )
         testScope.runCurrent()
@@ -180,17 +177,15 @@ class MqttConnectionManagerHeartbeatTest {
 
     private fun MqttConnectionManager.invokePrivateStartHeartbeat(
         deviceId: String,
-        authToken: CharArray,
         generation: Long,
     ) {
         val method = MqttConnectionManager::class.java.getDeclaredMethod(
             "startHeartbeat",
             String::class.java,
-            CharArray::class.java,
             java.lang.Long.TYPE,
         )
         method.isAccessible = true
-        method.invoke(this, deviceId, authToken, generation)
+        method.invoke(this, deviceId, generation)
     }
 
     private fun MqttConnectionManager.setPrivateBooleanField(fieldName: String, value: Boolean) {
