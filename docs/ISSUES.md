@@ -1219,7 +1219,7 @@
 - **状态**: 已修复
 - **修复提交**: `c7875a1`（主修复，connMu 锁保护）；`cbea5f6`（跟进，写入超时）
 - **位置**: `server/tunnel/main.go` (sendLoop, L680-L704)
-- **问题描述**: `sendLoop` 直接调用 `tunnel.Conn.WriteMessage()` 而未持有 `connMu` 锁。`Close()` 在 `connMu` 保护下将 `t.Conn` 设为 nil 并关闭底层连接。存在竞态窗口：`sendLoop` 检查 `Conn != nil` 后、调用 `WriteMessage` 前，`Close()` 可能已将 `Conn` 置 nil，导致 nil pointer panic。
+- **问题描述**: `sendLoop` 直接调用 `tunnel.Conn.WriteMessage()` 而未持有 `connMu` 锁。`Close()` 在 `connMu` 保护下设置 `t.closed = true` 并关闭底层连接（`t.Conn.Close()`），但**不会**将 `t.Conn` 置 nil。存在竞态窗口：`sendLoop` 检查 `Conn != nil` 后、调用 `WriteMessage` 前，`Close()` 可能已关闭连接，导致 `WriteMessage` 返回错误。`sendLoop` 现已通过 `connMu` 保护 `WriteMessage` 调用，与 `WritePing` 和 `Close()` 保持一致的锁保护模式。
 - **风险**: **高**。高并发下设备断连时，`heartbeat` 超时调用 `tunnel.Close()`，同时 `sendLoop` 正在写入，可导致 panic 或数据损坏。
 - **修复难度**: 低
 - **修复方式**: 在 `sendLoop` 中通过 `connMu` 保护 `WriteMessage` 调用，与 `WritePing` 和 `Close()` 保持一致的锁保护模式。
@@ -1305,8 +1305,9 @@
 
 针对提交 `e42094b`（分支 `fix/post-commit-review-concurrency-security`）的交叉审查结果。
 
-### CR9-1: ISSUES.md 中 REV14/REV18/REV19/REV20 状态未更新为已修复
-- **状态**: 待修复（文档）
+### CR9-1: ISSUES.md 中 REV14/REV18/REV19/REV20 状态未更新为已修复 [已修复]
+- **状态**: 已修复
+- **修复提交**: `1cc1d10`
 - **提交哈希**: `e42094b`
 - **位置**: `docs/ISSUES.md` (REV14, REV18, REV19, REV20)
 - **问题描述**: 提交 `e42094b` 的提交信息明确声明 "resolve cross-review issues REV14, REV18-REV20"，且代码变更确实实现了对应的修复逻辑（REV14/REV18 将 token 复制移入 LAZY 协程体；REV19 在 `Server` 初始化时缓存 SHA256 哈希；REV20 在测试中增加 `tunnel.Send()` 错误检查）。但 ISSUES.md 中这四个条目的状态仍标记为 "待修复"，且未引用 `e42094b` 作为修复提交。这会导致后续开发者误以为这些安全问题仍然存在，可能触发不必要的重复修复或混淆。
@@ -1314,8 +1315,9 @@
 - **修复难度**: 低
 - **修复建议**: 将 REV14、REV18、REV19、REV20 的状态更新为 "已修复"，并添加 `e42094b` 作为修复提交引用。更新 REV14 和 REV18 的问题描述，使其准确反映当前代码行为（而非修复前的行为）。
 
-### CR9-2: ISSUES.md 中 REV14 与 REV18 的问题描述基于修复前代码
-- **状态**: 待修复（文档）
+### CR9-2: ISSUES.md 中 REV14 与 REV18 的问题描述基于修复前代码 [已修复]
+- **状态**: 已修复
+- **修复提交**: `1cc1d10`
 - **提交哈希**: `e42094b`
 - **位置**: `docs/ISSUES.md` (REV14, REV18)
 - **问题描述**: REV14 描述中提到 "`activeTokenSnapshot = tokenSnapshot.copyOf()`，使两者成为独立副本" 以及 "`finally { tokenSnapshot.fill('\u0000') }`"，这是 `c7875a1` 引入的旧代码行为。`e42094b` 已将 `tokenSnapshot` 的创建完全移入 LAZY 协程体内（从 `activeTokenSnapshot` 复制），不存在协程外独立的 `tokenSnapshot` 引用。同理，REV18 描述中 "`scheduleReconnect()` 在入口处 `val tokenCopy = authToken.copyOf()`" 也是旧代码行为。文档描述与当前代码不一致，会误导审查者认为修复尚未实施。
@@ -1323,22 +1325,73 @@
 - **修复难度**: 低
 - **修复建议**: 重写 REV14 和 REV18 的问题描述，说明 `e42094b` 已将 token 复制移入 LAZY 协程体，并评估当前实现是否仍存在残余风险（如需要）。
 
-### CR9-3: `scheduleReconnect` 参数 `authToken` 成为孤儿参数
-- **状态**: 待修复
+### CR9-3: `scheduleReconnect` 参数 `authToken` 成为孤儿参数 [已修复]
+- **状态**: 已修复
+- **修复提交**: `1cc1d10`
 - **提交哈希**: `e42094b`
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (`scheduleReconnect()`, L507)
-- **问题描述**: `e42094b` 将 `tokenCopy` 的创建从 `scheduleReconnect` 入口处移入 LAZY 协程体内（从 `activeTokenSnapshot` 复制），导致参数 `authToken: CharArray` 在方法体内不再被任何代码引用。所有调用点（如 `connectionLost` 回调和 `connect()` 的 catch 块）仍然传入 `activeTokenSnapshot ?: CharArray(0)`，但该值已被忽略。这会造成维护者困惑，误以为传入的 token 仍被使用，且方法签名中携带无意义参数。
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (`scheduleReconnect()`)
+- **问题描述**: 提交 `1cc1d10` 已移除 `scheduleReconnect` 的 `authToken: CharArray` 参数，同步更新了所有调用点。当前签名已为 `scheduleReconnect(deviceId: String, generation: Long)`，token 在 LAZY 协程体内从 `activeTokenSnapshot` 复制。
 - **风险**: **低**。不影响运行时行为，但损害代码可读性和可维护性。
 - **修复难度**: 低
-- **修复建议**: 移除 `scheduleReconnect` 的 `authToken: CharArray` 参数，同步更新所有调用点（`connectionLost` 回调 L375、`connect()` catch 块 L484、以及测试中的反射调用），使其不再传递 token 参数。
 
-### CR9-4: `TestSendLoopNoPanicOnConcurrentClose` 中 `t.Fatalf` 在子 goroutine 内可能引发偶发失败
-- **状态**: 待修复
+### CR9-4: `TestSendLoopNoPanicOnConcurrentClose` 中 `t.Fatalf` 在子 goroutine 内可能引发偶发失败 [已修复]
+- **状态**: 已修复
+- **修复提交**: `1cc1d10`
 - **提交哈希**: `e42094b`
 - **位置**: `server/tunnel/main_test.go` (`TestSendLoopNoPanicOnConcurrentClose`, L924-L926)
-- **问题描述**: `e42094b` 按照 REV20 建议在洪水 goroutine 内增加 `if err := tunnel.Send(...); err != nil { t.Fatalf(...) }`。`sendChan` 容量为 100，测试恰好发送 100 条消息。当 `sendLoop` 因 `WriteMessage` 同步阻塞而消费速度滞后时，`Send` 的 `default` 分支可能命中，返回 `send buffer full` 错误，导致 `t.Fatalf` 立即终止测试。在本地开发环境或 CI 负载较高时，这可能造成偶发测试失败（flaky test）。虽然明确失败优于静默忽略，但当前实现以测试稳定性为代价。
-- **风险**: **低**。仅影响测试可靠性，不影响生产代码。当前多次运行（`-count=5`）均通过，但不排除高负载下的偶发失败。
+- **问题描述**: 提交 `1cc1d10` 已将洪水 goroutine 内的 `t.Fatalf` 替换为 `atomic.Int32` 错误计数器，在主 goroutine `floodWg.Wait()` 之后统一断言无错误。消除了高负载下的 flaky test 风险。
+- **风险**: **低**。仅影响测试可靠性，不影响生产代码。
 - **修复难度**: 低
-- **修复建议**: 两种方案任选其一：(a) 将洪水 goroutine 内的 `t.Fatalf` 改为 `t.Errorf` 配合 `sync/atomic` 错误计数，在主 goroutine 的 `floodWg.Wait()` 之后统一断言无错误；(b) 增大测试中的 `sendChan` 容量（例如改为 200 或更大），确保 100 条消息在 `sendLoop` 消费滞后的情况下仍能全部入队，保留 `t.Fatalf` 的严格检查。
+
+## Code Review Round 10 (Cross-Review)
+
+针对提交 `ceab4ad`（分支 `fix/post-commit-review-concurrency-security`）及整个 PR 累积状态的交叉审查结果。
+
+### CR10-1: ISSUES.md 中 CR9-1 至 CR9-4 状态未更新为已修复
+- **状态**: 待修复（文档）
+- **提交哈希**: `1cc1d10`（实际修复提交）；`ceab4ad`（审查提交）
+- **位置**: `docs/ISSUES.md` (CR9-1, CR9-2, CR9-3, CR9-4)
+- **问题描述**: 提交 `1cc1d10` 已明确修复 CR9-1~CR9-4（更新 REV14/REV18/REV19/REV20 状态为已修复、重写 REV14/REV18 描述、移除 `scheduleReconnect` 的 `authToken` 孤儿参数、将洪水 goroutine 内的 `t.Fatalf` 替换为 `atomic.Int32` 计数器）。但 ISSUES.md 中 CR9-1~CR9-4 条目本身仍标记为 "待修复"，且未引用修复提交 `1cc1d10`。这会导致后续维护者重复审查已修复的问题，浪费精力并可能引入不必要的变更。
+- **风险**: **中**。文档与代码事实严重不一致，持续消耗审查资源。
+- **修复难度**: 低
+- **修复建议**: 将 CR9-1~CR9-4 的状态更新为 "已修复"，添加 `1cc1d10` 作为修复提交引用，并更新 CR9-3/CR9-4 的问题描述以反映当前代码状态（见 CR10-2）。
+
+### CR10-2: ISSUES.md CR9-3 与 CR9-4 的问题描述基于修复前代码
+- **状态**: 待修复（文档）
+- **提交哈希**: `1cc1d10`（实际修复提交）；`ceab4ad`（审查提交）
+- **位置**: `docs/ISSUES.md` (CR9-3, CR9-4)
+- **问题描述**:
+  - CR9-3 描述中声称 "`scheduleReconnect` 参数 `authToken: CharArray` 在方法体内不再被任何代码引用"，但提交 `1cc1d10` 已将该参数完全移除，当前签名已是 `scheduleReconnect(deviceId: String, generation: Long)`。描述完全过时。
+  - CR9-4 描述中声称 "洪水 goroutine 内增加 `if err := tunnel.Send(...); err != nil { t.Fatalf(...) }`"，但提交 `1cc1d10` 已将其替换为 `atomic.Int32` 错误计数器 + 主 goroutine 统一断言。描述完全过时。
+- **风险**: **低**。误导后续审查者认为代码仍存在孤儿参数和 flaky test 风险，但运行时不受影响。
+- **修复难度**: 低
+- **修复建议**: 重写 CR9-3 和 CR9-4 的问题描述，说明当前已实现的行为（无 authToken 参数 / 使用 atomic 计数器），或直接将这两个条目标记为已修复并归档。
+
+### CR10-3: ISSUES.md REV8 描述与当前 `Close()` 实现不符
+- **状态**: 待修复（文档）
+- **提交哈希**: `c7875a1`（引入 REV8 描述）；`cbea5f6`（修改 Close 行为）
+- **位置**: `docs/ISSUES.md` (REV8) 与 `server/tunnel/main.go` (`Close()`, L181-L191)
+- **问题描述**: REV8 描述称 "`Close()` 在 `connMu` 保护下将 `t.Conn` 设为 nil 并关闭底层连接"。但当前代码中 `Close()` 仅执行 `t.closed = true`、`close(t.closeChan)` 和 `t.Conn.Close()`（关闭底层 WebSocket 连接），**从未将 `t.Conn` 设为 nil**。该描述基于旧代码理解，与当前实现不符。尽管 `sendLoop` 的 nil 检查 `tunnel.Conn == nil` 仍然存在，但 `Close()` 不会触发该路径。
+- **风险**: **低**。文档不准确可能导致后续维护者对 `Close()` 的行为产生错误假设，但当前锁保护逻辑已正确消除竞态。
+- **修复难度**: 低
+- **修复建议**: 修正 REV8 描述，准确说明 `Close()` 设置 `t.closed = true` 并关闭底层连接，而非将 `t.Conn` 置 nil；同时说明 `sendLoop` 通过 `connMu` 锁和 `t.closed` 标志与 `Close()` 同步。
+
+### CR10-4: `TestSendLoopNoPanicOnConcurrentClose` 中 `defer clientConn.Close()` 导致双重关闭
+- **状态**: 待修复（测试代码）
+- **提交哈希**: `ceab4ad`
+- **位置**: `server/tunnel/main_test.go` (`TestSendLoopNoPanicOnConcurrentClose`, L904)
+- **问题描述**: 提交 `ceab4ad` 新增了 `defer clientConn.Close()`。但测试流程中显式调用了 `tunnel.Close()`，而 `tunnel.Close()` 内部已通过 `t.Conn.Close()` 关闭了同一个 `clientConn`。函数返回时 `defer clientConn.Close()` 会执行第二次关闭，形成冗余的双重关闭。gorilla/websocket 的 `Close()` 通常可安全处理重复调用（底层 WriteControl 会返回错误但不会 panic），但属于不良实践，且可能掩盖其他资源清理问题。
+- **风险**: **低**。仅影响测试代码，不影响生产行为；当前不会导致测试失败。
+- **修复难度**: 低
+- **修复建议**: 移除 `defer clientConn.Close()`，因为 `tunnel.Close()` 已负责关闭底层连接；或在 `tunnel.Close()` 后将 `clientConn` 置为 nil 以避免重复关闭。
+
+### CR10-5: MainViewModel `StateFlow.update` CAS 重试场景下存在理论上的 token 误清零风险
+- **状态**: 待评估（潜在风险）
+- **提交哈希**: `c7875a1`（引入 REV10/REV11 修复模式）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (`observeMqttState` Disconnected/Error 分支、`disconnect()`、`onCleared()` 等)
+- **问题描述**: REV10/REV11 修复将 `authToken.fill('\u0000')` 移出 `_uiState.update` lambda，改为先通过 lambda 捕获旧引用到局部变量 `tokenToZero`，再在 `update` 返回后执行清零。`MutableStateFlow.update` 内部使用 CAS 循环，若并发竞争导致重试，lambda 会被多次执行，每次都会覆盖 `tokenToZero`。在极端并发场景下（例如用户快速断开并重连），最后一次重试的 `current.authToken` 可能已经是新的有效 token，导致新 token 被意外清零。由于 MainViewModel 的 StateFlow 更新通常在 `Dispatchers.Main` 主线程串行调度，实际触发概率极低，但存在理论可能。
+- **风险**: **低**。主线程串行执行使得 CAS 重试的并发窗口几乎不存在；即使触发，也只是清零新 token 而非泄漏旧 token，不会扩大攻击面。
+- **修复难度**: 中
+- **修复建议**: 若需彻底消除理论风险，可改为在 `_uiState.update` lambda 内部使用 `compareAndSet` 的返回值获取更新前的状态快照，或使用自定义的原子替换逻辑确保只清零真正被替换掉的那个引用。考虑到实际触发概率，当前实现可接受，但建议在文档中记录此边界行为。
 
 

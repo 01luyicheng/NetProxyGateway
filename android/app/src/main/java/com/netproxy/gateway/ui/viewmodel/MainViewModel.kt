@@ -37,6 +37,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -232,9 +233,7 @@ class MainViewModel @Inject constructor(
                     is MqttConnectionState.Disconnected -> {
                         connectionStartTime = 0
                         stopDurationTimer()
-                        var tokenToZero: CharArray? = null
-                        _uiState.update { current ->
-                            tokenToZero = current.authToken
+                        val tokenToZero = _uiState.getAndUpdate { current ->
                             current.copy(
                                 isConnected = false,
                                 isPaired = false,
@@ -244,15 +243,13 @@ class MainViewModel @Inject constructor(
                                 connectionDurationMs = 0,
                                 authToken = CharArray(0)
                             )
-                        }
+                        }.authToken
                         tokenToZero?.fill('\u0000')
                     }
                     is MqttConnectionState.Error -> {
                         connectionStartTime = 0
                         stopDurationTimer()
-                        var tokenToZero: CharArray? = null
-                        _uiState.update { current ->
-                            tokenToZero = current.authToken
+                        val tokenToZero = _uiState.getAndUpdate { current ->
                             current.copy(
                                 isConnected = false,
                                 isPaired = false,
@@ -263,7 +260,7 @@ class MainViewModel @Inject constructor(
                                 connectionDurationMs = 0,
                                 authToken = CharArray(0)
                             )
-                        }
+                        }.authToken
                         tokenToZero?.fill('\u0000')
                     }
                 }
@@ -328,27 +325,21 @@ class MainViewModel @Inject constructor(
                         deviceId = deviceIdSnapshot,
                         authToken = authTokenArray
                     )
-                    var tokenToZero: CharArray? = null
-                    _uiState.update { current ->
-                        tokenToZero = current.authToken
+                    val tokenToZero = _uiState.getAndUpdate { current ->
                         current.copy(authToken = authTokenArray.copyOf())
-                    }
+                    }.authToken
                     tokenToZero?.fill('\u0000')
                 } else {
-                    var tokenToZero: CharArray? = null
-                    _uiState.update { current ->
-                        tokenToZero = current.authToken
+                    val tokenToZero = _uiState.getAndUpdate { current ->
                         current.copy(isPairingInProgress = false, errorMessage = AppLocale.getString(context, R.string.error_cellular_required), authToken = CharArray(0))
-                    }
+                    }.authToken
                     tokenToZero?.fill('\u0000')
                 }
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
-                var tokenToZero: CharArray? = null
-                _uiState.update { current ->
-                    tokenToZero = current.authToken
+                val tokenToZero = _uiState.getAndUpdate { current ->
                     current.copy(isPairingInProgress = false, errorMessage = e.message, authToken = CharArray(0))
-                }
+                }.authToken
                 tokenToZero?.fill('\u0000')
                 if (sessionUpdated) {
                     val clearResult = authSessionStore.clearWithResult()
@@ -416,26 +407,22 @@ class MainViewModel @Inject constructor(
         mqttConnectionManager.disconnect()
         authSessionStore.clear()
         toggleVpn(false)
-        var tokenToZero: CharArray? = null
-        _uiState.update { current ->
-            tokenToZero = current.authToken
+        val tokenToZero = _uiState.getAndUpdate { current ->
             current.copy(
                 isConnected = false,
                 isPaired = false,
                 peerId = "",
                 authToken = CharArray(0)
             )
-        }
+        }.authToken
         tokenToZero?.fill('\u0000')
     }
 
     override fun onCleared() {
         super.onCleared()
-        var tokenToZero: CharArray? = null
-        _uiState.update { current ->
-            tokenToZero = current.authToken
+        val tokenToZero = _uiState.getAndUpdate { current ->
             current.copy(authToken = CharArray(0))
-        }
+        }.authToken
         tokenToZero?.fill('\u0000')
     }
 }
