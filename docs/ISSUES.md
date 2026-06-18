@@ -1347,18 +1347,20 @@
 
 针对提交 `ceab4ad`（分支 `fix/post-commit-review-concurrency-security`）及整个 PR 累积状态的交叉审查结果。
 
-### CR10-1: ISSUES.md 中 CR9-1 至 CR9-4 状态未更新为已修复
-- **状态**: 待修复（文档）
-- **提交哈希**: `1cc1d10`（实际修复提交）；`ceab4ad`（审查提交）
+### CR10-1: ISSUES.md 中 CR9-1 至 CR9-4 状态未更新为已修复 [已修复]
+- **状态**: 已修复
+- **修复提交**: `1cc1d10`
+- **提交哈希**: `ceab4ad`（审查提交）
 - **位置**: `docs/ISSUES.md` (CR9-1, CR9-2, CR9-3, CR9-4)
 - **问题描述**: 提交 `1cc1d10` 已明确修复 CR9-1~CR9-4（更新 REV14/REV18/REV19/REV20 状态为已修复、重写 REV14/REV18 描述、移除 `scheduleReconnect` 的 `authToken` 孤儿参数、将洪水 goroutine 内的 `t.Fatalf` 替换为 `atomic.Int32` 计数器）。但 ISSUES.md 中 CR9-1~CR9-4 条目本身仍标记为 "待修复"，且未引用修复提交 `1cc1d10`。这会导致后续维护者重复审查已修复的问题，浪费精力并可能引入不必要的变更。
 - **风险**: **中**。文档与代码事实严重不一致，持续消耗审查资源。
 - **修复难度**: 低
 - **修复建议**: 将 CR9-1~CR9-4 的状态更新为 "已修复"，添加 `1cc1d10` 作为修复提交引用，并更新 CR9-3/CR9-4 的问题描述以反映当前代码状态（见 CR10-2）。
 
-### CR10-2: ISSUES.md CR9-3 与 CR9-4 的问题描述基于修复前代码
-- **状态**: 待修复（文档）
-- **提交哈希**: `1cc1d10`（实际修复提交）；`ceab4ad`（审查提交）
+### CR10-2: ISSUES.md CR9-3 与 CR9-4 的问题描述基于修复前代码 [已修复]
+- **状态**: 已修复
+- **修复提交**: `1cc1d10`
+- **提交哈希**: `ceab4ad`（审查提交）
 - **位置**: `docs/ISSUES.md` (CR9-3, CR9-4)
 - **问题描述**:
   - CR9-3 描述中声称 "`scheduleReconnect` 参数 `authToken: CharArray` 在方法体内不再被任何代码引用"，但提交 `1cc1d10` 已将该参数完全移除，当前签名已是 `scheduleReconnect(deviceId: String, generation: Long)`。描述完全过时。
@@ -1367,8 +1369,9 @@
 - **修复难度**: 低
 - **修复建议**: 重写 CR9-3 和 CR9-4 的问题描述，说明当前已实现的行为（无 authToken 参数 / 使用 atomic 计数器），或直接将这两个条目标记为已修复并归档。
 
-### CR10-3: ISSUES.md REV8 描述与当前 `Close()` 实现不符
-- **状态**: 待修复（文档）
+### CR10-3: ISSUES.md REV8 描述与当前 `Close()` 实现不符 [已修复]
+- **状态**: 已修复
+- **修复提交**: `5f0521d`
 - **提交哈希**: `c7875a1`（引入 REV8 描述）；`cbea5f6`（修改 Close 行为）
 - **位置**: `docs/ISSUES.md` (REV8) 与 `server/tunnel/main.go` (`Close()`, L181-L191)
 - **问题描述**: REV8 描述称 "`Close()` 在 `connMu` 保护下将 `t.Conn` 设为 nil 并关闭底层连接"。但当前代码中 `Close()` 仅执行 `t.closed = true`、`close(t.closeChan)` 和 `t.Conn.Close()`（关闭底层 WebSocket 连接），**从未将 `t.Conn` 设为 nil**。该描述基于旧代码理解，与当前实现不符。尽管 `sendLoop` 的 nil 检查 `tunnel.Conn == nil` 仍然存在，但 `Close()` 不会触发该路径。
@@ -1376,8 +1379,9 @@
 - **修复难度**: 低
 - **修复建议**: 修正 REV8 描述，准确说明 `Close()` 设置 `t.closed = true` 并关闭底层连接，而非将 `t.Conn` 置 nil；同时说明 `sendLoop` 通过 `connMu` 锁和 `t.closed` 标志与 `Close()` 同步。
 
-### CR10-4: `TestSendLoopNoPanicOnConcurrentClose` 中 `defer clientConn.Close()` 导致双重关闭
-- **状态**: 待修复（测试代码）
+### CR10-4: `TestSendLoopNoPanicOnConcurrentClose` 中 `defer clientConn.Close()` 导致双重关闭 [已修复]
+- **状态**: 已修复
+- **修复提交**: `5f0521d`
 - **提交哈希**: `ceab4ad`
 - **位置**: `server/tunnel/main_test.go` (`TestSendLoopNoPanicOnConcurrentClose`, L904)
 - **问题描述**: 提交 `ceab4ad` 新增了 `defer clientConn.Close()`。但测试流程中显式调用了 `tunnel.Close()`，而 `tunnel.Close()` 内部已通过 `t.Conn.Close()` 关闭了同一个 `clientConn`。函数返回时 `defer clientConn.Close()` 会执行第二次关闭，形成冗余的双重关闭。gorilla/websocket 的 `Close()` 通常可安全处理重复调用（底层 WriteControl 会返回错误但不会 panic），但属于不良实践，且可能掩盖其他资源清理问题。
@@ -1385,8 +1389,9 @@
 - **修复难度**: 低
 - **修复建议**: 移除 `defer clientConn.Close()`，因为 `tunnel.Close()` 已负责关闭底层连接；或在 `tunnel.Close()` 后将 `clientConn` 置为 nil 以避免重复关闭。
 
-### CR10-5: MainViewModel `StateFlow.update` CAS 重试场景下存在理论上的 token 误清零风险
-- **状态**: 待评估（潜在风险）
+### CR10-5: MainViewModel `StateFlow.update` CAS 重试场景下存在理论上的 token 误清零风险 [已修复]
+- **状态**: 已修复
+- **修复提交**: `5f0521d`
 - **提交哈希**: `c7875a1`（引入 REV10/REV11 修复模式）
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (`observeMqttState` Disconnected/Error 分支、`disconnect()`、`onCleared()` 等)
 - **问题描述**: REV10/REV11 修复将 `authToken.fill('\u0000')` 移出 `_uiState.update` lambda，改为先通过 lambda 捕获旧引用到局部变量 `tokenToZero`，再在 `update` 返回后执行清零。`MutableStateFlow.update` 内部使用 CAS 循环，若并发竞争导致重试，lambda 会被多次执行，每次都会覆盖 `tokenToZero`。在极端并发场景下（例如用户快速断开并重连），最后一次重试的 `current.authToken` 可能已经是新的有效 token，导致新 token 被意外清零。由于 MainViewModel 的 StateFlow 更新通常在 `Dispatchers.Main` 主线程串行调度，实际触发概率极低，但存在理论可能。
