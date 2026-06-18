@@ -960,3 +960,22 @@ func TestSendLoopNoPanicOnConcurrentClose(t *testing.T) {
 		t.Fatal("sendLoop did not exit after Close()")
 	}
 }
+
+// TestSendReturnsErrorAfterClose verifies that Send() never returns nil after
+// Close() has been called.  Without the atomic.Bool pre-check, Go's select
+// could randomly pick the sendChan branch (which returns nil) even though
+// closeChan is already closed, causing silent data loss.
+func TestSendReturnsErrorAfterClose(t *testing.T) {
+	tunnel := NewTunnelConn("device-send-after-close", nil)
+
+	tunnel.Close()
+
+	// Run many iterations to catch the probabilistic bug where select
+	// randomly picks the sendChan branch over the closeChan branch.
+	for i := 0; i < 200; i++ {
+		err := tunnel.Send([]byte("test"))
+		if err == nil {
+			t.Fatalf("Send() returned nil after Close() on iteration %d; silent data loss bug", i)
+		}
+	}
+}

@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -124,7 +125,7 @@ type TunnelConn struct {
 	messageLimiter *tokenBucketLimiter
 	closeChan      chan struct{}
 	closeOnce      sync.Once
-	closed         bool
+	closed         atomic.Bool
 }
 
 var errTunnelClosed = errors.New("tunnel closed")
@@ -166,7 +167,15 @@ func (t *TunnelConn) IsAlive(timeout time.Duration) bool {
 }
 
 // Send sends a message through the tunnel.
+// An atomic pre-check on closed prevents the silent-data-loss race where Go's
+// select randomly picks the sendChan branch after Close() has closed closeChan
+// but sendChan still has buffer space. Without the pre-check, Send() would
+// return nil (success) even though sendLoop has already exited and the data
+// will never be delivered.
 func (t *TunnelConn) Send(data []byte) error {
+	if t.closed.Load() {
+		return fmt.Errorf("tunnel closed")
+	}
 	select {
 	case t.sendChan <- data:
 		return nil
@@ -181,7 +190,7 @@ func (t *TunnelConn) Send(data []byte) error {
 func (t *TunnelConn) Close() {
 	t.closeOnce.Do(func() {
 		t.connMu.Lock()
-		t.closed = true
+		t.closed.Store(true)
 		close(t.closeChan)
 		if t.Conn != nil {
 			_ = t.Conn.Close()
@@ -199,7 +208,7 @@ func (t *TunnelConn) WritePing(deadline time.Time) error {
 	t.connMu.Lock()
 	defer t.connMu.Unlock()
 
-	if t.closed || t.Conn == nil {
+	if t.closed.Load() || t.Conn == nil {
 		return errTunnelClosed
 	}
 
@@ -688,7 +697,7 @@ func (s *Server) sendLoop(tunnel *TunnelConn) {
 		select {
 		case data := <-tunnel.sendChan:
 			tunnel.connMu.Lock()
-			if tunnel.closed || tunnel.Conn == nil {
+			if tunnel.closed.Load() || tunnel.Conn == nil {
 				tunnel.connMu.Unlock()
 				return
 			}

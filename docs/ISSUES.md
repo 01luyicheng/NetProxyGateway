@@ -1399,4 +1399,28 @@
 - **修复难度**: 中
 - **修复建议**: 若需彻底消除理论风险，可改为在 `_uiState.update` lambda 内部使用 `compareAndSet` 的返回值获取更新前的状态快照，或使用自定义的原子替换逻辑确保只清零真正被替换掉的那个引用。考虑到实际触发概率，当前实现可接受，但建议在文档中记录此边界行为。
 
+---
+
+## 提交后审查发现（2026-06-19，审查提交 92f4212..b9f04c3）
+
+> 以下问题由多 subagent 对过去 24 小时内各分支的提交进行深度审查发现。
+
+### REV21: `Send()` 在 `Close()` 后可能返回 nil 导致静默数据丢失
+- **状态**: 已修复
+- **修复提交**: (本分支)
+- **位置**: `server/tunnel/main.go` (`Send()`, L169-L178)
+- **问题描述**: `Send()` 使用 `select` 在 `sendChan` 和 `closeChan` 之间选择。当 `Close()` 关闭 `closeChan` 后，`sendLoop` 通过 `<-tunnel.closeChan` 退出且不排空 `sendChan`。如果 `sendChan` 缓冲区仍有空间，Go 的 `select` 在多个就绪分支间随机选择——约 50% 概率选择 `sendChan` 分支，`Send()` 返回 `nil`（表示成功），但数据永远不会被发送。`closed` 字段为普通 `bool`，`Send()` 完全不检查 `closed` 状态，无法感知隧道已关闭。
+- **触发场景**: goroutine A 调用 `Send(data)`，goroutine B 同时调用 `Close()`。`closeChan` 已关闭且 `sendChan` 有缓冲空间，select 随机选择 `sendChan` 分支，返回 nil 但数据丢失。
+- **风险**: **高**。调用方认为发送成功，但数据实际被丢弃。在远程协助场景下可能导致控制指令丢失。
+- **修复方式**: 将 `closed` 从 `bool` 改为 `atomic.Bool`，在 `Send()` 入口添加 `if t.closed.Load() { return error }` 原子预检查，消除 select 随机选择导致的静默数据丢失。
+
+### REV22: `MqttConnectOptions.setPassword()` 内部复制 CharArray 未被清零
+- **状态**: 已修复
+- **修复提交**: (本分支)
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (connect LAZY 协程, L308+L359+L491-L495)
+- **问题描述**: Paho MQTT 客户端的 `MqttConnectOptions.setPassword(char[])` 内部通过 `Arrays.copyOf()` 复制了传入的 CharArray，因此 `options.password` 和 `tokenSnapshot` 是独立的数组对象。LAZY 协程的 `finally` 块中 `tokenSnapshot.fill('\u0000')` 只清零了原始副本，`options.password` 中的副本仍持有明文 token。`disconnect()` 调用 `mqttClient?.close()` 不会清零 `MqttConnectOptions` 中的 password 副本，导致 token 明文在堆内存中驻留直到 GC 回收。
+- **触发场景**: 用户调用 `connect()` → `MqttConnectOptions.setPassword(tokenSnapshot)` 创建 CharArray 副本 → 连接成功/失败 → `finally` 清零 `tokenSnapshot` 但 `options.password` 仍含明文 → `mqttClient?.close()` 释放客户端但不清零 options → 堆转储可提取明文 token。
+- **风险**: **中高**。root 设备或调试器可读取堆内存中的明文 token。
+- **修复方式**: 将 `options` 声明提升为协程体级变量 `connectOptions`，在 `finally` 块中额外执行 `connectOptions?.password?.fill('\u0000')` 清零 Paho 内部复制的 CharArray 副本。
+
 

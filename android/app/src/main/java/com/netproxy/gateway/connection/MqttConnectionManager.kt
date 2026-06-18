@@ -305,6 +305,7 @@ class MqttConnectionManager @Inject constructor(
                     activeTokenSnapshot?.copyOf()
                 } ?: CharArray(0)
                 var localClient: MqttClient? = null
+                var connectOptions: MqttConnectOptions? = null
                 try {
                     if (!shouldStayConnected || generation != connectionGeneration.get()) {
                         return@launch
@@ -355,6 +356,7 @@ class MqttConnectionManager @Inject constructor(
                         sslHostnameVerifier = HttpsURLConnection.getDefaultHostnameVerifier()
                     }
                 }
+                connectOptions = options
 
                 createdClient.setCallback(object : MqttCallback {
                     override fun connectionLost(cause: Throwable?) {
@@ -486,6 +488,11 @@ class MqttConnectionManager @Inject constructor(
                     }
                 } finally {
                     tokenSnapshot.fill('\u0000')
+                    // CR14-1: Paho MqttConnectOptions.setPassword() internally copies the
+                    // CharArray via Arrays.copyOf(), so options.password and tokenSnapshot
+                    // are independent.  Clear the copy held by MqttConnectOptions so that
+                    // the password does not linger in heap memory after the client is closed.
+                    connectOptions?.password?.fill('\u0000')
                 }
             }
 
