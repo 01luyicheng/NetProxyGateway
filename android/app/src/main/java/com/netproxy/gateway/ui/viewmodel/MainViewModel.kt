@@ -406,7 +406,6 @@ class MainViewModel @Inject constructor(
     fun disconnect() {
         mqttConnectionManager.disconnect()
         authSessionStore.clear()
-        toggleVpn(false)
         val tokenToZero = _uiState.getAndUpdate { current ->
             current.copy(
                 isConnected = false,
@@ -416,6 +415,7 @@ class MainViewModel @Inject constructor(
             )
         }.authToken
         tokenToZero?.fill('\u0000')
+        toggleVpn(false)
     }
 
     override fun onCleared() {

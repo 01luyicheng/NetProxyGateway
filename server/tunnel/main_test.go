@@ -901,6 +901,7 @@ func TestSendLoopNoPanicOnConcurrentClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to dial websocket server: %v", err)
 	}
+	defer clientConn.Close()
 
 	tunnelServer := NewServer(&Config{
 		HeartbeatInterval: time.Second,

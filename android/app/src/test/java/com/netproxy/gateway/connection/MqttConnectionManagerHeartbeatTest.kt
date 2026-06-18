@@ -139,7 +139,7 @@ class MqttConnectionManagerHeartbeatTest {
                 generation,
             )
 
-            // Zero the original token (simulating startHeartbeat's finally block)
+            // Zero the original token (simulating disconnect or reconnect cleanup)
             originalToken.fill('\u0000')
 
             // Advance time past the reconnect delay
