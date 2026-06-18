@@ -72,7 +72,7 @@ class MainViewModelTest {
         every { authSessionStore.getOrCreateDeviceId() } returns "device-stable"
         every { mqttConnectionManager.connect(any(), any()) } just runs
         every { authSessionStore.update(any(), any<CharArray>()) } just runs
-        every { authSessionStore.clear() } just runs
+        every { authSessionStore.clearWithResult() } returns com.netproxy.gateway.result.AppResult.success(Unit)
 
         every { context.getString(R.string.error_cellular_required) } returns "__ERR_CELLULAR_REQUIRED__"
         every { context.getString(R.string.error_vpn_permission_required) } returns "__ERR_VPN_PERMISSION_REQUIRED__"
@@ -386,7 +386,7 @@ class MainViewModelTest {
         assertFalse(viewModel.uiState.value.isConnected)
         assertEquals("", viewModel.uiState.value.peerId)
         verify(exactly = 1) { mqttConnectionManager.disconnect() }
-        verify(exactly = 1) { authSessionStore.clear() }
+        verify(exactly = 1) { authSessionStore.clearWithResult() }
         verify(exactly = 1) { context.startService(any()) }
     }
 

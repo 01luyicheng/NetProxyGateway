@@ -4,6 +4,8 @@ import java.security.SecureRandom
 
 import javax.inject.Inject
 
+import org.slf4j.LoggerFactory
+
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 
@@ -137,6 +139,7 @@ class MainViewModel @Inject constructor(
 ) : ViewModel() {
 
     private val secureRandom = SecureRandom()
+    private val logger = LoggerFactory.getLogger(MainViewModel::class.java)
 
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
@@ -404,17 +407,23 @@ class MainViewModel @Inject constructor(
     }
 
     fun disconnect() {
-        mqttConnectionManager.disconnect()
-        authSessionStore.clear()
-        val tokenToZero = _uiState.getAndUpdate { current ->
-            current.copy(
-                isConnected = false,
-                isPaired = false,
-                peerId = "",
-                authToken = CharArray(0)
-            )
-        }.authToken
-        tokenToZero?.fill('\u0000')
+        try {
+            mqttConnectionManager.disconnect()
+            val clearResult = authSessionStore.clearWithResult()
+            if (clearResult is com.netproxy.gateway.result.AppResult.Error) {
+                logger.error("Failed to clear auth session during disconnect", clearResult.exception)
+            }
+        } finally {
+            val tokenToZero = _uiState.getAndUpdate { current ->
+                current.copy(
+                    isConnected = false,
+                    isPaired = false,
+                    peerId = "",
+                    authToken = CharArray(0)
+                )
+            }.authToken
+            tokenToZero?.fill('\u0000')
+        }
         toggleVpn(false)
     }
 
