@@ -46,10 +46,12 @@ func WithDeviceID(id string) Option {
 }
 
 // WithLogger sets the logger used by recovery functions.
-// If not provided, the standard library's default logger is used.
+// If logger is nil or not provided, the standard library's default logger is used.
 func WithLogger(logger Logger) Option {
 	return func(ctx *recoverCtx) {
-		ctx.logger = logger
+		if logger != nil {
+			ctx.logger = logger
+		}
 	}
 }
 

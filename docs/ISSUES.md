@@ -850,11 +850,11 @@
 > 以下问题由 subagent 交叉审查第 16-20 次修复提交时发现；**待修复/建议优化**。
 
 ### XREF12: `WithLogger(nil)` 会导致 recovery 自身 panic
-- **状态**: 待修复
-- **位置**: `server/shared/recovery/recovery.go` (L50-L53, L142-L148)
+- **状态**: 已修复
+- **位置**: `server/shared/recovery/recovery.go` (L50-L55)
 - **问题描述**: REF6 引入 `WithLogger` Option 后，若调用方误传 `WithLogger(nil)`，`recoverCtx.logger` 会被设为 `nil`。后续 `logPanic` 中调用 `ctx.logger.Printf(...)` 会产生 nil 指针解引用 panic，导致 recovery 机制自身在 defer 中 panic，覆盖或破坏原 panic 的处理。
 - **风险**: **中**。这是 REF6 修复引入的新防御性编程缺陷。
-- **建议修复**: 在 `WithLogger` 中增加 nil 防御：`if logger != nil { ctx.logger = logger }`。
+- **修复方式**: 在 `WithLogger` 中增加 nil 防御：`if logger != nil { ctx.logger = logger }`，并更新注释说明 nil 行为。新增 `TestWithLogger_Nil_DoesNotPanic` 和 `TestRecoverAction_WithLogger_Nil_DoesNotPanic` 回归测试。
 
 ### XREF13: 空 prefix + panic error 的 unwrap 场景缺少测试
 - **状态**: 建议优化
