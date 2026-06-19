@@ -59,7 +59,6 @@ class MqttConnectionManagerHeartbeatTest {
         val generation = manager.getPrivateConnectionGeneration()
         manager.invokePrivateStartHeartbeat(
             deviceId = "device-123",
-            authToken = "token-abc".toCharArray(),
             generation = generation,
         )
 
@@ -83,7 +82,6 @@ class MqttConnectionManagerHeartbeatTest {
         val currentGeneration = manager.getPrivateConnectionGeneration()
         manager.invokePrivateStartHeartbeat(
             deviceId = "device-123",
-            authToken = "token-abc".toCharArray(),
             generation = currentGeneration,
         )
         testScope.runCurrent()
@@ -93,7 +91,6 @@ class MqttConnectionManagerHeartbeatTest {
 
         manager.invokePrivateStartHeartbeat(
             deviceId = "device-123",
-            authToken = "token-abc".toCharArray(),
             generation = currentGeneration + 1,
         )
         testScope.runCurrent()
@@ -116,6 +113,12 @@ class MqttConnectionManagerHeartbeatTest {
             val generation = spyManager.getPrivateConnectionGeneration()
             val originalToken = "secret-token".toCharArray()
 
+            // Set activeTokenSnapshot so scheduleReconnect can copy from it
+            val activeTokenField =
+                MqttConnectionManager::class.java.getDeclaredField("activeTokenSnapshot")
+            activeTokenField.isAccessible = true
+            activeTokenField.set(spyManager, originalToken.copyOf())
+
             // Mock connect() to capture the token argument
             var capturedToken: CharArray? = null
             every { spyManager.connect(any(), any()) } answers {
@@ -133,11 +136,10 @@ class MqttConnectionManagerHeartbeatTest {
             // Call scheduleReconnect via reflection
             spyManager.invokePrivateScheduleReconnect(
                 "device-123",
-                originalToken,
                 generation,
             )
 
-            // Zero the original token (simulating startHeartbeat's finally block)
+            // Zero the original token (simulating disconnect or reconnect cleanup)
             originalToken.fill('\u0000')
 
             // Advance time past the reconnect delay
@@ -162,32 +164,28 @@ class MqttConnectionManagerHeartbeatTest {
 
     private fun MqttConnectionManager.invokePrivateScheduleReconnect(
         deviceId: String,
-        authToken: CharArray,
         generation: Long,
     ) {
         val method = MqttConnectionManager::class.java.getDeclaredMethod(
             "scheduleReconnect",
             String::class.java,
-            CharArray::class.java,
             java.lang.Long.TYPE,
         )
         method.isAccessible = true
-        method.invoke(this, deviceId, authToken, generation)
+        method.invoke(this, deviceId, generation)
     }
 
     private fun MqttConnectionManager.invokePrivateStartHeartbeat(
         deviceId: String,
-        authToken: CharArray,
         generation: Long,
     ) {
         val method = MqttConnectionManager::class.java.getDeclaredMethod(
             "startHeartbeat",
             String::class.java,
-            CharArray::class.java,
             java.lang.Long.TYPE,
         )
         method.isAccessible = true
-        method.invoke(this, deviceId, authToken, generation)
+        method.invoke(this, deviceId, generation)
     }
 
     private fun MqttConnectionManager.setPrivateBooleanField(fieldName: String, value: Boolean) {

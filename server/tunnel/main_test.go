@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -869,5 +870,93 @@ func TestNotifyDeviceStatusAfterStopIsIgnored(t *testing.T) {
 
 	if got != 0 {
 		t.Fatalf("expected no requests after Stop(), got %d", got)
+	}
+}
+
+// TestSendLoopNoPanicOnConcurrentClose verifies that sendLoop does not panic
+// when Close() is called concurrently. This is a regression test for the
+// sendLoop WriteMessage race with Close(). Close() acquires connMu and calls
+// t.Conn.Close() (closing the underlying connection); it does NOT set t.Conn
+// to nil. sendLoop now also acquires connMu before WriteMessage, so the race
+// is eliminated. The test floods sendChan to maximise the chance that sendLoop
+// is inside WriteMessage when Close() is called.
+func TestSendLoopNoPanicOnConcurrentClose(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer wsServer.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(wsServer.URL, "http")
+	clientConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("failed to dial websocket server: %v", err)
+	}
+	defer func() {
+		if clientConn != nil {
+			clientConn.Close()
+		}
+	}()
+
+	tunnelServer := NewServer(&Config{
+		HeartbeatInterval: time.Second,
+		HeartbeatTimeout:  2 * time.Second,
+	})
+	tunnel := NewTunnelConn("device-sendloop-race", clientConn)
+
+	// Start sendLoop in background
+	sendLoopDone := make(chan struct{})
+	go func() {
+		tunnelServer.sendLoop(tunnel)
+		close(sendLoopDone)
+	}()
+
+	// Flood sendChan so sendLoop is likely inside WriteMessage when Close()
+	// is called. Using a WaitGroup ensures all sends complete before Close().
+	var floodWg sync.WaitGroup
+	var sendErrCount atomic.Int32
+	floodWg.Add(1)
+	go func() {
+		defer floodWg.Done()
+		for i := 0; i < 100; i++ {
+			if err := tunnel.Send([]byte("test-message")); err != nil {
+				sendErrCount.Add(1)
+			}
+		}
+	}()
+	floodWg.Wait()
+	if sendErrCount.Load() > 0 {
+		t.Fatalf("tunnel.Send failed %d time(s)", sendErrCount.Load())
+	}
+
+	// Wrap Close() in a goroutine with a timeout to fail fast on deadlock regressions.
+	closeDone := make(chan struct{})
+	go func() {
+		tunnel.Close()
+		clientConn = nil
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+		// Success: Close() completed
+	case <-time.After(5 * time.Second):
+		t.Fatal("tunnel.Close() deadlocked")
+	}
+
+	// sendLoop should exit without panicking
+	select {
+	case <-sendLoopDone:
+		// Success: sendLoop exited cleanly
+	case <-time.After(2 * time.Second):
+		t.Fatal("sendLoop did not exit after Close()")
 	}
 }

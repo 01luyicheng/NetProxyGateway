@@ -19,6 +19,7 @@ import io.mockk.just
 import io.mockk.mockk
 import io.mockk.mockkConstructor
 import io.mockk.runs
+import io.mockk.slot
 import io.mockk.unmockkAll
 import io.mockk.unmockkConstructor
 import io.mockk.verify
@@ -71,7 +72,7 @@ class MainViewModelTest {
         every { authSessionStore.getOrCreateDeviceId() } returns "device-stable"
         every { mqttConnectionManager.connect(any(), any()) } just runs
         every { authSessionStore.update(any(), any<CharArray>()) } just runs
-        every { authSessionStore.clear() } just runs
+        every { authSessionStore.clearWithResult() } returns com.netproxy.gateway.result.AppResult.success(Unit)
 
         every { context.getString(R.string.error_cellular_required) } returns "__ERR_CELLULAR_REQUIRED__"
         every { context.getString(R.string.error_vpn_permission_required) } returns "__ERR_VPN_PERMISSION_REQUIRED__"
@@ -99,6 +100,9 @@ class MainViewModelTest {
         every { networkStateManager.isCellularConnected() } returns true
         val stateFlow = MutableStateFlow<MqttConnectionState>(MqttConnectionState.Disconnected)
         every { mqttConnectionManager.connectionState } returns stateFlow
+        every { mqttConnectionManager.connect("device-stable", any()) } answers {
+            assertTrue(secondArg<CharArray>().contentEquals("123456".toCharArray()))
+        }
 
         val viewModel = MainViewModel(context, networkStateManager, mqttConnectionManager, wifiManager, authSessionStore)
 
@@ -108,7 +112,7 @@ class MainViewModelTest {
         val uiState = viewModel.uiState.value
         assertEquals("123456", uiState.peerId)
         assertFalse(uiState.isPaired)
-        verify(exactly = 1) { mqttConnectionManager.connect("device-stable", "123456".toCharArray()) }
+        verify(exactly = 1) { mqttConnectionManager.connect("device-stable", any()) }
     }
 
     @Test
@@ -382,7 +386,7 @@ class MainViewModelTest {
         assertFalse(viewModel.uiState.value.isConnected)
         assertEquals("", viewModel.uiState.value.peerId)
         verify(exactly = 1) { mqttConnectionManager.disconnect() }
-        verify(exactly = 1) { authSessionStore.clear() }
+        verify(exactly = 1) { authSessionStore.clearWithResult() }
         verify(exactly = 1) { context.startService(any()) }
     }
 
@@ -481,6 +485,135 @@ class MainViewModelTest {
         assertEquals(0, authToken.size)
         // Error message should be set
         assertEquals("__ERR_CELLULAR_REQUIRED__", viewModel.uiState.value.errorMessage)
+    }
+
+    // -------------------------------------------------------------------------
+    // Post-commit review tests: authToken lifecycle in state transitions
+    // -------------------------------------------------------------------------
+
+    // REV5: observeMqttState Disconnected should clear authToken from UiState
+    @Test
+    fun mqttState_Disconnected_clearsAuthToken() = runTest {
+        every { networkStateManager.isCellularConnected() } returns true
+        val stateFlow = MutableStateFlow<MqttConnectionState>(MqttConnectionState.Disconnected)
+        every { mqttConnectionManager.connectionState } returns stateFlow
+
+        val viewModel = MainViewModel(context, networkStateManager, mqttConnectionManager, wifiManager, authSessionStore)
+        advanceUntilIdle()
+
+        // First pair to set authToken
+        viewModel.pairWithCode("654321")
+        advanceUntilIdle()
+        assertTrue(viewModel.uiState.value.authToken.isNotEmpty())
+
+        // Transition to Connected so that re-setting Disconnected is a real state change
+        stateFlow.value = MqttConnectionState.Connected
+        advanceUntilIdle()
+
+        // Capture the old token reference
+        val oldToken = viewModel.uiState.value.authToken
+
+        // Simulate MQTT disconnect (not user-initiated)
+        stateFlow.value = MqttConnectionState.Disconnected
+        advanceUntilIdle()
+
+        // authToken should be cleared from UiState
+        assertEquals(0, viewModel.uiState.value.authToken.size)
+        // Old token should be zeroed
+        assertTrue(oldToken.all { it == '\u0000' })
+    }
+
+    @Test
+    fun mqttState_Error_clearsAuthToken() = runTest {
+        every { networkStateManager.isCellularConnected() } returns true
+        val stateFlow = MutableStateFlow<MqttConnectionState>(MqttConnectionState.Disconnected)
+        every { mqttConnectionManager.connectionState } returns stateFlow
+
+        val viewModel = MainViewModel(context, networkStateManager, mqttConnectionManager, wifiManager, authSessionStore)
+        advanceUntilIdle()
+
+        // First pair to set authToken
+        viewModel.pairWithCode("654321")
+        advanceUntilIdle()
+        assertTrue(viewModel.uiState.value.authToken.isNotEmpty())
+
+        // Capture the old token reference
+        val oldToken = viewModel.uiState.value.authToken
+
+        // Simulate MQTT error
+        stateFlow.value = MqttConnectionState.Error("connection lost")
+        advanceUntilIdle()
+
+        // authToken should be cleared from UiState
+        assertEquals(0, viewModel.uiState.value.authToken.size)
+        // Old token should be zeroed
+        assertTrue(oldToken.all { it == '\u0000' })
+    }
+
+    // REV4: connect() fails after update() succeeds → AuthSessionStore should be rolled back
+    @Test
+    fun pairWithCode_cellularConnected_clearsAuthSessionStore_whenConnectThrows() = runTest {
+        every { networkStateManager.isCellularConnected() } returns true
+        every { mqttConnectionManager.connect(any(), any()) } throws RuntimeException("connect failed")
+        every { authSessionStore.clearWithResult() } returns com.netproxy.gateway.result.AppResult.success(Unit)
+
+        val viewModel = MainViewModel(context, networkStateManager, mqttConnectionManager, wifiManager, authSessionStore)
+        advanceUntilIdle()
+
+        viewModel.pairWithCode("123456")
+        advanceUntilIdle()
+
+        // authSessionStore.update() was called first, then connect() threw,
+        // so authSessionStore.clearWithResult() should have been called to rollback
+        verify(exactly = 1) { authSessionStore.update(any(), any<CharArray>()) }
+        verify(exactly = 1) { authSessionStore.clearWithResult() }
+    }
+
+    // REV6: pairWithCode else/catch branches should zero old authToken reference
+    @Test
+    fun pairWithCode_withoutCellular_zerosOldAuthTokenReference() = runTest {
+        every { networkStateManager.isCellularConnected() } returns true
+        val stateFlow = MutableStateFlow<MqttConnectionState>(MqttConnectionState.Disconnected)
+        every { mqttConnectionManager.connectionState } returns stateFlow
+
+        val viewModel = MainViewModel(context, networkStateManager, mqttConnectionManager, wifiManager, authSessionStore)
+        advanceUntilIdle()
+
+        // First pair to set authToken
+        viewModel.pairWithCode("111111")
+        advanceUntilIdle()
+        val oldToken = viewModel.uiState.value.authToken
+        assertTrue(oldToken.contentEquals("111111".toCharArray()))
+
+        // Now pair again without cellular — should zero the old token
+        every { networkStateManager.isCellularConnected() } returns false
+        viewModel.pairWithCode("222222")
+        advanceUntilIdle()
+
+        // Old token should be zeroed
+        assertTrue(oldToken.all { it == '\u0000' })
+        assertEquals(0, viewModel.uiState.value.authToken.size)
+    }
+
+    // Verify that authTokenArray is zeroed in finally block even on success path
+    @Test
+    fun pairWithCode_cellularConnected_zerosAuthTokenArrayInFinally() = runTest {
+        every { networkStateManager.isCellularConnected() } returns true
+        val stateFlow = MutableStateFlow<MqttConnectionState>(MqttConnectionState.Disconnected)
+        every { mqttConnectionManager.connectionState } returns stateFlow
+
+        // Capture the actual CharArray reference passed to connect to verify it was zeroed in finally
+        val tokenSlot = slot<CharArray>()
+        every { mqttConnectionManager.connect(any(), capture(tokenSlot)) } just runs
+
+        val viewModel = MainViewModel(context, networkStateManager, mqttConnectionManager, wifiManager, authSessionStore)
+        advanceUntilIdle()
+
+        viewModel.pairWithCode("123456")
+        advanceUntilIdle()
+
+        // The original authTokenArray should have been zeroed in the finally block
+        assertTrue("authTokenArray should be zeroed in finally", tokenSlot.captured.all { it == '\u0000' })
     }
 
     // -------------------------------------------------------------------------

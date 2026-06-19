@@ -678,23 +678,30 @@ func (s *Server) heartbeat(tunnel *TunnelConn, stop chan struct{}) {
 }
 
 // sendLoop sends messages from the send channel to the tunnel.
+// connMu protects WriteMessage from racing with Close() and WritePing.
+// Without the lock, Close() could set t.closed and close the underlying
+// connection between the nil-check and the WriteMessage call, causing a
+// use-after-close panic. gorilla/websocket requires all WriteMessage calls
+// to be serialized.
 func (s *Server) sendLoop(tunnel *TunnelConn) {
 	for {
 		select {
 		case data := <-tunnel.sendChan:
-			select {
-			case <-tunnel.closeChan:
-				return
-			default:
-			}
-
-			if tunnel.Conn == nil {
-				log.Printf("Cannot write message: connection is nil")
+			tunnel.connMu.Lock()
+			if tunnel.closed || tunnel.Conn == nil {
+				tunnel.connMu.Unlock()
 				return
 			}
-
-			if err := tunnel.Conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+			if err := tunnel.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+				tunnel.connMu.Unlock()
+				tunnel.Close()
+				return
+			}
+			err := tunnel.Conn.WriteMessage(websocket.BinaryMessage, data)
+			tunnel.connMu.Unlock()
+			if err != nil {
 				log.Printf("Failed to write message: %v", err)
+				tunnel.Close()
 				return
 			}
 		case <-tunnel.closeChan:

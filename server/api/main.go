@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
 	"encoding/binary"
@@ -99,8 +100,10 @@ type Server struct {
 
 	rateLimiter *ratelimit.RateLimiter
 
-	jwtSecret      []byte
-	internalAPIKey []byte
+	jwtSecret        []byte
+	internalAPIKey   []byte
+	expectedUserHash [sha256.Size]byte
+	expectedPassHash [sha256.Size]byte
 
 	cleanupStop             chan struct{}
 	cleanupWorkers          sync.WaitGroup
@@ -136,6 +139,9 @@ func NewServer() (*Server, error) {
 	if adminUser == "" || adminPass == "" {
 		log.Fatalf("FATAL: ADMIN_USER and ADMIN_PASS environment variables must be set. Please configure admin credentials before starting the server.")
 	}
+
+	expectedUserHash := sha256.Sum256([]byte(adminUser))
+	expectedPassHash := sha256.Sum256([]byte(adminPass))
 
 	internalAPIKey := os.Getenv("INTERNAL_API_KEY")
 	if internalAPIKey == "" {
@@ -200,6 +206,8 @@ func NewServer() (*Server, error) {
 		rateLimiter:          ratelimit.NewRateLimiterWithDefaults(),
 		jwtSecret:            []byte(jwtSecret),
 		internalAPIKey:       []byte(internalAPIKey),
+		expectedUserHash:     expectedUserHash,
+		expectedPassHash:     expectedPassHash,
 	}, nil
 }
 
@@ -1079,11 +1087,16 @@ func (s *Server) login(c *gin.Context) {
 		return
 	}
 
-	// Get admin credentials from environment (validated at startup)
-	adminUser := os.Getenv("ADMIN_USER")
-	adminPass := os.Getenv("ADMIN_PASS")
+	// Use SHA256-hashed constant-time comparison to prevent timing side-channel
+	// attacks. Hashing ensures subtle.ConstantTimeCompare does not leak length
+	// information (it returns immediately for slices of different lengths).
+	// Expected hashes are cached during server initialization.
+	userHash := sha256.Sum256([]byte(req.Username))
+	passHash := sha256.Sum256([]byte(req.Password))
 
-	if req.Username != adminUser || req.Password != adminPass {
+	userOK := subtle.ConstantTimeCompare(userHash[:], s.expectedUserHash[:])
+	passOK := subtle.ConstantTimeCompare(passHash[:], s.expectedPassHash[:])
+	if userOK&passOK != 1 {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": ErrFailedToAuthenticate.Error()})
 		return
 	}

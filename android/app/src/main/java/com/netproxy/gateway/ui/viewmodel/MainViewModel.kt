@@ -4,6 +4,8 @@ import java.security.SecureRandom
 
 import javax.inject.Inject
 
+import org.slf4j.LoggerFactory
+
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 
@@ -37,6 +39,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -136,6 +139,7 @@ class MainViewModel @Inject constructor(
 ) : ViewModel() {
 
     private val secureRandom = SecureRandom()
+    private val logger = LoggerFactory.getLogger(MainViewModel::class.java)
 
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
@@ -232,31 +236,35 @@ class MainViewModel @Inject constructor(
                     is MqttConnectionState.Disconnected -> {
                         connectionStartTime = 0
                         stopDurationTimer()
-                        _uiState.update {
-                            it.copy(
+                        val tokenToZero = _uiState.getAndUpdate { current ->
+                            current.copy(
                                 isConnected = false,
                                 isPaired = false,
                                 isPairingInProgress = false,
                                 mqttState = MqttUiState.Disconnected,
                                 mqttErrorMessage = null,
-                                connectionDurationMs = 0
+                                connectionDurationMs = 0,
+                                authToken = CharArray(0)
                             )
-                        }
+                        }.authToken
+                        tokenToZero?.fill('\u0000')
                     }
                     is MqttConnectionState.Error -> {
                         connectionStartTime = 0
                         stopDurationTimer()
-                        _uiState.update {
-                            it.copy(
+                        val tokenToZero = _uiState.getAndUpdate { current ->
+                            current.copy(
                                 isConnected = false,
                                 isPaired = false,
                                 isPairingInProgress = false,
                                 errorMessage = state.message,
                                 mqttState = MqttUiState.Error,
                                 mqttErrorMessage = state.message,
-                                connectionDurationMs = 0
+                                connectionDurationMs = 0,
+                                authToken = CharArray(0)
                             )
-                        }
+                        }.authToken
+                        tokenToZero?.fill('\u0000')
                     }
                 }
             }
@@ -305,23 +313,45 @@ class MainViewModel @Inject constructor(
     fun pairWithCode(code: String) {
         viewModelScope.launch {
             val authTokenArray = code.toCharArray()
-            _uiState.update { it.copy(peerId = code, isPairingInProgress = true, errorMessage = null, authToken = authTokenArray.copyOf()) }
+            _uiState.update { it.copy(peerId = code, isPairingInProgress = true, errorMessage = null) }
 
-            if (networkStateManager.isCellularConnected()) {
-                val deviceIdSnapshot = _uiState.value.deviceId
-                authSessionStore.update(
-                    deviceId = deviceIdSnapshot,
-                    authToken = authTokenArray
-                )
-                mqttConnectionManager.connect(
-                    deviceId = deviceIdSnapshot,
-                    authToken = authTokenArray
-                )
-            } else {
-                authTokenArray.fill('\u0000')
-                _uiState.update {
-                    it.copy(isPairingInProgress = false, errorMessage = AppLocale.getString(context, R.string.error_cellular_required), authToken = CharArray(0))
+            var sessionUpdated = false
+            try {
+                if (networkStateManager.isCellularConnected()) {
+                    val deviceIdSnapshot = _uiState.value.deviceId
+                    authSessionStore.update(
+                        deviceId = deviceIdSnapshot,
+                        authToken = authTokenArray
+                    )
+                    sessionUpdated = true
+                    mqttConnectionManager.connect(
+                        deviceId = deviceIdSnapshot,
+                        authToken = authTokenArray
+                    )
+                    val tokenToZero = _uiState.getAndUpdate { current ->
+                        current.copy(authToken = authTokenArray.copyOf())
+                    }.authToken
+                    tokenToZero?.fill('\u0000')
+                } else {
+                    val tokenToZero = _uiState.getAndUpdate { current ->
+                        current.copy(isPairingInProgress = false, errorMessage = AppLocale.getString(context, R.string.error_cellular_required), authToken = CharArray(0))
+                    }.authToken
+                    tokenToZero?.fill('\u0000')
                 }
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                val tokenToZero = _uiState.getAndUpdate { current ->
+                    current.copy(isPairingInProgress = false, errorMessage = e.message, authToken = CharArray(0))
+                }.authToken
+                tokenToZero?.fill('\u0000')
+                if (sessionUpdated) {
+                    val clearResult = authSessionStore.clearWithResult()
+                    if (clearResult is com.netproxy.gateway.result.AppResult.Error) {
+                        e.addSuppressed(clearResult.exception)
+                    }
+                }
+            } finally {
+                authTokenArray.fill('\u0000')
             }
         }
     }
@@ -377,24 +407,31 @@ class MainViewModel @Inject constructor(
     }
 
     fun disconnect() {
-        mqttConnectionManager.disconnect()
-        authSessionStore.clear()
-        toggleVpn(false)
-        _uiState.update { current ->
-            val oldToken = current.authToken
-            val newState = current.copy(
-                isConnected = false,
-                isPaired = false,
-                peerId = "",
-                authToken = CharArray(0)
-            )
-            oldToken.fill('\u0000')
-            newState
+        try {
+            mqttConnectionManager.disconnect()
+            val clearResult = authSessionStore.clearWithResult()
+            if (clearResult is com.netproxy.gateway.result.AppResult.Error) {
+                logger.error("Failed to clear auth session during disconnect", clearResult.exception)
+            }
+        } finally {
+            val tokenToZero = _uiState.getAndUpdate { current ->
+                current.copy(
+                    isConnected = false,
+                    isPaired = false,
+                    peerId = "",
+                    authToken = CharArray(0)
+                )
+            }.authToken
+            tokenToZero?.fill('\u0000')
         }
+        toggleVpn(false)
     }
 
     override fun onCleared() {
         super.onCleared()
-        _uiState.value.authToken.fill('\u0000')
+        val tokenToZero = _uiState.getAndUpdate { current ->
+            current.copy(authToken = CharArray(0))
+        }.authToken
+        tokenToZero?.fill('\u0000')
     }
 }
