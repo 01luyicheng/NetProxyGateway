@@ -3,48 +3,66 @@
 package recovery
 
 import (
+	"errors"
 	"fmt"
 	"log"
 )
 
 // Option configures panic recovery behavior.
-type Option func(*context)
+type Option func(*recoverCtx)
 
-type context struct {
+// Logger is the minimal logging interface used by recovery functions.
+// The standard library's *log.Logger satisfies this interface.
+type Logger interface {
+	Printf(format string, v ...any)
+}
+
+type recoverCtx struct {
 	component   string
 	streamID    string
 	deviceID    string
 	namedReturn *namedReturn
+	logger      Logger
 }
 
 type namedReturn struct {
-	nPtr   *int
-	errPtr *error
+	n      *int
+	err    *error
 	prefix string
 }
 
 // WithStreamID adds stream ID context to panic logs.
 func WithStreamID(id string) Option {
-	return func(ctx *context) {
+	return func(ctx *recoverCtx) {
 		ctx.streamID = id
 	}
 }
 
 // WithDeviceID adds device ID context to panic logs.
 func WithDeviceID(id string) Option {
-	return func(ctx *context) {
+	return func(ctx *recoverCtx) {
 		ctx.deviceID = id
 	}
 }
 
+// WithLogger sets the logger used by recovery functions.
+// If logger is nil or not provided, the standard library's default logger is used.
+func WithLogger(logger Logger) Option {
+	return func(ctx *recoverCtx) {
+		if logger != nil {
+			ctx.logger = logger
+		}
+	}
+}
+
 // WithNamedReturn configures recovery to set named return values on panic.
-// nPtr and errPtr are pointers to the named return values.
+// n and err are pointers to the named return values.
 // prefix is used to construct the error message: "<prefix>: <panic value>".
-func WithNamedReturn(nPtr *int, errPtr *error, prefix string) Option {
-	return func(ctx *context) {
+func WithNamedReturn(n *int, err *error, prefix string) Option {
+	return func(ctx *recoverCtx) {
 		ctx.namedReturn = &namedReturn{
-			nPtr:   nPtr,
-			errPtr: errPtr,
+			n:      n,
+			err:    err,
 			prefix: prefix,
 		}
 	}
@@ -62,28 +80,43 @@ func WithNamedReturn(nPtr *int, errPtr *error, prefix string) Option {
 //	    // ...
 //	}
 func Recover(component string, opts ...Option) {
-	ctx := &context{component: component}
-	for _, opt := range opts {
-		opt(ctx)
-	}
-
+	ctx := setupCtx(component, opts...)
 	if r := recover(); r != nil {
-		msg := ctx.formatMessage()
-		log.Printf("Panic in %s: %v", msg, r)
+		ctx.logPanic(r, "")
 
 		if ctx.namedReturn != nil {
-			if ctx.namedReturn.nPtr != nil {
-				*ctx.namedReturn.nPtr = 0
+			if ctx.namedReturn.n != nil {
+				*ctx.namedReturn.n = 0
 			}
-			if ctx.namedReturn.errPtr != nil {
-				*ctx.namedReturn.errPtr = fmt.Errorf("%s: %v", ctx.namedReturn.prefix, r)
+			if ctx.namedReturn.err != nil {
+				var panicErr error
+				if e, ok := r.(error); ok {
+					panicErr = e
+				} else {
+					panicErr = errors.New(fmt.Sprint(r))
+				}
+				if ctx.namedReturn.prefix != "" {
+					*ctx.namedReturn.err = fmt.Errorf("%s: %w", ctx.namedReturn.prefix, panicErr)
+				} else {
+					*ctx.namedReturn.err = panicErr
+				}
 			}
 		}
 	}
 }
 
+func setupCtx(component string, opts ...Option) *recoverCtx {
+	ctx := &recoverCtx{component: component, logger: log.Default()}
+	for _, opt := range opts {
+		opt(ctx)
+	}
+	return ctx
+}
+
 // RecoverAction must be called via defer. It recovers from panics, logs them,
-// and executes the provided action function.
+// and executes the provided action function. If the action function itself
+// panics, that panic is also recovered and logged; it will not propagate
+// to the caller.
 //
 // Usage:
 //
@@ -94,22 +127,30 @@ func Recover(component string, opts ...Option) {
 //	    s.handleConnection(c)
 //	}(conn)
 func RecoverAction(component string, action func(), opts ...Option) {
-	ctx := &context{component: component}
-	for _, opt := range opts {
-		opt(ctx)
-	}
-
+	ctx := setupCtx(component, opts...)
 	if r := recover(); r != nil {
-		msg := ctx.formatMessage()
-		log.Printf("Panic in %s: %v", msg, r)
-
+		ctx.logPanic(r, "")
 		if action != nil {
+			defer func() {
+				if r := recover(); r != nil {
+					ctx.logPanic(r, "recovery action")
+				}
+			}()
 			action()
 		}
 	}
 }
 
-func (ctx *context) formatMessage() string {
+func (ctx *recoverCtx) logPanic(r any, suffix string) {
+	msg := ctx.formatMessage()
+	if suffix != "" {
+		ctx.logger.Printf("Panic in %s %s: %v", msg, suffix, r)
+	} else {
+		ctx.logger.Printf("Panic in %s: %v", msg, r)
+	}
+}
+
+func (ctx *recoverCtx) formatMessage() string {
 	msg := ctx.component
 	if ctx.streamID != "" {
 		msg += fmt.Sprintf(" for stream %s", ctx.streamID)
