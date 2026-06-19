@@ -960,3 +960,50 @@ func TestSendLoopNoPanicOnConcurrentClose(t *testing.T) {
 		t.Fatal("sendLoop did not exit after Close()")
 	}
 }
+
+// TestSendReturnsErrorAfterClose verifies that Send() returns an error after
+// the tunnel is closed, never returning nil (which would indicate success but
+// the data would be silently dropped). This is a regression test for the bug
+// where Go's select could randomly pick the sendChan branch when closeChan is
+// also ready, causing silent data loss.
+func TestSendReturnsErrorAfterClose(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer wsServer.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(wsServer.URL, "http")
+	clientConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("failed to dial websocket server: %v", err)
+	}
+
+	tunnel := NewTunnelConn("device-send-after-close", clientConn)
+
+	// Before close, Send should succeed
+	if err := tunnel.Send([]byte("before-close")); err != nil {
+		t.Fatalf("Send before close should succeed, got: %v", err)
+	}
+
+	// Close the tunnel
+	tunnel.Close()
+
+	// After close, Send must never return nil — the atomic closed check
+	// ensures this regardless of sendChan buffer space or select randomness.
+	for i := 0; i < 200; i++ {
+		err := tunnel.Send([]byte("after-close"))
+		if err == nil {
+			t.Fatalf("Send after close returned nil on iteration %d — data would be silently lost", i)
+		}
+	}
+}

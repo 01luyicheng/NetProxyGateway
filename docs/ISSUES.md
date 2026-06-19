@@ -1399,4 +1399,33 @@
 - **修复难度**: 中
 - **修复建议**: 若需彻底消除理论风险，可改为在 `_uiState.update` lambda 内部使用 `compareAndSet` 的返回值获取更新前的状态快照，或使用自定义的原子替换逻辑确保只清零真正被替换掉的那个引用。考虑到实际触发概率，当前实现可接受，但建议在文档中记录此边界行为。
 
+## Code Review Round 10 (Post-Commit Correctness Check)
+
+针对提交 `1cc1d10`（分支 `fix/post-commit-review-concurrency-security`）的提交后正确性检查结果。
+
+### REV21: `Send()` 在 `closeChan` 关闭后可能返回 nil 导致静默数据丢失 [已修复]
+- **状态**: 已修复
+- **位置**: `server/tunnel/main.go` (`Send()`, L169-L185)
+- **问题描述**: 提交 `e557555`（CodeRabbit seventh-review）移除了 `Send()` 中的 `if t.closed.Load() { return fmt.Errorf("tunnel closed") }` 原子前置检查，并将 `closed` 从 `atomic.Bool` 改回普通 `bool`。这导致当 `closeChan` 已关闭且 `sendChan` 缓冲区仍有空位时，Go 的 `select` 在两个就绪分支间均匀随机选择。若选中 `sendChan` 分支，数据被写入通道、`Send()` 返回 `nil`（成功），但 `sendLoop` 已退出无人消费，数据被静默丢弃。作为公开 API，`Send()` 返回 `nil` 意味着"发送成功"的语义契约被违反。
+- **触发场景**: (1) `Close()` 被调用，`closeChan` 被关闭，`sendLoop` 退出；(2) 另一个 goroutine 调用 `Send(data)`；(3) `sendChan` 缓冲区仍有空位（因消费者已退出）；(4) `select` 随机选中 `sendChan` 分支（约50%概率）；(5) `Send()` 返回 `nil`，但数据永远不会被消费。
+- **风险**: **高**。静默数据丢失是分布式系统中最难排查的问题之一。调用方收到成功信号但数据永远不会到达对端。
+- **修复难度**: 低
+- **修复方式**: 恢复 `closed` 为 `atomic.Bool`，在 `Send()` 的 `select` 前添加 `if t.closed.Load() { return fmt.Errorf("tunnel closed") }` 原子检查。原子前置检查将竞态窗口从"整个 select 执行期间"缩小到"原子读取与 select 开始之间的纳秒级窗口"，实际几乎不可触发。
+
+### REV22: `closed` 字段从 `atomic.Bool` 退回普通 `bool`，存在数据竞争风险 [已修复]
+- **状态**: 已修复
+- **位置**: `server/tunnel/main.go` (`TunnelConn` struct, L128)
+- **问题描述**: 提交 `e557555` 将 `closed` 从 `atomic.Bool` 改回普通 `bool`。虽然当前 `closed` 的所有读取都在 `connMu` 保护下（`WritePing`、`sendLoop`），但恢复 `Send()` 的前置检查需要在无锁情况下读取 `closed`，使用普通 `bool` 将构成数据竞争（Go race detector 会报告）。`atomic.Bool` 是更正确的做法，且为 REV21 的修复提供基础。
+- **风险**: **中**。当前无竞争（`Send()` 不读取 `closed`），但恢复前置检查时必须使用原子操作，否则会引入新的数据竞争。
+- **修复难度**: 低
+- **修复方式**: 将 `closed bool` 改回 `closed atomic.Bool`，所有赋值改为 `Store(true)`，所有读取改为 `Load()`。
+
+### REV23: `sendLoop` 在 `closed || Conn == nil` 路径未调用 `Close()` [已修复]
+- **状态**: 已修复
+- **位置**: `server/tunnel/main.go` (`sendLoop`, L698-L701)
+- **问题描述**: `sendLoop` 在检测到 `tunnel.closed || tunnel.Conn == nil` 时直接 `return`，未调用 `tunnel.Close()`。虽然 `closed == true` 意味着 `Close()` 大概率已被调用（幂等安全），但 `Conn == nil` 路径（防御性检查）下 `Close()` 可能从未被调用。遗漏 `Close()` 导致：(1) `closeChan` 未关闭，`heartbeat()` 和 `readLoop()` 不会被通知退出；(2) 后续 `Send()` 调用仍能将数据放入 `sendChan`，但 `sendLoop` 已退出无人消费，导致静默数据丢失。对比同函数内 `WriteMessage` 错误路径和 `SetWriteDeadline` 错误路径都正确调用了 `tunnel.Close()`，此路径处理不一致。`closeOnce` 保证 `Close()` 幂等，调用安全。
+- **风险**: **中**。`Conn == nil` 在当前代码中为防御性路径，但违反防御性编程原则，且与同函数内其他退出路径的处理不一致。
+- **修复难度**: 低
+- **修复方式**: 在 `closed || Conn == nil` 路径的 `connMu.Unlock()` 后添加 `tunnel.Close()` 调用。
+
 
