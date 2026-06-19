@@ -933,3 +933,44 @@ func TestStreamConnReadConcurrent(t *testing.T) {
 	default:
 	}
 }
+
+// panicConn is a net.Conn wrapper that panics on Read.
+type panicConn struct {
+	net.Conn
+}
+
+func (p *panicConn) Read(b []byte) (int, error) {
+	panic("simulated read panic")
+}
+
+// TestRelay_RecoversFromCopyStreamPanic verifies that relay does not deadlock
+// when copyStream panics. It acts as a regression test: if copyStream is ever
+// changed to only recover without writing to errChan, relay will deadlock and
+// this test will timeout and fail.
+func TestRelay_RecoversFromCopyStreamPanic(t *testing.T) {
+	server := &SOCKS5Server{}
+
+	clientConn, clientPeer := net.Pipe()
+	targetConn, targetPeer := net.Pipe()
+	defer clientPeer.Close()
+	defer targetPeer.Close()
+
+	panicClient := &panicConn{Conn: clientConn}
+
+	relayDone := make(chan error, 1)
+	go func() {
+		relayDone <- server.relay(panicClient, targetConn)
+	}()
+
+	select {
+	case relayErr := <-relayDone:
+		if relayErr == nil {
+			t.Fatal("expected relay to return an error after panic, got nil")
+		}
+		if !strings.HasPrefix(relayErr.Error(), "copyStream panic:") {
+			t.Fatalf("expected relay error to contain panic message, got: %v", relayErr)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("relay did not return after copyStream panic, possible deadlock")
+	}
+}

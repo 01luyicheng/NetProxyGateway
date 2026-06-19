@@ -819,69 +819,6 @@
 
 > 以下问题由 subagent 多维度代码审查发现；**待验证修复**。
 
-### REF1: `relay.copyStream` 替换后丢失 `errChan` 写入，导致 `relay` 死锁
-- **状态**: 待修复
-- **位置**: `server/socks5-proxy/main.go` (L1445-L1452)
-- **问题描述**: 原始内联 defer/recover 代码在 `copyStream` panic 时会同时执行 `closeOnce.Do(closeConnections)` **和** `errChan <- fmt.Errorf("copyStream panic: %w", errors.New(fmt.Sprint(r)))`。新代码使用 `recovery.RecoverAction` 后仅保留了清理 action，**完全丢失了 `errChan` 写入**。`relay` 函数中 `for i := 0; i < 2; i++` 严格等待两次 `errChan` 接收，若任一 goroutine panic，另一 goroutine 仅写入一次，`relay` 将在第二次 `<-errChan` 时**永久阻塞**。
-- **风险**: **高**。SOCKS5 relay 在任一方向发生 panic 时会导致整个连接永久挂起。
-- **建议修复**: 此位置不适合使用 `RecoverAction`（无法同时满足"执行清理"和"向通道写错误"）。建议恢复为内联 defer，或扩展 `RecoverAction` 支持错误通道写入回调。
-
-### REF2: `recovery_test.go` 中 `errors.Is` 断言为死代码
-- **状态**: 待修复
-- **位置**: `server/shared/recovery/recovery_test.go` (L42)
-- **问题描述**: `TestRecover_WithNamedReturn` 中 `errors.Is(err, fmt.Errorf("named panic: boom"))` 每次调用都会创建新的 error 实例，`errors.Is` 对新实例永远返回 `false`。测试之所以能通过，完全依赖第二个条件 `err.Error() != "named panic: boom"`。第一个条件是死代码，掩盖了错误比较逻辑的根本缺陷。
-- **风险**: **高**。虚假测试逻辑掩盖了 `Recover` 错误包装行为的真实验证。
-- **建议修复**: 移除 `errors.Is` 分支，改为纯字符串比较；或让 `Recover` 使用 `%w` 包装 panic value 并配合 `errors.New` 实例进行验证。
-
-### REF3: 错误包装语义从 `%w` 降级为 `%v`
-- **状态**: 待修复
-- **位置**: `server/shared/recovery/recovery.go` (L79)
-- **问题描述**: 原始内联代码使用 `fmt.Errorf("...: %w", errors.New(fmt.Sprint(r)))`，允许调用者通过 `errors.Unwrap`/`errors.Is`/`errors.As` 检查 panic 值的原始类型。新代码统一使用 `fmt.Errorf("%s: %v", prefix, r)`，仅做字符串格式化，丢失了可 unwrap 的 error 链。
-- **风险**: **中**。破坏了与原始代码的语义兼容性，调用方无法再对 panic 错误进行链式 unwrap。
-- **建议修复**: 将 `%v` 改为 `%w`，并构造一个可 unwrap 的 error：`*ctx.namedReturn.errPtr = fmt.Errorf("%s: %w", ctx.namedReturn.prefix, errors.New(fmt.Sprint(r)))`。
-
-### REF4: `context` 结构体名遮蔽 Go 标准库
-- **状态**: 待修复
-- **位置**: `server/shared/recovery/recovery.go` (L13)
-- **问题描述**: 未导出结构体名为 `context`，与 Go 标准库 `context` 包同名。当前 `recovery.go` 及其同包测试文件均未导入标准库 `context`，因此**当前无编译冲突**。但该命名占用了包内标识符，一旦未来需要引入标准库 `context`（例如支持上下文超时或取消），必须对该结构体重命名，否则将产生编译错误。属于不良命名实践，为后续扩展埋下隐患。
-- **风险**: **中**。当前无害，但命名阴影是 Go 工程常见陷阱，增加未来维护的脆弱性。
-- **建议修复**: 改名为 `recoveryContext`、`recoverCtx`、`settings`、`params` 或 `cfg`。
-
-### REF5: `RecoverAction` 的 action 回调缺乏 panic 二次保护
-- **状态**: 待修复
-- **位置**: `server/shared/recovery/recovery.go` (L106-L108)
-- **问题描述**: `action()` 通常在 panic 后的清理阶段执行（如关闭连接）。如果清理逻辑本身 panic，此时外层的 `recover()` 已经消费完毕，新的 panic 将直接导致程序崩溃。原始内联代码同样存在此问题，但作为统一恢复组件，其设计目标应是"绝对安全的 panic 屏障"。
-- **风险**: **中**。清理动作 panic 时无法被捕获，可能从 recover 后的可控状态升级为进程崩溃。
-- **建议修复**: 在调用 `action()` 时内部再包一层 `defer/recover`，或至少在文档中明确声明 "action must not panic"。
-
-### REF6: 库包直接使用全局 `log.Printf`
-- **状态**: 待修复
-- **位置**: `server/shared/recovery/recovery.go` (L72, L104)
-- **问题描述**: 作为 `shared` 目录下的可复用库，硬编码 `log.Printf` 导致：调用方无法重定向日志输出（如写入文件、发送到日志聚合系统）；无法调整日志级别（压测时可能期望静默）；与项目未来可能引入的结构化日志（如 `slog`）不兼容。**验证发现**：项目其他 shared 包（如 `shared/ratelimit`）同样直接使用 `log.Printf`，因此该问题与项目现有实践一致，并非孤立偏离。
-- **风险**: **中**。库包的可观测性和可集成性受限，但需与项目整体日志策略统一规划。
-- **建议修复**: 若项目未来需要统一日志收集，应在 `shared` 层面引入最小化 `Logger` 接口（如 `type Logger interface { Printf(format string, v ...any) }`），并将 `recovery`、`ratelimit` 等包一并改造；当前单点改动意义不大。
-
-### REF7: 未验证日志输出内容
-- **状态**: 待修复
-- **位置**: `server/shared/recovery/recovery_test.go`
-- **问题描述**: `TestRecover_WithStreamID`、`TestRecover_WithDeviceID`、`TestRecover_WithBothIDs` 仅在注释中写明预期日志格式，但没有任何测试实际捕获和断言 `log.Printf` 的输出。这导致 `formatMessage()` 的实现缺陷无法被检测到。
-- **风险**: **中**。日志格式化逻辑缺乏回归保护。
-- **建议修复**: 使用 `log.Writer()` 或 `slog` 可替换 writer 机制捕获输出，并断言日志字符串包含预期的 `streamID`、`deviceID` 和 panic value。
-
-### REF8: `RecoverAction` 与 `Option` 的组合未测试
-- **状态**: 待修复
-- **位置**: `server/shared/recovery/recovery_test.go`
-- **问题描述**: `RecoverAction` 的签名接受 `opts ...Option`，但现有测试中均没有传入任何 `Option`。`RecoverAction` 与 `WithStreamID`、`WithDeviceID` 组合使用的场景（如 goroutine 中关闭连接并记录 stream ID）完全没有覆盖。
-- **风险**: **中**。组合行为缺乏回归保护。
-- **建议修复**: 增加 `TestRecoverAction_WithStreamID` 等测试，验证 `formatMessage` 在 `RecoverAction` 中的正确应用。
-
-### REF9: 缺少非字符串 panic value 的边界测试
-- **状态**: 待修复
-- **位置**: `server/shared/recovery/recovery_test.go`
-- **问题描述**: 所有 panic 测试均使用 `panic("test panic")`（字符串类型）。生产代码使用 `%v` 格式化 panic value，但未验证非字符串类型（如 `panic(123)`、`panic(nil)`、`panic(errors.New("err"))`）的行为。**验证发现**：项目使用 Go 1.22，`panic(nil)` 时 `recover()` 返回的是 `*runtime.PanicNilError`（值为 `"panic called with nil argument"`），`r != nil` 为 `true`，当前 `Recover` 可以正常恢复并执行日志和 named return 逻辑；但在旧版 Go 中行为不同，仍值得显式测试以锁定行为并防止未来退化。
-- **风险**: **中**。边界行为未经验证，生产环境中可能遇到意外表现；且 `fmt.Errorf` 中的格式字符串若被意外改为 `%s`，非字符串 panic value 会导致二次 panic。
-- **建议修复**: 增加 `panic(nil)`、`panic(123)`、结构化错误类型的测试用例。
-
 ### REF10: 包命名存在 stutter：`recovery.Recover`
 - **状态**: 无需修复
 - **位置**: `server/shared/recovery/recovery.go`
@@ -890,26 +827,77 @@
 - **验证结论**: 虽然 Go 官方命名指南建议避免 stutter，但该项目中 `recovery` 包已有广泛依赖。重命名（如改为 `recovery.Handle` 或包名改为 `safely`）会引入大量无功能收益的破坏性变更，成本远高于收益。Go 官方也将此视为风格建议而非硬性错误。
 - **建议修复**: 保持现状。若未来有大量新代码接入且团队达成共识，再考虑统一迁移。
 
-### REF11: 指针参数命名 `nPtr`、`errPtr` 不符合 Go 惯用法
-- **状态**: 建议优化
-- **位置**: `server/shared/recovery/recovery.go` (L21-L22, L43)
-- **问题描述**: Go 社区极少在变量名中加 `Ptr` 后缀来标记指针。函数文档已明确说明它们是指向命名返回值的指针，`Ptr` 属于噪音。
-- **风险**: **低**。风格问题，不影响功能。
-- **建议修复**: 改为 `n`、`err` 或 `nOut`/`errOut`，例如 `func WithNamedReturn(n *int, err *error, prefix string) Option`。
+---
 
-### REF12: `prefix` 为空字符串时产生不美观的错误消息
-- **状态**: 建议优化
-- **位置**: `server/shared/recovery/recovery.go` (L79)
-- **问题描述**: 若 `WithNamedReturn(&n, &err, "")` 传入空 prefix，生成的 error 为 `: <panic value>`（冒号前无内容）。
-- **风险**: **低**。边界格式化问题。
-- **建议修复**: 在 error 构造处处理空 prefix：`if ctx.namedReturn.prefix != "" { ... } else { *ctx.namedReturn.errPtr = fmt.Errorf("panic: %v", r) }`。
+## 交叉审查发现（2026-06-11，审查范围：5次修复提交）
 
-### REF13: `Recover` 与 `RecoverAction` 存在重复代码
+> 以下问题由 subagent 交叉审查前 5 次修复提交时发现；**待修复**。
+
+### XREF4: `%w` 错误包装语义缺少回归保护测试
+- **状态**: 已修复（被 REF9 覆盖）
+- **位置**: `server/shared/recovery/recovery_test.go`
+- **问题描述**: REF3 恢复了 `%w` 包装语义，但 `TestRecover_WithNamedReturn` 仅断言 `err.Error()` 字符串内容。如果未来有人无意中将 `%w` 改回 `%v`，测试仍然会通过，但 `errors.Is`/`errors.As` 的 unwrap 能力会丢失。
+- **验证结论**: Round 9 修复 REF9 时新增的 `TestRecover_WithPanic_ErrorValue` 已验证 `panic(targetErr)` 后 `errors.Is(err, targetErr)` 返回 `true`，完整覆盖了 `%w` 的 unwrap 回归保护。因此 XREF4 无需额外修复。
+
+---
+
+## 交叉审查发现（2026-06-11，审查范围：第6-10次修复提交）
+
+> 以下问题由 subagent 交叉审查第 6-10 次修复提交时发现；**待修复**。
+
+---
+
+## 交叉审查发现（2026-06-11，审查范围：第11-15次修复提交）
+
+> 以下问题由 subagent 交叉审查第 11-15 次修复提交时发现；**待修复/建议优化**。
+
+### XREF10: `relay()` 使用字符串前缀匹配识别 panic 错误，建议升级为自定义错误类型
 - **状态**: 建议优化
-- **位置**: `server/shared/recovery/recovery.go` (L64-L82, L96-L110)
-- **问题描述**: 初始化 `ctx`、调用 `recover()`、格式化消息、`log.Printf` 这四行逻辑完全重复。
-- **风险**: **低**。维护成本高，修改时易遗漏一侧。
-- **建议修复**: 抽取内部辅助函数，例如 `func doRecover(ctx *context) (any, string)`。
+- **位置**: `server/socks5-proxy/main.go` (L1465 附近)
+- **问题描述**: `relay()` 通过 `strings.Contains(err.Error(), "copyStream panic:")` 识别 panic 错误。虽然该前缀是内部闭包专用的，但字符串匹配在重构时容易不一致（例如修改了 `copyStream` 中的错误格式但忘记同步修改 `relay()` 的识别逻辑）。
+- **风险**: **低**。当前功能正确，但存在未来重构不同步的脆弱性。
+- **建议修复**: 定义自定义错误类型（如 `type copyStreamPanicError struct{ cause any }`），在 `copyStream` 中使用该类型包装 panic，在 `relay()` 中使用 `errors.As` 识别。
+
+### XREF11: `TestRecoverAction_ActionPanics_Recovered` 日志断言粒度偏粗
+- **状态**: 建议优化
+- **位置**: `server/shared/recovery/recovery_test.go` (L204-L207)
+- **问题描述**: 测试仅验证日志包含 `"recovery action: action panic"` 子串，未验证日志中包含正确的 component 名称（`"test.action_panics"`）和 `"Panic in"` 前缀。如果未来有人重构日志格式时保留了该子串但移除了前面结构，测试会误通过。
+- **风险**: **低**。当前无害，但断言精度不足。
+- **建议修复**: 将断言改为验证完整前缀，例如 `"Panic in test.action_panics recovery action: action panic"`。
+
+---
+
+## 交叉审查发现（2026-06-11，审查范围：第16-20次修复提交）
+
+> 以下问题由 subagent 交叉审查第 16-20 次修复提交时发现；**待修复/建议优化**。
+
+### XREF12: `WithLogger(nil)` 会导致 recovery 自身 panic
+- **状态**: 已修复
+- **位置**: `server/shared/recovery/recovery.go` (L50-L55)
+- **问题描述**: REF6 引入 `WithLogger` Option 后，若调用方误传 `WithLogger(nil)`，`recoverCtx.logger` 会被设为 `nil`。后续 `logPanic` 中调用 `ctx.logger.Printf(...)` 会产生 nil 指针解引用 panic，导致 recovery 机制自身在 defer 中 panic，覆盖或破坏原 panic 的处理。
+- **风险**: **中**。这是 REF6 修复引入的新防御性编程缺陷。
+- **修复方式**: 在 `WithLogger` 中增加 nil 防御：`if logger != nil { ctx.logger = logger }`，并更新注释说明 nil 行为。新增 `TestWithLogger_Nil_DoesNotPanic` 和 `TestRecoverAction_WithLogger_Nil_DoesNotPanic` 回归测试。
+
+### XREF13: 空 prefix + panic error 的 unwrap 场景缺少测试
+- **状态**: 建议优化
+- **位置**: `server/shared/recovery/recovery_test.go`
+- **问题描述**: REF12 新增的 `TestRecover_WithNamedReturn_EmptyPrefix` 仅测试了 `panic("boom")`（字符串值）。未验证当 prefix 为空且 panic value 为 `error` 类型时，返回的错误是否保留了 `errors.Is`/`errors.As` 的 unwrap 能力。
+- **风险**: **低**。当前无害，但边界测试覆盖不完整。
+- **建议修复**: 增加 `TestRecover_WithNamedReturn_EmptyPrefix_ErrorValue`，验证 `errors.Is(err, targetErr)`。
+
+### XREF14: `TestRecoverAction_WithPanic_*` 日志断言过于宽松
+- **状态**: 建议优化
+- **位置**: `server/shared/recovery/recovery_test.go` (L371-L460)
+- **问题描述**: XREF9 新增的三个测试使用 `strings.Contains(got, "123")` 等宽松断言，未验证完整的日志前缀（如 `"Panic in test.action_int: 123"`）。如果未来 `logPanic` 被修改（例如删除 `"Panic in"` 前缀），宽松断言可能漏检。
+- **风险**: **低**。断言精度不足。
+- **建议修复**: 将断言提升为精确子串匹配，与同文件中现有测试（如 `TestRecoverAction_WithStreamID`）风格保持一致。
+
+### XREF15: `setupCtx` 缺少内部文档注释
+- **状态**: 建议优化
+- **位置**: `server/shared/recovery/recovery.go` (L106-L112)
+- **问题描述**: REF13 提取的 `setupCtx` 辅助函数没有文档注释，后续维护者需要阅读函数体才能理解其职责。
+- **风险**: **低**。可读性问题。
+- **建议修复**: 添加简短注释，例如 `// setupCtx creates a recoverCtx with default logger and applies all options.`
 
 ---
 
