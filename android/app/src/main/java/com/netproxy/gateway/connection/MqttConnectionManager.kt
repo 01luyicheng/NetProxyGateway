@@ -348,15 +348,21 @@ class MqttConnectionManager @Inject constructor(
                     userName = deviceId
                     password = tokenSnapshot
                     setAutomaticReconnect(false) // We handle reconnection manually
-
-                    if (isTlsEnabled()) {
-                        socketFactory = createSecureSocketFactory()
-                        // 启用主机名验证，防止中间人攻击
-                        // 使用 Android 默认的主机名验证器（与 HTTPS 相同）
-                        sslHostnameVerifier = HttpsURLConnection.getDefaultHostnameVerifier()
-                    }
                 }
+                // Assign connectOptions immediately after password is set so that
+                // the finally block can clear the Paho-internal CharArray copy even
+                // if TLS configuration below throws.  Paho's setPassword() copies
+                // the CharArray via Arrays.copyOf(), so options.password and
+                // tokenSnapshot are independent — only connectOptions?.password
+                // can clear the Paho copy.
                 connectOptions = options
+
+                if (isTlsEnabled()) {
+                    options.socketFactory = createSecureSocketFactory()
+                    // 启用主机名验证，防止中间人攻击
+                    // 使用 Android 默认的主机名验证器（与 HTTPS 相同）
+                    options.sslHostnameVerifier = HttpsURLConnection.getDefaultHostnameVerifier()
+                }
 
                 createdClient.setCallback(object : MqttCallback {
                     override fun connectionLost(cause: Throwable?) {
