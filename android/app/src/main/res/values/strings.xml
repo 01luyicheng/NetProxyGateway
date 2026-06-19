@@ -1,19 +1,83 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">NetProxyGateway</string>
-    <string name="pairing_hint">输入6位识别码配对</string>
-    <string name="generate_code">生成识别码</string>
-    <string name="pair">配对</string>
-    <string name="disconnect">断开连接</string>
-    <string name="start_vpn">启动VPN</string>
-    <string name="stop_vpn">停止VPN</string>
-    <string name="scan_wifi">扫描WiFi</string>
-    <string name="wifi_status">WiFi状态</string>
-    <string name="cellular_status">蜂窝网络状态</string>
-    <string name="connected">已连接</string>
-    <string name="disconnected">未连接</string>
-    <string name="vpn_running">VPN运行中</string>
-    <string name="vpn_stopped">VPN已停止</string>
-    <string name="error_permission">需要相关权限</string>
-    <string name="error_network">网络连接错误</string>
+    <!-- 注意：应用品牌名保持为 NetProxyGateway，values-zh-rCN 中使用本地化名称 "网关助手" -->
+
+    <string name="pairing_hint">Enter 6-digit pairing code</string>
+    <string name="pairing_title">Pairing</string>
+    <string name="pairing_code_input_label">Pairing code</string>
+    <string name="pairing_code_format">Pairing code: %1$s</string>
+    <string name="generate_code">Generate pairing code</string>
+    <string name="pair">Pair</string>
+    <string name="pairing_in_progress">Pairing...</string>
+    <string name="disconnect">Disconnect</string>
+
+    <string name="remote_control">Remote control</string>
+    <string name="vpn_tunnel">VPN tunnel</string>
+    <string name="start_vpn">Start VPN</string>
+    <string name="stop_vpn">Stop VPN</string>
+
+    <string name="scan_wifi">Scan Wi-Fi</string>
+    <string name="available_networks_format">Available networks: %1$d</string>
+
+    <string name="network_status_title">Network status</string>
+    <string name="wifi_label">Wi-Fi:</string>
+    <string name="cellular_label">Cellular:</string>
+    <string name="current_wifi_label">Current Wi-Fi:</string>
+
+    <string name="network_in_use">In use</string>
+    <string name="network_not_in_use">Not in use</string>
+
+    <string name="wifi_status">Wi-Fi status</string>
+    <string name="cellular_status">Cellular status</string>
+    <string name="connected">Connected</string>
+    <string name="disconnected">Disconnected</string>
+    <string name="vpn_running">VPN running</string>
+    <string name="vpn_stopped">VPN stopped</string>
+
+    <string name="status_connected">Connected</string>
+    <string name="status_connecting">Connecting</string>
+    <string name="status_disconnected">Disconnected</string>
+    <string name="status_error">Connection error</string>
+    <string name="retry">Retry</string>
+
+    <string name="error_permission">Permissions required</string>
+    <string name="error_network">Network error</string>
+    <string name="error_cellular_required">Cellular connection is required</string>
+    <string name="error_vpn_permission_required">Please grant VPN permission and try again</string>
+    <string name="error_failed_to_establish_vpn">Failed to establish VPN</string>
+
+    <string name="notification_vpn_channel_name">VPN Service</string>
+    <string name="notification_vpn_channel_description">NetProxyGateway VPN is running</string>
+    <string name="notification_vpn_content_text">VPN service is running</string>
+
+    <string name="notification_proxy_channel_name">SOCKS5 Proxy Service</string>
+    <string name="notification_proxy_channel_description">Running SOCKS5 proxy server</string>
+    <string name="notification_proxy_content_text_format">SOCKS5 proxy running on port %1$d</string>
+
+    <string name="app_language_title">App language</string>
+    <string name="language_follow_system">Follow system</string>
+    <string name="language_english">English</string>
+    <string name="language_simplified_chinese">Simplified Chinese (简体中文)</string>
+
+    <string name="settings_title">Settings</string>
+    <string name="open_settings">Open settings</string>
+    <string name="navigate_back">Navigate back</string>
+    <string name="settings_dev_debug_audit">Development, debug and audit</string>
+    <string name="settings_view_logs">View recent logs</string>
+    <string name="settings_skip_mqtt_cert_validation">Skip MQTT certificate validation</string>
+    <string name="settings_skip_mqtt_cert_validation_desc">Debug only. For self-signed cert troubleshooting.</string>
+    <string name="settings_debug_only">This section is available in debug builds only.</string>
+    <string name="audit_logs_title">Audit logs</string>
+    <string name="audit_logs_empty">No recent logs.</string>
+    <string name="clear_logs">Clear logs</string>
+
+    <string name="diagnostics_title">Diagnostics</string>
+    <string name="diagnostics_connection_duration">Connection duration</string>
+    <string name="diagnostics_last_heartbeat">Last heartbeat</string>
+    <string name="diagnostics_time_ago_seconds">%1$d s ago</string>
+    <string name="diagnostics_heartbeat_failures">Heartbeat failures</string>
+    <string name="diagnostics_reconnect_count">Reconnect count</string>
+    <string name="diagnostics_vpn_state">VPN state</string>
+    <string name="diagnostics_network_validated">Network validated</string>
 </resources>

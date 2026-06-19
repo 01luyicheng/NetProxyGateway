@@ -1,17 +1,35 @@
 package com.netproxy.gateway.connection
 
-import android.content.Context
-import android.util.Log
-import com.netproxy.gateway.BuildConfig
-import com.netproxy.gateway.di.ApplicationScope
-import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+import java.security.KeyStore
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicLong
+
+import javax.inject.Inject
+import javax.inject.Singleton
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocketFactory
+import javax.net.ssl.TrustManager
+import javax.net.ssl.TrustManagerFactory
+import javax.net.ssl.X509TrustManager
+
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken
 import org.eclipse.paho.client.mqttv3.MqttCallback
 import org.eclipse.paho.client.mqttv3.MqttClient
@@ -19,19 +37,17 @@ import org.eclipse.paho.client.mqttv3.MqttConnectOptions
 import org.eclipse.paho.client.mqttv3.MqttException
 import org.eclipse.paho.client.mqttv3.MqttMessage
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence
-import javax.inject.Inject
-import javax.inject.Singleton
-import javax.net.ssl.SSLContext
-import javax.net.ssl.TrustManager
-import javax.net.ssl.X509TrustManager
-import java.security.KeyStore
-import java.security.SecureRandom
-import java.security.cert.X509Certificate
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.atomic.AtomicLong
-import javax.net.ssl.SSLSocketFactory
-import javax.net.ssl.TrustManagerFactory
+import org.slf4j.LoggerFactory
+
+import dagger.hilt.android.qualifiers.ApplicationContext
+
+import android.content.Context
+
+import com.netproxy.gateway.BuildConfig
+import com.netproxy.gateway.debug.AppAuditLogStore
+import com.netproxy.gateway.debug.DebugSettingsStore
+import com.netproxy.gateway.di.ApplicationScope
+import com.netproxy.gateway.result.AppResult
 
 sealed class MqttConnectionState {
     object Disconnected : MqttConnectionState()
@@ -40,29 +56,47 @@ sealed class MqttConnectionState {
     data class Error(val message: String) : MqttConnectionState()
 }
 
+data class MqttDiagnostics(
+    val connectionGeneration: Long = 0,
+    val reconnectDelay: Long = 5000L,
+    val reconnectCount: Int = 0,
+    val lastHeartbeatTime: Long = 0,
+    val consecutiveHeartbeatFailures: Int = 0
+)
+
 @Singleton
 class MqttConnectionManager @Inject constructor(
     @ApplicationContext private val context: Context,
     @ApplicationScope private val scope: CoroutineScope
 ) {
     companion object {
-        private const val TAG = "MqttConnectionManager"
+        private val logger = LoggerFactory.getLogger(MqttConnectionManager::class.java)
 
         private const val CLIENT_ID = "NetProxyGateway"
         private const val HEARTBEAT_INTERVAL = 30000L
         private const val CONNECTION_TIMEOUT_SECONDS = 10
+        private const val INITIAL_RECONNECT_DELAY = 5000L
         private const val MAX_RECONNECT_DELAY = 60000L
+        private const val RECONNECT_BACKOFF_MULTIPLIER = 2
+        private const val MAX_HEARTBEAT_FAILURES = 3
+
+        private val secureRandom by lazy { SecureRandom() }
     }
 
-    private var mqttClient: MqttClient? = null
-    private var reconnectDelay = 5000L
+    private @Volatile var mqttClient: MqttClient? = null
+    private var reconnectDelay = INITIAL_RECONNECT_DELAY
     private var reconnectJob: Job? = null
     private var heartbeatJob: Job? = null
-    @Volatile private var shouldStayConnected: Boolean = false
+    private var connectJob: Job? = null
+    private @Volatile var shouldStayConnected: Boolean = false
     private val connectionGeneration = AtomicLong(0)
+    private var activeTokenSnapshot: CharArray? = null
 
     private val _connectionState = MutableStateFlow<MqttConnectionState>(MqttConnectionState.Disconnected)
     val connectionState: StateFlow<MqttConnectionState> = _connectionState.asStateFlow()
+
+    private val _diagnostics = MutableStateFlow(MqttDiagnostics())
+    val diagnostics: StateFlow<MqttDiagnostics> = _diagnostics.asStateFlow()
 
     private val _messages = MutableStateFlow<String?>(null)
     val messages: StateFlow<String?> = _messages.asStateFlow()
@@ -84,104 +118,287 @@ class MqttConnectionManager @Inject constructor(
         }
     }
 
+    internal fun buildConnectionLostAuditMessage(
+        cause: Throwable?,
+        isDebugBuild: Boolean = BuildConfig.DEBUG
+    ): String {
+        return if (isDebugBuild) {
+            "Connection lost: ${cause?.message ?: "unknown reason"}"
+        } else {
+            "Connection lost"
+        }
+    }
+
+    internal fun buildConnectionErrorAuditMessage(
+        error: Throwable,
+        isDebugBuild: Boolean = BuildConfig.DEBUG
+    ): String {
+        return if (isDebugBuild) {
+            "Connection error: ${error.message ?: "unknown"}"
+        } else {
+            "Connection error"
+        }
+    }
+
+    internal fun shouldTrustAllCertificatesForCurrentBuild(isDebugBuild: Boolean = BuildConfig.DEBUG): Boolean {
+        if (!isDebugBuild) {
+            return false
+        }
+        return DebugSettingsStore.isSkipMqttCertValidationEnabled(context)
+    }
+
     /**
-     * 创建SSLSocketFactory
-     * 根据BuildConfig配置决定使用哪种证书验证方式：
-     * - 生产环境：使用系统默认CA证书（验证服务器证书）
-     * - 开发环境：信任所有证书（仅用于开发测试自签名证书）
-     * TODO: 上线前将BuildConfig.MQTT_TRUST_ALL_CERTS改为false
+     * 安全关闭 MQTT 客户端
+     * M21修复：使用 withContext(Dispatchers.IO) 包装阻塞IO操作，
+     * 防止 disconnect() (默认30秒超时) 和 close() 阻塞 Default 调度器
+     *
+     * @param client 要关闭的 MQTT 客户端
+     * @param logContext 日志上下文标识
+     * @param checkConnected 是否先检查 isConnected
+     * @param rethrowCancellation 是否重新抛出 CancellationException
+     */
+    private suspend fun safeCloseMqttClient(
+        client: MqttClient,
+        logContext: String,
+        checkConnected: Boolean = false,
+        rethrowCancellation: Boolean = false
+    ) {
+        // M21: 在 IO 调度器上执行阻塞操作，避免阻塞 Default 调度器
+        withContext(Dispatchers.IO) {
+            try {
+                if (!checkConnected || client.isConnected) {
+                    client.disconnect()
+                }
+            } catch (e: CancellationException) {
+                if (rethrowCancellation) throw e
+            } catch (e: MqttException) {
+                logger.error("Disconnect error ($logContext)", e)
+            } finally {
+                try {
+                    client.close()
+                } catch (e: Exception) {
+                    logger.error("Close error ($logContext)", e)
+                }
+            }
+        }
+    }
+
+    /**
+     * 证书策略：
+     * - release 构建：始终使用生产证书校验。
+     * - debug 构建：可通过高级开关临时跳过证书校验。
      */
     private fun createSecureSocketFactory(): SSLSocketFactory {
-        return if (BuildConfig.MQTT_TRUST_ALL_CERTS) {
-            // 开发模式：信任所有证书（支持自签名证书）
+        // 防御性检查：生产环境绝对不能允许信任所有证书
+        if (!BuildConfig.DEBUG && BuildConfig.MQTT_TRUST_ALL_CERTS) {
+            throw IllegalStateException(
+                "SECURITY VIOLATION: MQTT_TRUST_ALL_CERTS is enabled in non-debug build. " +
+                "This would bypass all TLS certificate validation and is insecure."
+            )
+        }
+
+        val trustAllCertificates = shouldTrustAllCertificatesForCurrentBuild()
+
+        return if (trustAllCertificates) {
+            AppAuditLogStore.warn(
+                "MQTT",
+                "TLS certificate validation disabled (debug override)"
+            )
             createDevSocketFactory()
         } else {
-            // 生产模式：使用系统默认CA证书
+            AppAuditLogStore.info("MQTT", "TLS certificate validation enabled")
             createProductionSocketFactory()
         }
     }
 
     /**
-     * 生产环境：使用系统默认CA证书验证
+     * 统一创建 TLS 1.2 SSLContext
+     */
+    private fun createSSLContext(trustManagers: Array<TrustManager>?): SSLContext {
+        val sslContext = SSLContext.getInstance("TLSv1.2")
+        sslContext.init(null, trustManagers, secureRandom)
+        return sslContext
+    }
+
+    /**
+     * release 构建：使用系统默认 CA 证书验证
+     * 安全特性：
+     * - 使用 TLS 1.2（兼容 Android 5.0+）
+     * - 启用主机名验证
+     * - Release 构建强制要求配置证书固定（防止配置遗漏导致不安全连接）
      */
     private fun createProductionSocketFactory(): SSLSocketFactory {
         val trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
         trustManagerFactory.init(null as KeyStore?)
 
-        val sslContext = SSLContext.getInstance("TLS")
-        sslContext.init(null, trustManagerFactory.trustManagers, SecureRandom())
-        return sslContext.socketFactory
+        val defaultTrustManager = trustManagerFactory.trustManagers
+            .filterIsInstance<X509TrustManager>()
+            .firstOrNull()
+            ?: throw IllegalStateException("No X509TrustManager available for MQTT TLS")
+
+        val configuredPins = MqttTlsPinning.parseConfiguredPins(BuildConfig.MQTT_TLS_PUBLIC_KEY_PINS)
+        if (configuredPins.isEmpty()) {
+            // M20 修复：Release 构建强制要求证书固定，防止配置遗漏导致意外使用不安全验证
+            if (!BuildConfig.DEBUG) {
+                throw IllegalStateException(
+                    "SECURITY VIOLATION: MQTT_TLS_PUBLIC_KEY_PINS is not configured in release build. " +
+                    "Certificate pinning is mandatory for release builds to prevent MITM attacks."
+                )
+            }
+            // Debug 构建允许空配置，仅记录警告
+            logger.warn("MQTT TLS pinning is disabled: MQTT_TLS_PUBLIC_KEY_PINS is empty. Falling back to default CA validation.")
+            AppAuditLogStore.warn(
+                "MQTT",
+                "TLS pinning not configured; fallback to system CA validation"
+            )
+        }
+        val pinningTrustManager = MqttTlsPinning.createPinningTrustManager(
+            delegate = defaultTrustManager,
+            rawPins = BuildConfig.MQTT_TLS_PUBLIC_KEY_PINS
+        )
+
+        return createSSLContext(arrayOf<TrustManager>(pinningTrustManager)).socketFactory
     }
 
     /**
-     * 开发环境：信任所有证书（仅用于开发测试）
-     * 警告：此方式不安全，仅用于开发环境连接自签名证书服务器
+     * debug 构建：信任所有证书（仅用于开发测试）
+     * 警告：此方式不安全，仅用于 debug 构建连接自签名证书服务器
+     * 安全限制：仅在 BuildConfig.DEBUG 为 true 时允许使用
+     * 注意：debug 版本仍启用主机名验证以防止中间人攻击
      */
     private fun createDevSocketFactory(): SSLSocketFactory {
-        Log.w(TAG, "Using development SSL socket factory - trusts all certificates!")
         val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
             override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {
-                // 开发环境：信任所有客户端证书
+                // debug 构建：信任所有客户端证书
             }
             override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {
-                // 开发环境：信任所有服务器证书（包括自签名）
+                // debug 构建：信任所有服务器证书（包括自签名）
             }
             override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
         })
-        val sslContext = SSLContext.getInstance("TLS")
-        sslContext.init(null, trustAllCerts, SecureRandom())
-        return sslContext.socketFactory
+        return createSSLContext(trustAllCerts).socketFactory
     }
 
-    fun connect(deviceId: String, authToken: String) {
-        shouldStayConnected = true
-        reconnectJob?.cancel()
-        val generation = connectionGeneration.incrementAndGet()
-        scope.launch {
-            try {
-                _connectionState.value = MqttConnectionState.Connecting
+    fun connect(deviceId: String, authToken: CharArray) {
+        var generation = 0L
+        lateinit var jobToStart: Job
+        synchronized(this@MqttConnectionManager) {
+            activeTokenSnapshot?.fill('\u0000')
+            activeTokenSnapshot = authToken.copyOf()
+            shouldStayConnected = true
+            reconnectJob?.cancel()
+            reconnectJob = null
+            heartbeatJob?.cancel()
+            heartbeatJob = null
+            connectJob?.cancel()
+            connectJob = null
+
+            generation = connectionGeneration.incrementAndGet()
+            _diagnostics.update {
+                MqttDiagnostics(
+                    connectionGeneration = generation,
+                    reconnectDelay = reconnectDelay
+                )
+            }
+            jobToStart = scope.launch(start = CoroutineStart.LAZY) {
+                val tokenSnapshot = synchronized(this@MqttConnectionManager) {
+                    activeTokenSnapshot?.copyOf()
+                } ?: CharArray(0)
+                var localClient: MqttClient? = null
+                var connectOptions: MqttConnectOptions? = null
+                try {
+                    if (!shouldStayConnected || generation != connectionGeneration.get()) {
+                        return@launch
+                    }
+
+                    ensureActive()
 
                 // 根据配置选择 MQTT 连接 URL
                 val brokerUrl = brokerUrl()
                 validateBrokerUrl(brokerUrl)
                 val clientId = "${CLIENT_ID}_$deviceId"
-                mqttClient?.close()
-                mqttClient = MqttClient(brokerUrl, clientId, MemoryPersistence())
+
+                // 在同一个同步块内完成"generation 校验 + 交换客户端引用"，避免并发 connect() 覆盖 mqttClient
+                val (oldClient, createdClient) = synchronized(this@MqttConnectionManager) {
+                    if (!shouldStayConnected || generation != connectionGeneration.get()) {
+                        null
+                    } else {
+                        val created = MqttClient(brokerUrl, clientId, MemoryPersistence())
+                        val old = mqttClient
+                        mqttClient = created
+                        old to created
+                    }
+                } ?: return@launch
+
+                // 在 generation 校验通过后更新状态，避免竞态条件
+                _connectionState.value = MqttConnectionState.Connecting
+                _diagnostics.update { it.copy(connectionGeneration = generation) }
+
+                localClient = createdClient
+
+                // 在同步块外执行 close() IO 操作（避免阻塞其他线程调用 disconnect()）
+                if (oldClient != null) {
+                    safeCloseMqttClient(oldClient, "old client cleanup", checkConnected = true)
+                }
 
                 val options = MqttConnectOptions().apply {
                     isCleanSession = true
                     connectionTimeout = CONNECTION_TIMEOUT_SECONDS
                     keepAliveInterval = 30
                     userName = deviceId
-                    password = authToken.toCharArray()
+                    password = tokenSnapshot
                     setAutomaticReconnect(false) // We handle reconnection manually
 
                     if (isTlsEnabled()) {
                         socketFactory = createSecureSocketFactory()
+                        // 启用主机名验证，防止中间人攻击
+                        // 使用 Android 默认的主机名验证器（与 HTTPS 相同）
+                        sslHostnameVerifier = HttpsURLConnection.getDefaultHostnameVerifier()
                     }
                 }
+                connectOptions = options
 
-                mqttClient?.setCallback(object : MqttCallback {
+                createdClient.setCallback(object : MqttCallback {
                     override fun connectionLost(cause: Throwable?) {
-                        if (generation != connectionGeneration.get()) {
+                        if (!shouldStayConnected || generation != connectionGeneration.get()) {
                             return
                         }
-                        Log.w(TAG, "Connection lost: ${cause?.message}")
-                        _connectionState.value = MqttConnectionState.Error(cause?.message ?: "Connection lost")
-                        if (shouldStayConnected) {
-                            scheduleReconnect(deviceId, authToken, generation)
+                        logger.warn("Connection lost: ${cause?.message}")
+                        AppAuditLogStore.warn(
+                            "MQTT",
+                            buildConnectionLostAuditMessage(cause)
+                        )
+                        synchronized(this@MqttConnectionManager) {
+                            if (!shouldStayConnected || generation != connectionGeneration.get()) {
+                                return@synchronized
+                            }
+                            _connectionState.value = MqttConnectionState.Error(cause?.message ?: "Connection lost")
+                            if (shouldStayConnected) {
+                                scheduleReconnect(deviceId, generation)
+                            }
                         }
                     }
 
                     override fun messageArrived(topic: String?, message: MqttMessage?) {
+                        if (!shouldStayConnected || generation != connectionGeneration.get()) {
+                            return
+                        }
                         message?.let {
-                            val payload = String(it.payload)
-                            _messages.value = payload
-                            Log.d(TAG, "Message received: $topic - $payload")
-                            if (topic != null) {
-                                topicCallbacks[topic]?.forEach { callback ->
-                                    callback(payload)
+                            try {
+                                val payload = String(it.payload)
+                                _messages.value = payload
+                                logger.debug("Message received: $topic (payloadBytes=${it.payload.size})")
+                                if (topic != null) {
+                                    topicCallbacks[topic]?.forEach { callback ->
+                                        try {
+                                            callback(payload)
+                                        } catch (e: Exception) {
+                                            logger.error("Callback error for topic $topic", e)
+                                        }
+                                    }
                                 }
+                            } catch (e: Exception) {
+                                logger.error("Message processing error", e)
                             }
                         }
                     }
@@ -191,51 +408,198 @@ class MqttConnectionManager @Inject constructor(
                     }
                 })
 
-                mqttClient?.connect(options)
+                createdClient.connect(options)
+
+                ensureActive()
+
+                // 使用 synchronized 块保护所有状态检查和更新，防止竞态条件
+                val shouldProceed = synchronized(this@MqttConnectionManager) {
+                    // 检查是否仍应保持连接且 generation 匹配
+                    if (!shouldStayConnected || generation != connectionGeneration.get()) {
+                        // 只有当前连接仍是有效引用时才清理
+                        if (mqttClient === createdClient) {
+                            mqttClient = null
+                        }
+                        false
+                    } else {
+                        // 确认是当前有效连接，可以设置为 Connected
+                        if (mqttClient === createdClient) {
+                            reconnectDelay = INITIAL_RECONNECT_DELAY
+                            _diagnostics.update { it.copy(reconnectDelay = INITIAL_RECONNECT_DELAY) }
+                            _connectionState.value = MqttConnectionState.Connected
+                            _diagnostics.update { it.copy(lastHeartbeatTime = System.currentTimeMillis()) }
+                            true
+                        } else {
+                            // mqttClient 已被其他线程替换，不设置状态
+                            false
+                        }
+                    }
+                }
+
+                if (!shouldProceed) {
+                    // 在同步块外执行关闭操作
+                    safeCloseMqttClient(createdClient, "connection abort")
+                    // 注意：不在此处设置状态，因为：
+                    // 1. 如果是 generation 过期，状态可能已被新连接设置
+                    // 2. 如果是 disconnect() 被调用，状态已在 disconnect() 中设置
+                    return@launch
+                }
+
+                ensureActive()
                 if (!shouldStayConnected || generation != connectionGeneration.get()) {
-                    mqttClient?.disconnect()
-                    mqttClient?.close()
-                    mqttClient = null
-                    _connectionState.value = MqttConnectionState.Disconnected
                     return@launch
                 }
-                _connectionState.value = MqttConnectionState.Connected
-                reconnectDelay = 5000L
+                AppAuditLogStore.info("MQTT", "Connection established")
 
-                subscribe("device/$deviceId/control")
-                startHeartbeat(deviceId)
+                // N80: 先触发已注册的 topicCallbacks，再执行默认订阅
+                // 这样 VpnService 中通过 subscribe() 注册的 disconnect 监听器会被保留
+                startHeartbeat(deviceId, generation)
 
-            } catch (e: MqttException) {
-                if (generation != connectionGeneration.get()) {
-                    return@launch
-                }
-                Log.e(TAG, "MQTT connection error: ${e.message}")
-                _connectionState.value = MqttConnectionState.Error(e.message ?: "Connection failed")
-                if (shouldStayConnected) {
-                    scheduleReconnect(deviceId, authToken, generation)
+                } catch (e: Exception) {
+                    val clientToClose = localClient
+                    if (clientToClose != null) {
+                        synchronized(this@MqttConnectionManager) {
+                            if (mqttClient === clientToClose) {
+                                mqttClient = null
+                            }
+                        }
+
+                        safeCloseMqttClient(clientToClose, "exception handling")
+                    }
+
+                    if (e is CancellationException) {
+                        throw e
+                    }
+
+                    if (generation != connectionGeneration.get()) {
+                        return@launch
+                    }
+                    logger.error("MQTT connection error", e)
+                    AppAuditLogStore.error("MQTT", buildConnectionErrorAuditMessage(e))
+                    synchronized(this@MqttConnectionManager) {
+                        if (!shouldStayConnected || generation != connectionGeneration.get()) {
+                            return@synchronized
+                        }
+                        _connectionState.value = MqttConnectionState.Error(e.message ?: "Connection failed")
+                        if (shouldStayConnected) {
+                            onReconnectAttemptFailed()
+                            scheduleReconnect(deviceId, generation)
+                        }
+                    }
+                } finally {
+                    tokenSnapshot.fill('\u0000')
+                    // CR14-1: Paho MqttConnectOptions.setPassword() internally copies the
+                    // CharArray via Arrays.copyOf(), so options.password and tokenSnapshot
+                    // are independent.  Clear the copy held by MqttConnectOptions so that
+                    // the password does not linger in heap memory after the client is closed.
+                    connectOptions?.password?.fill('\u0000')
                 }
             }
+
+            connectJob = jobToStart
+            jobToStart.start()
         }
     }
 
-    private fun scheduleReconnect(deviceId: String, authToken: String, generation: Long) {
-        reconnectJob?.cancel()
-        reconnectJob = scope.launch {
-            delay(reconnectDelay)
-            if (!shouldStayConnected || generation != connectionGeneration.get()) {
-                return@launch
-            }
-            reconnectDelay = minOf(reconnectDelay * 2, MAX_RECONNECT_DELAY)
-            connect(deviceId, authToken)
+    private fun onReconnectAttemptFailed() {
+        synchronized(this) {
+            reconnectDelay = minOf(
+                reconnectDelay * RECONNECT_BACKOFF_MULTIPLIER,
+                MAX_RECONNECT_DELAY
+            )
+            _diagnostics.update { it.copy(reconnectDelay = reconnectDelay) }
         }
     }
 
-    private fun startHeartbeat(deviceId: String) {
+    private fun scheduleReconnect(deviceId: String, generation: Long) {
+        lateinit var jobToStart: Job
+        synchronized(this@MqttConnectionManager) {
+            reconnectJob?.cancel()
+            jobToStart = scope.launch(start = CoroutineStart.LAZY) {
+                val tokenCopy = synchronized(this@MqttConnectionManager) {
+                    activeTokenSnapshot?.copyOf()
+                } ?: CharArray(0)
+                try {
+                    val delayMs = synchronized(this@MqttConnectionManager) { reconnectDelay }
+                    delay(delayMs)
+                    if (!shouldStayConnected || generation != connectionGeneration.get()) {
+                        return@launch
+                    }
+                    synchronized(this@MqttConnectionManager) {
+                        _diagnostics.update {
+                            it.copy(
+                                reconnectDelay = reconnectDelay,
+                                reconnectCount = it.reconnectCount + 1
+                            )
+                        }
+                    }
+                    connect(deviceId, tokenCopy)
+                } finally {
+                    tokenCopy.fill('\u0000')
+                }
+            }
+            reconnectJob = jobToStart
+            jobToStart.start()
+        }
+    }
+
+    private fun startHeartbeat(deviceId: String, generation: Long) {
+        if (!shouldStayConnected || generation != connectionGeneration.get()) {
+            return
+        }
+
         heartbeatJob?.cancel()
         heartbeatJob = scope.launch {
-            while (shouldStayConnected && _connectionState.value == MqttConnectionState.Connected) {
+            var consecutiveFailures = 0
+            while (
+                shouldStayConnected &&
+                generation == connectionGeneration.get() &&
+                _connectionState.value == MqttConnectionState.Connected
+            ) {
                 delay(HEARTBEAT_INTERVAL)
-                publish("device/$deviceId/heartbeat", "{\"status\":\"alive\"}")
+                if (!shouldStayConnected || generation != connectionGeneration.get()) {
+                    break
+                }
+                val result = publishWithResult(
+                    "device/$deviceId/heartbeat",
+                    "{\"status\":\"alive\"}",
+                    logError = false
+                )
+                if (result.isSuccess()) {
+                    consecutiveFailures = 0
+                    _diagnostics.update {
+                        it.copy(
+                            lastHeartbeatTime = System.currentTimeMillis(),
+                            consecutiveHeartbeatFailures = 0
+                        )
+                    }
+                    continue
+                }
+
+                val heartbeatException = result.exceptionOrNull()
+                if (heartbeatException == null) {
+                    logger.error("Heartbeat publish error")
+                } else {
+                    val summary = when (heartbeatException) {
+                        is MqttException -> "MqttException(reasonCode=${heartbeatException.reasonCode})"
+                        else -> heartbeatException.javaClass.simpleName
+                    }
+                    logger.error("Heartbeat publish error: $summary")
+                }
+                consecutiveFailures++
+                _diagnostics.update {
+                    it.copy(consecutiveHeartbeatFailures = consecutiveFailures)
+                }
+                if (consecutiveFailures >= MAX_HEARTBEAT_FAILURES) {
+                    logger.warn("Max heartbeat failures reached, triggering reconnect")
+                    AppAuditLogStore.warn("MQTT", "Max heartbeat failures reached; reconnecting")
+                    if (shouldStayConnected && generation == connectionGeneration.get()) {
+                        _connectionState.value = MqttConnectionState.Error("Max heartbeat failures reached")
+                        onReconnectAttemptFailed()
+                        scheduleReconnect(deviceId, generation)
+                    }
+                    break
+                }
             }
         }
     }
@@ -244,17 +608,40 @@ class MqttConnectionManager @Inject constructor(
         publishWithResult(topic, payload, qos)
     }
 
-    fun publishWithResult(topic: String, payload: String, qos: Int = 0): Result<Unit> {
-        try {
-            val client = mqttClient ?: return Result.failure(IllegalStateException("MQTT client is not connected"))
+    private fun formatConnectionState(state: MqttConnectionState): String {
+        return when (state) {
+            MqttConnectionState.Disconnected -> "Disconnected"
+            MqttConnectionState.Connecting -> "Connecting"
+            MqttConnectionState.Connected -> "Connected"
+            is MqttConnectionState.Error -> "Error(${state.message})"
+        }
+    }
+
+    private fun notConnectedOperationError(operation: String, state: MqttConnectionState): IllegalStateException {
+        return IllegalStateException(
+            "Cannot $operation because MQTT is not connected (currentState=${formatConnectionState(state)})"
+        )
+    }
+
+    fun publishWithResult(topic: String, payload: String, qos: Int = 0, logError: Boolean = true): AppResult<Unit> {
+        return try {
+            val state = _connectionState.value
+            if (state != MqttConnectionState.Connected) {
+                return AppResult.error(notConnectedOperationError("publish", state))
+            }
+            val client = mqttClient ?: return AppResult.error(IllegalStateException("MQTT client is not connected"))
             val message = MqttMessage(payload.toByteArray()).apply {
                 this.qos = qos
             }
             client.publish(topic, message)
-            return Result.success(Unit)
-        } catch (e: MqttException) {
-            Log.e(TAG, "Publish error: ${e.message}")
-            return Result.failure(e)
+            AppResult.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (logError) {
+                logger.error("Publish error", e)
+            }
+            AppResult.error(e)
         }
     }
 
@@ -262,32 +649,61 @@ class MqttConnectionManager @Inject constructor(
         subscribeWithResult(topic, qos, callback)
     }
 
-    fun subscribeWithResult(topic: String, qos: Int = 0, callback: ((String) -> Unit)? = null): Result<Unit> {
-        try {
-            val client = mqttClient ?: return Result.failure(IllegalStateException("MQTT client is not connected"))
+    fun subscribeWithResult(topic: String, qos: Int = 0, callback: ((String) -> Unit)? = null): AppResult<Unit> {
+        return try {
+            val state = _connectionState.value
+            if (state != MqttConnectionState.Connected) {
+                return AppResult.error(notConnectedOperationError("subscribe", state))
+            }
+            val client = mqttClient ?: return AppResult.error(IllegalStateException("MQTT client is not connected"))
             callback?.let {
                 topicCallbacks.computeIfAbsent(topic) { CopyOnWriteArrayList() }.add(it)
             }
             client.subscribe(topic, qos)
-            return Result.success(Unit)
+            AppResult.success(Unit)
         } catch (e: MqttException) {
-            Log.e(TAG, "Subscribe error: ${e.message}")
-            return Result.failure(e)
+            callback?.let {
+                topicCallbacks[topic]?.remove(it)
+                if (topicCallbacks[topic]?.isEmpty() == true) {
+                    topicCallbacks.remove(topic)
+                }
+            }
+            logger.error("Subscribe error", e)
+            AppResult.error(e)
         }
     }
 
     fun disconnect() {
-        shouldStayConnected = false
-        connectionGeneration.incrementAndGet()
-        reconnectJob?.cancel()
-        heartbeatJob?.cancel()
-        try {
-            mqttClient?.disconnect()
-            mqttClient?.close()
+        AppAuditLogStore.info("MQTT", "Disconnect requested")
+        val client = synchronized(this@MqttConnectionManager) {
+            shouldStayConnected = false
+            connectionGeneration.incrementAndGet()
+            reconnectJob?.cancel()
+            reconnectJob = null
+            heartbeatJob?.cancel()
+            heartbeatJob = null
+            connectJob?.cancel()
+            connectJob = null
+            reconnectDelay = INITIAL_RECONNECT_DELAY
+
+            activeTokenSnapshot?.fill('\u0000')
+            activeTokenSnapshot = null
+
+            val c = mqttClient
             mqttClient = null
+            topicCallbacks.clear()
             _connectionState.value = MqttConnectionState.Disconnected
-        } catch (e: MqttException) {
-            Log.e(TAG, "Disconnect error: ${e.message}")
+            _diagnostics.update { MqttDiagnostics() }
+
+            c
+        }
+
+        if (client == null) {
+            return
+        }
+
+        scope.launch {
+            safeCloseMqttClient(client, "disconnect", rethrowCancellation = true)
         }
     }
 }

@@ -1,5 +1,7 @@
 package com.netproxy.gateway.proxy
 
+import org.slf4j.LoggerFactory
+
 import io.netty.bootstrap.Bootstrap
 import io.netty.channel.Channel
 import io.netty.channel.ChannelFutureListener
@@ -11,9 +13,10 @@ import io.netty.channel.ChannelOption
 import io.netty.channel.socket.SocketChannel
 import io.netty.channel.socket.nio.NioSocketChannel
 import io.netty.handler.codec.socksx.v5.*
-import io.netty.handler.codec.socksx.v5.Socks5AddressType
 import io.netty.util.ReferenceCountUtil
-import org.slf4j.LoggerFactory
+
+import com.netproxy.gateway.result.getOrDefault
+import com.netproxy.gateway.utils.IpAddressUtils
 
 class Socks5ProxyHandler(
     private val connector: OutboundConnector = NettyOutboundConnector(),
@@ -58,7 +61,7 @@ class Socks5ProxyHandler(
 
                 val username = msg.username()
                 val password = msg.password()
-                
+
                 val isValid = validateCredentials(username, password)
                 val response = if (isValid) {
                     authenticated = true
@@ -67,7 +70,7 @@ class Socks5ProxyHandler(
                     authenticated = false
                     DefaultSocks5PasswordAuthResponse(Socks5PasswordAuthStatus.FAILURE)
                 }
-                
+
                 ctx.writeAndFlush(response)
                 if (!isValid) {
                     ctx.close()
@@ -107,51 +110,39 @@ class Socks5ProxyHandler(
         if (port !in 1..65535) {
             return false
         }
-        return try {
-            val inetAddr = java.net.InetAddress.getByName(host)
-            val ip = inetAddr.hostAddress ?: return false
 
-            if (ip.contains(":")) {
-                return isPrivateIpv6Address(ip)
-            }
-            
+        if (host.contains(":")) {
+            return isPrivateIpv6Address(host)
+        }
+
+        val octetsResult = IpAddressUtils.validateIpv4WithResult(host)
+        if (octetsResult.getOrDefault(false)) {
             // Reject loopback, link-local metadata, broadcast, and reserved ranges
-            if (ip.startsWith("127.") || ip.startsWith("169.254.") ||
-                ip == "0.0.0.0" || ip == "255.255.255.255" ||
-                ip.startsWith("224.")) {
+            if (host.startsWith("127.") || host.startsWith("169.254.") ||
+                host == "0.0.0.0" || host == "255.255.255.255" ||
+                host.startsWith("224.")) {
                 return false
             }
-            
-            // Only allow RFC1918 private addresses
-            isPrivateRfc1918(ip)
-        } catch (e: Exception) {
-            false
+            return IpAddressUtils.isPrivateIpv4Rfc1918(host)
         }
+
+        // Accept domain names (SOCKS5 ATYP=0x03). DNS resolution is deferred to
+        // the underlying connector (Netty Bootstrap.connect), which performs
+        // non-blocking resolution. This proxy connects to a local SOCKS5 server
+        // that handles the actual target connection, so IP validation is left
+        // to the downstream server.
+        return true
     }
 
     private fun isPrivateIpv6Address(ip: String): Boolean {
         val normalized = ip.lowercase()
         if (normalized == "::1") return false
-        if (normalized.startsWith("fe8") || normalized.startsWith("fe9") || normalized.startsWith("fea") || normalized.startsWith("feb")) {
+        if (normalized.startsWith("fe8") || normalized.startsWith("fe9") ||
+            normalized.startsWith("fea") || normalized.startsWith("feb")) {
             return false
         }
         if (normalized.startsWith("ff")) return false
         return normalized.startsWith("fc") || normalized.startsWith("fd")
-    }
-
-    private fun isPrivateRfc1918(ip: String): Boolean {
-        return try {
-            val octets = ip.split(".").map { it.toInt() }
-            when {
-                octets.size != 4 -> false
-                octets[0] == 10 -> true
-                octets[0] == 172 && octets[1] in 16..31 -> true
-                octets[0] == 192 && octets[1] == 168 -> true
-                else -> false
-            }
-        } catch (e: Exception) {
-            false
-        }
     }
 
     private fun handleCmdRequest(ctx: ChannelHandlerContext, msg: Socks5CommandRequest) {
@@ -172,7 +163,7 @@ class Socks5ProxyHandler(
                     ctx.writeAndFlush(response).addListener(ChannelFutureListener.CLOSE)
                     return
                 }
-                
+
                 if (!validateTargetAddress(dstAddr, dstPort)) {
                     logger.warn("Target address rejected: {} (non-private or reserved)", dstAddr)
                     val response = DefaultSocks5CommandResponse(
@@ -293,8 +284,10 @@ private class RelayHandler(
         if (relayChannel.isActive) {
             relayChannel.writeAndFlush(msg).addListener(ChannelFutureListener { future ->
                 if (!future.isSuccess) {
-                    ReferenceCountUtil.release(msg)
+                    // Netty releases msg automatically on write failure;
+                    // do NOT call ReferenceCountUtil.release(msg) here.
                     ctx.close()
+                    relayChannel.close()
                 }
             })
         } else {
@@ -312,3 +305,4 @@ private class RelayHandler(
         relayChannel.close()
     }
 }
+

@@ -1,0 +1,24 @@
+# 本地开发专用覆盖文件：将所有对外端口绑定到 127.0.0.1，避免误暴露到外网。
+# 使用方式：
+# docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+
+services:
+  api:
+    ports: !override
+      - "127.0.0.1:8080:8080"
+
+  socks5-proxy:
+    ports: !override
+      - "127.0.0.1:1080:1080"
+
+  tunnel:
+    ports: !override
+      - "127.0.0.1:8443:8443"
+
+  emqx:
+    ports: !override
+      - "127.0.0.1:1883:1883"
+      - "127.0.0.1:8883:8883"
+      - "127.0.0.1:8083:8083"
+      - "127.0.0.1:8084:8084"
+      - "127.0.0.1:18083:18083"

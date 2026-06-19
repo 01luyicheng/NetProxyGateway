@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">网关助手</string>
+
+    <string name="pairing_hint">输入6位识别码配对</string>
+    <string name="pairing_title">配对</string>
+    <string name="pairing_code_input_label">输入识别码</string>
+    <string name="pairing_code_format">识别码: %1$s</string>
+    <string name="generate_code">生成识别码</string>
+    <string name="pair">配对</string>
+    <string name="pairing_in_progress">配对中...</string>
+    <string name="disconnect">断开连接</string>
+
+    <string name="remote_control">远程控制</string>
+    <string name="vpn_tunnel">VPN隧道</string>
+    <string name="start_vpn">启动VPN</string>
+    <string name="stop_vpn">停止VPN</string>
+
+    <string name="scan_wifi">扫描WiFi</string>
+    <string name="available_networks_format">可用网络: %1$d</string>
+
+    <string name="network_status_title">网络状态</string>
+    <string name="wifi_label">WiFi:</string>
+    <string name="cellular_label">蜂窝网络:</string>
+    <string name="current_wifi_label">当前WiFi:</string>
+
+    <string name="network_in_use">当前使用</string>
+    <string name="network_not_in_use">未使用</string>
+
+    <string name="wifi_status">WiFi状态</string>
+    <string name="cellular_status">蜂窝网络状态</string>
+    <string name="connected">已连接</string>
+    <string name="disconnected">未连接</string>
+    <string name="vpn_running">VPN运行中</string>
+    <string name="vpn_stopped">VPN已停止</string>
+
+    <string name="status_connected">已连接</string>
+    <string name="status_connecting">连接中</string>
+    <string name="status_disconnected">未连接</string>
+    <string name="status_error">连接错误</string>
+    <string name="retry">重试</string>
+
+    <string name="error_permission">需要相关权限</string>
+    <string name="error_network">网络连接错误</string>
+    <string name="error_cellular_required">需要蜂窝网络连接</string>
+    <string name="error_vpn_permission_required">请先授予 VPN 权限后重试</string>
+    <string name="error_failed_to_establish_vpn">建立 VPN 失败</string>
+
+    <string name="notification_vpn_channel_name">VPN 服务</string>
+    <string name="notification_vpn_channel_description">网关助手 VPN 正在运行</string>
+    <string name="notification_vpn_content_text">VPN 运行中</string>
+
+    <string name="notification_proxy_channel_name">SOCKS5 代理服务</string>
+    <string name="notification_proxy_channel_description">正在运行 SOCKS5 代理服务器</string>
+    <string name="notification_proxy_content_text_format">SOCKS5 代理运行于端口 %1$d</string>
+
+    <string name="app_language_title">应用语言</string>
+    <string name="language_follow_system">跟随系统</string>
+    <string name="language_english">英语 (English)</string>
+    <string name="language_simplified_chinese">简体中文</string>
+
+    <string name="settings_title">设置</string>
+    <string name="open_settings">打开设置</string>
+    <string name="navigate_back">返回</string>
+    <string name="settings_dev_debug_audit">开发调试与审计</string>
+    <string name="settings_view_logs">查看近期日志</string>
+    <string name="settings_skip_mqtt_cert_validation">跳过 MQTT 证书校验</string>
+    <string name="settings_skip_mqtt_cert_validation_desc">仅 Debug 可用，用于自签名证书排障。</string>
+    <string name="settings_debug_only">该分组仅在 Debug 构建中可用。</string>
+    <string name="audit_logs_title">审计日志</string>
+    <string name="audit_logs_empty">暂无近期日志。</string>
+    <string name="clear_logs">清空日志</string>
+
+    <string name="diagnostics_title">诊断信息</string>
+    <string name="diagnostics_connection_duration">连接时长</string>
+    <string name="diagnostics_last_heartbeat">上次心跳</string>
+    <string name="diagnostics_time_ago_seconds">%1$d 秒前</string>
+    <string name="diagnostics_heartbeat_failures">心跳失败次数</string>
+    <string name="diagnostics_reconnect_count">重连次数</string>
+    <string name="diagnostics_vpn_state">VPN 状态</string>
+    <string name="diagnostics_network_validated">网络已验证</string>
+</resources>

@@ -157,6 +157,108 @@ class Socks5ProxyHandlerTest {
             channel.finishAndReleaseAll()
         }
     }
+    @Test
+    fun connectRequest_privateBoundary17231_returnsSuccess() {
+        val fakeConnector = FakeConnector(success = true)
+        val channel = EmbeddedChannel(Socks5ProxyHandler(fakeConnector, testValidator))
+
+        try {
+            authenticate(channel)
+
+            channel.writeInbound(
+                DefaultSocks5CommandRequest(
+                    Socks5CommandType.CONNECT,
+                    Socks5AddressType.IPv4,
+                    "172.31.255.255",
+                    443
+                )
+            )
+
+            val response = channel.readOutbound<Socks5CommandResponse>()
+            assertNotNull(response)
+            assertEquals(Socks5CommandStatus.SUCCESS, response.status())
+            assertTrue(fakeConnector.called)
+        } finally {
+            channel.finishAndReleaseAll()
+        }
+    }
+
+    @Test
+    fun connectRequest_outsidePrivateBoundary17232_returnsForbidden() {
+        val fakeConnector = FakeConnector(success = true)
+        val channel = EmbeddedChannel(Socks5ProxyHandler(fakeConnector, testValidator))
+
+        try {
+            authenticate(channel)
+
+            channel.writeInbound(
+                DefaultSocks5CommandRequest(
+                    Socks5CommandType.CONNECT,
+                    Socks5AddressType.IPv4,
+                    "172.32.0.0",
+                    443
+                )
+            )
+
+            val response = channel.readOutbound<Socks5CommandResponse>()
+            assertNotNull(response)
+            assertEquals(Socks5CommandStatus.FORBIDDEN, response.status())
+            assertTrue(!fakeConnector.called)
+        } finally {
+            channel.finishAndReleaseAll()
+        }
+    }
+    @Test
+    fun connectRequest_domain_callsConnectorAndReturnsSuccess() {
+        val fakeConnector = FakeConnector(success = true)
+        val channel = EmbeddedChannel(Socks5ProxyHandler(fakeConnector, testValidator))
+
+        try {
+            authenticate(channel)
+
+            channel.writeInbound(
+                DefaultSocks5CommandRequest(
+                    Socks5CommandType.CONNECT,
+                    Socks5AddressType.DOMAIN,
+                    "proxy.local",
+                    1080
+                )
+            )
+
+            val response = channel.readOutbound<Socks5CommandResponse>()
+            assertNotNull(response)
+            assertEquals(Socks5CommandStatus.SUCCESS, response.status())
+            assertTrue(fakeConnector.called)
+        } finally {
+            channel.finishAndReleaseAll()
+        }
+    }
+
+    @Test
+    fun connectRequest_domainWithUpstreamFailure_returnsHostUnreachable() {
+        val fakeConnector = FakeConnector(success = false)
+        val channel = EmbeddedChannel(Socks5ProxyHandler(fakeConnector, testValidator))
+
+        try {
+            authenticate(channel)
+
+            channel.writeInbound(
+                DefaultSocks5CommandRequest(
+                    Socks5CommandType.CONNECT,
+                    Socks5AddressType.DOMAIN,
+                    "proxy.local",
+                    1080
+                )
+            )
+
+            val response = channel.readOutbound<Socks5CommandResponse>()
+            assertNotNull(response)
+            assertEquals(Socks5CommandStatus.HOST_UNREACHABLE, response.status())
+            assertTrue(fakeConnector.called)
+        } finally {
+            channel.finishAndReleaseAll()
+        }
+    }
 
     @Test
     fun authRequest_withoutNegotiation_returnsFailure() {
@@ -207,3 +309,4 @@ class Socks5ProxyHandlerTest {
         }
     }
 }
+

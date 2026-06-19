@@ -10,6 +10,7 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -32,22 +33,33 @@ class NetworkStateManager @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
     private val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    private val activeNetworks = ConcurrentHashMap<Network, NetworkCapabilities>()
 
     val networkState: Flow<NetworkState> = callbackFlow {
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                trySend(getCurrentNetworkState(network))
+                val capabilities = connectivityManager.getNetworkCapabilities(network)
+                if (capabilities != null && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                    activeNetworks[network] = capabilities
+                    trySend(getBestNetworkState())
+                }
             }
 
             override fun onLost(network: Network) {
-                trySend(NetworkState(isConnected = false, networkType = NetworkType.None))
+                activeNetworks.remove(network)
+                trySend(getBestNetworkState())
             }
 
             override fun onCapabilitiesChanged(
                 network: Network,
                 networkCapabilities: NetworkCapabilities
             ) {
-                trySend(getCurrentNetworkState(network))
+                if (networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                    activeNetworks[network] = networkCapabilities
+                } else {
+                    activeNetworks.remove(network)
+                }
+                trySend(getBestNetworkState())
             }
         }
 
@@ -55,41 +67,75 @@ class NetworkStateManager @Inject constructor(
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .build()
 
+        // 先清空，再同步，再注册，避免与 callback 竞态
+        activeNetworks.clear()
+        syncActiveNetworks()
         connectivityManager.registerNetworkCallback(request, callback)
 
-        // Emit initial state
-        trySend(getCurrentNetworkState(null))
+        // 使用统一的状态获取逻辑发送初始状态
+        trySend(getBestNetworkState())
 
         awaitClose {
             connectivityManager.unregisterNetworkCallback(callback)
+            activeNetworks.clear()
         }
     }.distinctUntilChanged()
 
-    private fun getCurrentNetworkState(network: Network?): NetworkState {
-        val activeNetwork = network ?: connectivityManager.activeNetwork
-        val capabilities = activeNetwork?.let { connectivityManager.getNetworkCapabilities(it) }
-
-        if (capabilities == null) {
-            return NetworkState(isConnected = false, networkType = NetworkType.None)
+    private fun syncActiveNetworks() {
+        connectivityManager.allNetworks.forEach { network ->
+            val capabilities = connectivityManager.getNetworkCapabilities(network)
+            if (capabilities != null && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                activeNetworks[network] = capabilities
+            }
         }
+    }
 
-        val networkType = when {
-            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> NetworkType.Wifi
-            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> NetworkType.Cellular
-            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> NetworkType.Ethernet
-            else -> NetworkType.None
-        }
-
+    private fun buildNetworkState(network: Network, capabilities: NetworkCapabilities): NetworkState {
+        val networkType = resolveNetworkType(capabilities)
         return NetworkState(
             isConnected = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET),
             networkType = networkType,
             isValidated = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED),
-            network = activeNetwork
+            network = network
         )
     }
 
+    internal fun getBestNetworkState(): NetworkState {
+        val bestNetwork = activeNetworks.maxByOrNull { getNetworkPriority(it.value) }
+        return bestNetwork?.let { (network, capabilities) ->
+            buildNetworkState(network, capabilities)
+        } ?: NetworkState(isConnected = false, networkType = NetworkType.None)
+    }
+
+    private fun resolveNetworkType(capabilities: NetworkCapabilities): NetworkType {
+        return when {
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> NetworkType.Ethernet
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> NetworkType.Wifi
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> NetworkType.Cellular
+            else -> NetworkType.None
+        }
+    }
+
+    /**
+     * 计算网络优先级，用于在多个活跃网络中选择最佳网络。
+     *
+     * 设计说明：虽然 [isValidNetwork] 当前要求网络必须已验证才能进入 [activeNetworks]，
+     * 但此处仍保留验证状态作为排序因素，作为防御性设计。如果未来放宽 [isValidNetwork]
+     * 的条件（例如允许未验证网络进入池以支持"需要登录"的 WiFi 提示），排序逻辑将自动生效。
+     */
+    private fun getNetworkPriority(capabilities: NetworkCapabilities): Int {
+        val basePriority = when (resolveNetworkType(capabilities)) {
+            NetworkType.Wifi -> 3
+            NetworkType.Cellular -> 2
+            NetworkType.Ethernet -> 4
+            NetworkType.None -> 0
+        }
+        val validated = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        return if (validated) basePriority + 100 else basePriority
+    }
+
     fun getCurrentNetworkType(): NetworkType {
-        return getCurrentNetworkState(null).networkType
+        return getBestNetworkState().networkType
     }
 
     fun isWifiConnected(): Boolean {

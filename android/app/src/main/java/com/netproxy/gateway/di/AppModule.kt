@@ -1,5 +1,7 @@
 package com.netproxy.gateway.di
 
+import com.netproxy.gateway.vpn.VirtualIpAllocator
+import com.netproxy.gateway.vpn.VirtualIpAllocatorImpl
 import dagger.Binds
 import dagger.Module
 import dagger.hilt.InstallIn
@@ -33,4 +35,8 @@ abstract class AppModule {
     @Binds
     @Singleton
     abstract fun bindConfigModule(impl: ConfigModuleImpl): ConfigModule
+
+    @Binds
+    @Singleton
+    abstract fun bindVirtualIpAllocator(impl: VirtualIpAllocatorImpl): VirtualIpAllocator
 }

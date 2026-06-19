@@ -1,6 +1,8 @@
 # Gradle
 .gradle/
 **/build/
+android/b/
+android/.gpc/
 
 # Android local config
 android/local.properties
@@ -16,5 +18,56 @@ Thumbs.db
 # Logs
 *.log
 
+# Go binaries
+*.exe
+server/api/api
+server/socks5-proxy/socks5-proxy
+server/tunnel/tunnel
+
+# Go vendor directory
+**/vendor/
+
 # Tooling
 .sisyphus/
+
+# Git hooks are tracked in git, but local hooks directory might have other files
+# .githooks/* (we track specific hooks, ignore local-only hooks)
+
+# Commitlint (config is tracked, node_modules would be ignored if installed locally)
+node_modules/
+
+# Temporary files generated during development/review
+*.diff
+diff_output.txt
+diff_*.txt
+staged.txt
+staged_diff.txt
+temp_diff.txt
+unstaged.txt
+*.tmp
+test_output.txt
+*.out
+cover_*
+
+# Kotlin
+.kotlin/
+
+# AI IDE tooling - IDE specific config directories
+.agents/
+.claude/
+.codebuddy/
+.iflow/
+.kiro/
+.qoder/
+.qwen/
+.trae/
+.windsurf/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# AI skills are tracked in version control
+# skills/
+# skills-lock.json
