@@ -1416,4 +1416,13 @@
 - **修复难度**: 低
 - **修复方式**: 在 `closed || Conn == nil` 路径的 `connMu.Unlock()` 后添加 `tunnel.Close()` 调用。
 
+### REV24: `MqttConnectOptions` 密码副本在 TLS 配置异常时未被清除 [已修复]
+- **状态**: 已修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (connect LAZY 协程, L344-L365)
+- **问题描述**: REV22 的修复将 `connectOptions = options` 放在 `apply` 块之后（原 L359）。`apply` 块内包含 TLS 配置代码（`createSecureSocketFactory()`、`sslHostnameVerifier` 赋值），这些代码可能在 `password = tokenSnapshot` 之后抛出异常。如果 TLS 配置抛出异常，`apply` 块未完成，`connectOptions` 保持为 `null`，`finally` 块中的 `connectOptions?.password?.fill('\u0000')` 不执行，Paho 内部通过 `Arrays.copyOf()` 复制的密码副本在堆内存中残留直到 GC 回收。
+- **触发场景**: (1) 用户启用 TLS 连接；(2) `MqttConnectOptions().apply { password = tokenSnapshot; ... createSecureSocketFactory() }` 执行；(3) `createSecureSocketFactory()` 因 SSL 上下文配置错误（如 keystore 缺失、证书格式错误）抛出异常；(4) `apply` 块中断，`connectOptions` 未赋值；(5) `finally` 块中 `connectOptions?.password?.fill('\u0000')` 为空操作；(6) Paho 内部密码副本在堆内存中残留。
+- **风险**: **中高**。root 设备或调试器可读取堆内存中的明文 token。与 REV22 修复的原始问题相同类别，但触发路径不同。
+- **修复难度**: 低
+- **修复方式**: 将 TLS 配置（`socketFactory`、`sslHostnameVerifier` 赋值）从 `apply` 块中移出，在 `connectOptions = options` 赋值之后再进行 TLS 配置。这样即使 TLS 配置抛出异常，`connectOptions` 已赋值，`finally` 块能正确清除 Paho 内部密码副本。
+
 
