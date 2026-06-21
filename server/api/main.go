@@ -1237,7 +1237,7 @@ func main() {
 	{
 		// Pairing session management
 		api.POST("/pair", server.authMiddleware(), server.createPairingSession)
-		api.GET("/pair/:code", server.getPairingSession)
+		api.GET("/pair/:code", server.internalOrUserAuthMiddleware(), server.getPairingSession)
 		api.PUT("/pair/:code", server.authMiddleware(), server.updatePairingSession)
 
 		// Session tokens
