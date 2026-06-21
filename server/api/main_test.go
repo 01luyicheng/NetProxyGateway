@@ -825,3 +825,80 @@ func TestNewHTTPServerSetsMaxHeaderBytes(t *testing.T) {
 		t.Fatalf("expected MaxHeaderBytes=%d, got %d", MaxHTTPHeaderBytes, server.MaxHeaderBytes)
 	}
 }
+
+func TestUpdatePairingSession_ConcurrentUpdate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	insertPendingPairingSession(t, server, "999999", "device-concurrent")
+
+	// Issue two concurrent PUT requests from different engineers.
+	// The atomic conditional UPDATE (WHERE engineer_id = '' OR engineer_id = ?)
+	// ensures only the first writer wins; the second should get 409 Conflict.
+	engineer1Token := issueAuthToken(t, server.jwtSecret, jwt.MapClaims{
+		"sub":  "engineer-1",
+		"role": "engineer",
+		"iat":  time.Now().Unix(),
+		"exp":  time.Now().Add(10 * time.Minute).Unix(),
+	})
+	engineer2Token := issueAuthToken(t, server.jwtSecret, jwt.MapClaims{
+		"sub":  "engineer-2",
+		"role": "engineer",
+		"iat":  time.Now().Unix(),
+		"exp":  time.Now().Add(10 * time.Minute).Unix(),
+	})
+
+	router := gin.New()
+	router.PUT("/api/pair/:code", server.authMiddleware(), server.updatePairingSession)
+
+	type result struct {
+		statusCode int
+		body       string
+	}
+
+	results := make(chan result, 2)
+
+	doRequest := func(token string) {
+		req := httptest.NewRequest(http.MethodPut, "/api/pair/999999", strings.NewReader(`{"status":"connected"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, req)
+		results <- result{statusCode: recorder.Code, body: recorder.Body.String()}
+	}
+
+	go doRequest(engineer1Token)
+	go doRequest(engineer2Token)
+
+	r1 := <-results
+	r2 := <-results
+
+	// One request should succeed (200) and the other should fail.
+	// The failure can be either 403 Forbidden (if the second request's read
+	// sees the first engineer's ID after the first request completed) or
+	// 409 Conflict (if both requests read EngineerID="" concurrently and
+	// the atomic conditional UPDATE rejects the second writer).
+	// Both outcomes correctly prevent the TOCTOU race.
+	statuses := map[int]int{r1.statusCode: 1}
+	statuses[r2.statusCode]++
+
+	if statuses[http.StatusOK] != 1 {
+		t.Fatalf("expected exactly one 200 OK, got statuses: %v (r1=%d, r2=%d)", statuses, r1.statusCode, r2.statusCode)
+	}
+	conflictCount := statuses[http.StatusConflict] + statuses[http.StatusForbidden]
+	if conflictCount != 1 {
+		t.Fatalf("expected exactly one 403 or 409 failure, got statuses: %v (r1=%d, r2=%d)", statuses, r1.statusCode, r2.statusCode)
+	}
+
+	// Verify the session is assigned to the winning engineer
+	session, err := server.getPairingSessionDB("999999")
+	if err != nil {
+		t.Fatalf("failed to get pairing session: %v", err)
+	}
+	if session.EngineerID == "" {
+		t.Fatal("expected engineer_id to be set after concurrent update")
+	}
+	if session.EngineerID != "engineer-1" && session.EngineerID != "engineer-2" {
+		t.Fatalf("expected engineer_id to be engineer-1 or engineer-2, got %s", session.EngineerID)
+	}
+}

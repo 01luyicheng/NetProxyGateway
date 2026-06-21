@@ -899,22 +899,40 @@ func (s *Server) updatePairingSession(c *gin.Context) {
 		return
 	}
 
-	session.Status = req.Status
-	session.EngineerID = engineerID
-
-	// Mark as used when connected
-	if req.Status == "connected" {
-		session.Used = true
-	}
-
-	if err := s.updatePairingSessionDB(session); err != nil {
+	// Use atomic conditional UPDATE to prevent TOCTOU race: two engineers
+	// could both read EngineerID="" and both pass the check above, then
+	// overwrite each other's update. The WHERE clause ensures only the
+	// first writer wins; the second gets rowsAffected=0.
+	result, err := s.db.Exec(
+		`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ? AND (engineer_id = '' OR engineer_id = ?)`,
+		req.Status, engineerID, boolToInt(req.Status == "connected"), session.Code, engineerID,
+	)
+	if err != nil {
 		log.Printf("Failed to update pairing session %s: %v", session.Code, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateSession.Error()})
 		return
 	}
 
-	log.Printf("Pairing session %s updated to status: %s, engineer: %s", session.Code, session.Status, session.EngineerID)
-	c.JSON(http.StatusOK, session)
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		// Another engineer claimed this session between our read and write
+		log.Printf("Pairing session %s: concurrent update conflict", session.Code)
+		c.JSON(http.StatusConflict, gin.H{"error": ErrForbidden.Error()})
+		return
+	}
+
+	log.Printf("Pairing session %s updated to status: %s, engineer: %s", session.Code, req.Status, engineerID)
+
+	// Return the updated session from DB to reflect the actual persisted state
+	updated, err := s.getPairingSessionDB(code)
+	if err != nil || updated == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"code": session.Code, "status": req.Status,
+			"engineer_id": engineerID, "used": req.Status == "connected",
+		})
+		return
+	}
+	c.JSON(http.StatusOK, updated)
 }
 
 // validateSession validates a session token (internal API for SOCKS5 service).
@@ -1179,7 +1197,7 @@ func main() {
 	{
 		// Pairing session management
 		api.POST("/pair", server.authMiddleware(), server.createPairingSession)
-		api.GET("/pair/:code", server.getPairingSession)
+		api.GET("/pair/:code", server.internalOrUserAuthMiddleware(), server.getPairingSession)
 		api.PUT("/pair/:code", server.authMiddleware(), server.updatePairingSession)
 
 		// Session tokens

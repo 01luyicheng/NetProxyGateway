@@ -272,16 +272,31 @@ func (m *TunnelManager) Stop() {
 func (m *TunnelManager) Register(deviceID string, conn *websocket.Conn) *TunnelConn {
 	tunnel := NewTunnelConn(deviceID, conn)
 
+	var oldTunnel *TunnelConn
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if old, ok := m.tunnels[deviceID]; ok {
-		old.Close()
+		oldTunnel = old
 	}
 	m.tunnels[deviceID] = tunnel
+	m.mu.Unlock()
+
+	// Close old tunnel outside m.mu to avoid blocking I/O under the lock.
+	// Close() may block if sendLoop is holding connMu for a WriteMessage call.
+	if oldTunnel != nil {
+		oldTunnel.Close()
+	}
 
 	log.Printf("Tunnel registered for device: %s", deviceID)
 
+	// Check stopped before wg.Add(1) to prevent WaitGroup reuse panic
+	// after Stop() has called wg.Wait().
+	m.stopMu.Lock()
+	if m.stopped {
+		m.stopMu.Unlock()
+		return tunnel
+	}
 	m.wg.Add(1)
+	m.stopMu.Unlock()
 	go m.notifyDeviceStatus(deviceID, "online", "")
 
 	return tunnel
@@ -293,23 +308,34 @@ func (m *TunnelManager) Register(deviceID string, conn *websocket.Conn) *TunnelC
 // prevents a concurrently registered replacement tunnel from being closed
 // and deleted by mistake.
 func (m *TunnelManager) Unregister(deviceID string, tunnel *TunnelConn) {
-	removed := false
+	var closedTunnel *TunnelConn
 
 	m.mu.Lock()
 	if current, ok := m.tunnels[deviceID]; ok && (tunnel == nil || current == tunnel) {
-		current.Close()
+		closedTunnel = current
 		delete(m.tunnels, deviceID)
-		removed = true
 	}
 	m.mu.Unlock()
 
-	if !removed {
+	if closedTunnel == nil {
 		return
 	}
 
+	// Close tunnel outside m.mu to avoid blocking I/O under the lock.
+	// Close() may block if sendLoop is holding connMu for a WriteMessage call.
+	closedTunnel.Close()
+
 	log.Printf("Tunnel unregistered for device: %s", deviceID)
 
+	// Check stopped before wg.Add(1) to prevent WaitGroup reuse panic
+	// after Stop() has called wg.Wait().
+	m.stopMu.Lock()
+	if m.stopped {
+		m.stopMu.Unlock()
+		return
+	}
 	m.wg.Add(1)
+	m.stopMu.Unlock()
 	go m.notifyDeviceStatus(deviceID, "offline", "")
 }
 
