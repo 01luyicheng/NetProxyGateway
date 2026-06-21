@@ -966,6 +966,31 @@ func TestSendLoopNoPanicOnConcurrentClose(t *testing.T) {
 // the data would be silently dropped). This is a regression test for the bug
 // where Go's select could randomly pick the sendChan branch when closeChan is
 // also ready, causing silent data loss.
+func TestRegisterUnregisterAfterStop(t *testing.T) {
+	manager := NewTunnelManager(&Config{APIEndpoint: "http://127.0.0.1:1"})
+	manager.Stop()
+
+	// Register after Stop should not panic (no wg.Add after wg.Wait)
+	tunnel := manager.Register("device-after-stop", nil)
+	if tunnel == nil {
+		t.Fatal("expected Register to return a non-nil tunnel even after Stop")
+	}
+
+	// Verify the tunnel is in the map
+	current, ok := manager.Get("device-after-stop")
+	if !ok || current != tunnel {
+		t.Fatal("expected tunnel to be registered in the map after Stop")
+	}
+
+	// Unregister after Stop should not panic (no wg.Add after wg.Wait)
+	manager.Unregister("device-after-stop", tunnel)
+
+	_, ok = manager.Get("device-after-stop")
+	if ok {
+		t.Fatal("expected tunnel to be unregistered after Unregister")
+	}
+}
+
 func TestSendReturnsErrorAfterClose(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
