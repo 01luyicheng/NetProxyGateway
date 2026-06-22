@@ -991,6 +991,27 @@ func TestRegisterUnregisterAfterStop(t *testing.T) {
 	}
 }
 
+// TestCleanupDeadTunnelsOnceAfterStop verifies that cleanupDeadTunnelsOnce
+// does not panic when Stop() has been called, even if there are dead tunnels
+// in the map. This is a regression test for REV34.
+func TestCleanupDeadTunnelsOnceAfterStop(t *testing.T) {
+	manager := NewTunnelManager(&Config{APIEndpoint: "http://127.0.0.1:1"})
+
+	// Register a tunnel with nil conn (will be considered dead)
+	tunnel := manager.Register("device-dead-cleanup", nil)
+	if tunnel == nil {
+		t.Fatal("expected Register to return a non-nil tunnel")
+	}
+
+	// Stop the manager
+	manager.Stop()
+
+	// cleanupDeadTunnelsOnce should not panic even though there's a dead tunnel
+	// and Stop() has been called. After Stop(), the function returns early
+	// (m.stopped check), which is correct — the key point is no wg.Add panic.
+	manager.cleanupDeadTunnelsOnce()
+}
+
 func TestSendReturnsErrorAfterClose(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

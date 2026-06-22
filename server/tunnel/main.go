@@ -502,7 +502,15 @@ func (m *TunnelManager) cleanupDeadTunnelsOnce() {
 
 	for i, tunnel := range deadTunnels {
 		tunnel.Close()
+		// Check stopped before wg.Add(1) to prevent WaitGroup reuse panic
+		// after Stop() has called wg.Wait(). Consistent with Register/Unregister.
+		m.stopMu.Lock()
+		if m.stopped {
+			m.stopMu.Unlock()
+			continue
+		}
 		m.wg.Add(1)
+		m.stopMu.Unlock()
 		go m.notifyDeviceStatus(deadIDs[i], "offline", "")
 	}
 }

@@ -1470,4 +1470,36 @@
 - **风险**: **高**。工程师可通过域名访问公网资源，完全绕过私有网络访问策略
 - **修复方式**: 对域名目标返回 `false`，拒绝所有域名连接，确保安全策略一致。更新注释说明拒绝原因
 
+### REV31: `markSessionExpired` 使用无条件 UPDATE 可覆盖并发更新
+- **状态**: 已修复
+- **位置**: `server/api/main.go` (L485-492)
+- **问题描述**: `markSessionExpired` 调用 `updatePairingSessionDB(session)` 执行全字段无条件 UPDATE（status, engineer_id, used）。当 `getPairingSession`（GET）或 `updatePairingSession`（PUT）检测到过期并调用 `markSessionExpired` 时，session 对象中的 `engineer_id` 和 `used` 是读取时的陈旧值。如果另一个请求在读取和过期标记之间成功更新了 session（如工程师配对成功），`markSessionExpired` 会将 `engineer_id` 回滚为空、`used` 回滚为 false，破坏数据完整性。
+- **触发场景**: (1) 请求 A（GET /api/pair/:code）读取 session：`{status:"pending", engineer_id:"", used:false}`；(2) 请求 B（PUT /api/pair/:code）原子 UPDATE 成功：`{status:"connected", engineer_id:"eng1", used:true}`；(3) 请求 A 发现 session 过期，调用 `markSessionExpired`；(4) `markSessionExpired` 写入：`{status:"expired", engineer_id:"", used:false}`，覆盖了 B 的更新
+- **风险**: **高**。工程师配对数据被静默清除，设备配对到非预期状态
+- **修复方式**: 使用条件 UPDATE 仅更新 status 字段：`UPDATE pairing_sessions SET status = 'expired' WHERE code = ? AND status != 'expired'`，避免覆盖 engineer_id 和 used 字段
+
+### REV32: `startHeartbeat` 中 `_connectionState.value = Error` 在 synchronized 块外（竞态条件）
+- **状态**: 已修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L603-607)
+- **问题描述**: `startHeartbeat` 在检测到最大心跳失败次数后，在 synchronized 块外设置 `_connectionState.value = Error`。如果 `disconnect()` 在条件检查通过后、状态设置前执行，`disconnect()` 将状态设为 `Disconnected`，随后心跳协程覆盖为 `Error`，导致状态机不一致。与 REV25 同类竞态条件。
+- **触发场景**: (1) 心跳协程检测到 MAX_HEARTBEAT_FAILURES，条件 `shouldStayConnected && generation == connectionGeneration.get()` 为 true；(2) 另一线程调用 `disconnect()`，获取锁，设 `shouldStayConnected=false`，增 generation，设 `_connectionState = Disconnected`；(3) 心跳协程设置 `_connectionState = Error`，覆盖 `Disconnected`
+- **风险**: **高**。状态机不一致，UI 可能短暂显示错误信息后无法恢复
+- **修复方式**: 将状态更新和重连调度包裹在 `synchronized(this@MqttConnectionManager)` 块内，并在块内二次检查 `shouldStayConnected && generation == connectionGeneration.get()`
+
+### REV33: REV29 原子 UPDATE 未包含 status 字段检查
+- **状态**: 已修复
+- **位置**: `server/api/main.go` (L907)
+- **问题描述**: REV29 的原子条件 UPDATE WHERE 子句仅检查 `engineer_id`，未检查 `status`。同一工程师的并发请求可基于陈旧读取绕过状态转换验证。例如，工程师读取 session 状态为 "connected"，另一个请求将其更新为 "disconnected"，工程师基于陈旧读取请求 "expired"（从 "connected" → "expired" 是合法转换），原子 UPDATE 的 WHERE 条件 `engineer_id = ?` 满足，UPDATE 成功，但实际从 "disconnected" → "expired" 是非法转换。
+- **触发场景**: (1) 工程师读取 session：`{status:"connected", engineer_id:"eng1"}`；(2) 另一个请求将 session 更新为：`{status:"disconnected", engineer_id:"eng1"}`；(3) 工程师基于陈旧读取请求 `status:"expired"`（"connected" → "expired" 合法）；(4) 原子 UPDATE 的 WHERE 条件 `engineer_id = 'eng1'` 满足，UPDATE 成功；(5) 但实际从 "disconnected" → "expired" 是非法转换
+- **风险**: **中**。状态转换验证可被绕过，导致非法状态
+- **修复方式**: 在 WHERE 子句中添加 `AND status = ?`，确保只有当前状态与读取时一致才允许更新
+
+### REV34: `cleanupDeadTunnelsOnce` 中 `wg.Add(1)` 缺少 stopMu 保护
+- **状态**: 已修复
+- **位置**: `server/tunnel/main.go` (L505)
+- **问题描述**: `cleanupDeadTunnelsOnce` 函数开头的 `m.stopped` 检查与循环内 `m.wg.Add(1)` 之间存在 TOCTOU 竞态窗口。在检查通过后、`m.wg.Add(1)` 调用前，`Stop()` 可能已完成 `wg.Wait()`，此时 `m.wg.Add(1)` 会触发 `panic: sync: WaitGroup is reused before previous Wait has returned`。与 REV26 同类问题。当前调用路径下风险低（`cleanupDeadTunnels` 自身被 wg 跟踪），但为防御性编程应保持一致。
+- **触发场景**: (1) `cleanupDeadTunnelsOnce` 检查 `m.stopped=false` 通过；(2) `Stop()` 获取 stopMu，设 `m.stopped=true`，调用 `wg.Wait()` 返回；(3) `cleanupDeadTunnelsOnce` 在循环中调用 `m.wg.Add(1)`，触发 WaitGroup 重用 panic
+- **风险**: **低**。当前调用路径下 wg 计数器始终 ≥ 1，但未来代码变更可能引入风险
+- **修复方式**: 在循环内 `m.wg.Add(1)` 前增加 `m.stopMu` 检查，与 Register/Unregister 保持一致
+
 

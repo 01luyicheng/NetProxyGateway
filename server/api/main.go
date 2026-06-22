@@ -481,12 +481,20 @@ func (s *Server) updatePairingSessionDB(session *PairingSession) error {
 }
 
 // markSessionExpired marks a session as expired and updates the database.
+// Uses a conditional UPDATE on status only to avoid overwriting engineer_id
+// or used fields that may have been updated concurrently by updatePairingSession.
 // Returns an error if the database update fails.
 func (s *Server) markSessionExpired(session *PairingSession) error {
-	// Update in-memory state first, then persist to ensure consistency.
-	session.Status = "expired"
-	if err := s.updatePairingSessionDB(session); err != nil {
+	result, err := s.db.Exec(
+		`UPDATE pairing_sessions SET status = 'expired' WHERE code = ? AND status != 'expired'`,
+		session.Code,
+	)
+	if err != nil {
 		return err
+	}
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected > 0 {
+		session.Status = "expired"
 	}
 	return nil
 }
@@ -903,9 +911,11 @@ func (s *Server) updatePairingSession(c *gin.Context) {
 	// could both read EngineerID="" and both pass the check above, then
 	// overwrite each other's update. The WHERE clause ensures only the
 	// first writer wins; the second gets rowsAffected=0.
+	// Include status check to prevent same-engineer concurrent requests
+	// from bypassing state transition validation with stale reads.
 	result, err := s.db.Exec(
-		`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ? AND (engineer_id = '' OR engineer_id = ?)`,
-		req.Status, engineerID, boolToInt(req.Status == "connected"), session.Code, engineerID,
+		`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ? AND (engineer_id = '' OR engineer_id = ?) AND status = ?`,
+		req.Status, engineerID, boolToInt(req.Status == "connected"), session.Code, engineerID, session.Status,
 	)
 	if err != nil {
 		log.Printf("Failed to update pairing session %s: %v", session.Code, err)
@@ -915,9 +925,10 @@ func (s *Server) updatePairingSession(c *gin.Context) {
 
 	rowsAffected, _ := result.RowsAffected()
 	if rowsAffected == 0 {
-		// Another engineer claimed this session between our read and write
+		// Another engineer claimed this session, or the session status
+		// changed between our read and write (concurrent update conflict).
 		log.Printf("Pairing session %s: concurrent update conflict", session.Code)
-		c.JSON(http.StatusConflict, gin.H{"error": ErrForbidden.Error()})
+		c.JSON(http.StatusConflict, gin.H{"error": "concurrent update conflict"})
 		return
 	}
 
