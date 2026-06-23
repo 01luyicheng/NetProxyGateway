@@ -1502,4 +1502,12 @@
 - **风险**: **低**。当前调用路径下 wg 计数器始终 ≥ 1，但未来代码变更可能引入风险
 - **修复方式**: 在循环内 `m.wg.Add(1)` 前增加 `m.stopMu` 检查，与 Register/Unregister 保持一致
 
+### REV35: `updatePairingSession` 原子 UPDATE 错误地将 `used` 字段从 true 重置为 false
+- **状态**: 已修复
+- **位置**: `server/api/main.go` (L918)
+- **问题描述**: REV29 的原子条件 UPDATE 将 `used` 字段设为 `boolToInt(req.Status == "connected")`，当 `req.Status` 不是 `"connected"` 时（如 `"disconnected"` 或 `"expired"`），`used` 被设为 0（false）。这违反了 `used` 字段"一旦使用不可回退"的单调递增语义。原始代码中 `session.Used` 从 DB 读取后仅在连接时设为 true，其他状态转换保持原值，不会回退。REV29 的修复引入了此回归缺陷。
+- **触发场景**: (1) 工程师连接设备：PUT /api/pair/:code status="connected" → session.used = true；(2) 工程师断开连接：PUT /api/pair/:code status="disconnected" → 原子 UPDATE 设置 used = boolToInt("disconnected" == "connected") = 0；(3) session.used 被错误地从 true 重置为 false
+- **风险**: **高**。数据完整性问题——`used` 字段语义被破坏，可能导致审计/计费/统计逻辑错误
+- **修复方式**: 将原子 UPDATE 中的 `used = ?` 改为 `used = CASE WHEN ? = 'connected' THEN 1 ELSE used END`，仅在连接时设为 1，其他状态转换保持原值。同时修正回退 JSON 响应中的 `used` 值为 `session.Used || req.Status == "connected"`
+
 

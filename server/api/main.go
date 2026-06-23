@@ -913,9 +913,11 @@ func (s *Server) updatePairingSession(c *gin.Context) {
 	// first writer wins; the second gets rowsAffected=0.
 	// Include status check to prevent same-engineer concurrent requests
 	// from bypassing state transition validation with stale reads.
+	// used field uses CASE to preserve monotonic semantics: once a session
+	// is marked as used (connected), it must never revert to unused.
 	result, err := s.db.Exec(
-		`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ? AND (engineer_id = '' OR engineer_id = ?) AND status = ?`,
-		req.Status, engineerID, boolToInt(req.Status == "connected"), session.Code, engineerID, session.Status,
+		`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = CASE WHEN ? = 'connected' THEN 1 ELSE used END WHERE code = ? AND (engineer_id = '' OR engineer_id = ?) AND status = ?`,
+		req.Status, engineerID, req.Status, session.Code, engineerID, session.Status,
 	)
 	if err != nil {
 		log.Printf("Failed to update pairing session %s: %v", session.Code, err)
@@ -939,7 +941,7 @@ func (s *Server) updatePairingSession(c *gin.Context) {
 	if err != nil || updated == nil {
 		c.JSON(http.StatusOK, gin.H{
 			"code": session.Code, "status": req.Status,
-			"engineer_id": engineerID, "used": req.Status == "connected",
+			"engineer_id": engineerID, "used": session.Used || req.Status == "connected",
 		})
 		return
 	}
