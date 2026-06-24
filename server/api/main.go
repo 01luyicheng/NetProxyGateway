@@ -468,18 +468,6 @@ func (s *Server) getPairingSessionDB(code string) (*PairingSession, error) {
 	return &session, nil
 }
 
-// updatePairingSessionDB updates a pairing session in the database.
-func (s *Server) updatePairingSessionDB(session *PairingSession) error {
-	_, err := s.db.Exec(
-		`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ?`,
-		session.Status,
-		session.EngineerID,
-		boolToInt(session.Used),
-		session.Code,
-	)
-	return err
-}
-
 // markSessionExpired marks a session as expired and updates the database.
 // Uses a conditional UPDATE on status only to avoid overwriting engineer_id
 // or used fields that may have been updated concurrently by updatePairingSession.

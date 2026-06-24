@@ -1082,3 +1082,59 @@ func TestUpdatePairingSession_UsedFieldPreserved(t *testing.T) {
 		t.Fatal("expected used=true to be preserved after disconnect, got false — REV35 regression")
 	}
 }
+
+// TestUpdatePairingSession_UsedFieldPreservedOnExpire verifies that the `used`
+// field remains true after a connected→expired transition. This complements
+// TestUpdatePairingSession_UsedFieldPreserved which only tests connected→disconnected.
+func TestUpdatePairingSession_UsedFieldPreservedOnExpire(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	insertPendingPairingSession(t, server, "555555", "device-used-expire")
+
+	engineerToken := issueAuthToken(t, server.jwtSecret, jwt.MapClaims{
+		"sub":  "engineer-expire",
+		"role": "engineer",
+		"iat":  time.Now().Unix(),
+		"exp":  time.Now().Add(10 * time.Minute).Unix(),
+	})
+
+	router := gin.New()
+	router.PUT("/api/pair/:code", server.authMiddleware(), server.updatePairingSession)
+
+	// Step 1: Connect — should set used=true
+	req := httptest.NewRequest(http.MethodPut, "/api/pair/555555", strings.NewReader(`{"status":"connected"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+engineerToken)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200 for connect, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	session, err := server.getPairingSessionDB("555555")
+	if err != nil {
+		t.Fatalf("failed to get session: %v", err)
+	}
+	if !session.Used {
+		t.Fatal("expected used=true after connected, got false")
+	}
+
+	// Step 2: Expire — used must remain true
+	req2 := httptest.NewRequest(http.MethodPut, "/api/pair/555555", strings.NewReader(`{"status":"expired"}`))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("Authorization", "Bearer "+engineerToken)
+	recorder2 := httptest.NewRecorder()
+	router.ServeHTTP(recorder2, req2)
+	if recorder2.Code != http.StatusOK {
+		t.Fatalf("expected 200 for expire, got %d: %s", recorder2.Code, recorder2.Body.String())
+	}
+
+	session2, err := server.getPairingSessionDB("555555")
+	if err != nil {
+		t.Fatalf("failed to get session: %v", err)
+	}
+	if !session2.Used {
+		t.Fatal("expected used=true to be preserved after expire, got false — REV35 regression")
+	}
+}
