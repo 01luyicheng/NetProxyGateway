@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1010,6 +1011,125 @@ func TestCleanupDeadTunnelsOnceAfterStop(t *testing.T) {
 	// and Stop() has been called. After Stop(), the function returns early
 	// (m.stopped check), which is correct — the key point is no wg.Add panic.
 	manager.cleanupDeadTunnelsOnce()
+}
+
+// TestUnregisterSkipsOfflineNotificationWhenReplaced verifies that Unregister
+// does not send a stale "offline" notification when a new tunnel has already
+// been registered for the same device. Without the replacement check, the
+// "offline" notification could arrive at the API server after the "online"
+// notification from the new Register, incorrectly overwriting the device
+// status to "offline" (the API uses upsert).
+func TestUnregisterSkipsOfflineNotificationWhenReplaced(t *testing.T) {
+	var (
+		mu          sync.Mutex
+		statusCalls []string
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		statusCalls = append(statusCalls, payload["status"])
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	manager := NewTunnelManager(&Config{APIEndpoint: server.URL})
+	defer manager.Stop()
+
+	// Register first tunnel
+	first := manager.Register("device-replaced", nil)
+
+	// Simulate device reconnecting: register second tunnel before Unregister
+	// is called for the first one.
+	second := manager.Register("device-replaced", nil)
+
+	// Now Unregister the old tunnel — it should NOT send "offline" because
+	// a replacement tunnel (second) exists in the map.
+	manager.Unregister("device-replaced", first)
+
+	// Wait for async notifications to settle
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	calls := statusCalls
+	mu.Unlock()
+
+	for _, s := range calls {
+		if s == "offline" {
+			t.Fatalf("stale offline notification sent when replacement tunnel exists; notifications: %v", calls)
+		}
+	}
+
+	// Clean up
+	manager.Unregister("device-replaced", second)
+}
+
+// TestCleanupDeadTunnelsSkipsOfflineNotificationWhenReplaced verifies that
+// cleanupDeadTunnelsOnce does not send a stale "offline" notification when a
+// new tunnel has been registered between the map deletion and the notification
+// send. This is the same class of bug as the Unregister variant.
+func TestCleanupDeadTunnelsSkipsOfflineNotificationWhenReplaced(t *testing.T) {
+	var (
+		mu          sync.Mutex
+		statusCalls []string
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		statusCalls = append(statusCalls, payload["status"])
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	config := &Config{
+		APIEndpoint:     server.URL,
+		HeartbeatTimeout: 50 * time.Millisecond,
+	}
+	manager := NewTunnelManager(config)
+	defer manager.Stop()
+
+	// Register first tunnel (will become dead)
+	_ = manager.Register("device-cleanup-replaced", nil)
+
+	// Wait for first tunnel to become dead
+	time.Sleep(100 * time.Millisecond)
+
+	// Now, before cleanup runs, register a new tunnel for the same device.
+	// This simulates the device reconnecting before the cleanup cycle.
+	second := manager.Register("device-cleanup-replaced", nil)
+	second.UpdatePing() // keep new tunnel alive
+
+	// Run cleanup — it should find the dead tunnel removed from map
+	// (replaced by Register), but the identity check prevents it from
+	// being added to deadTunnels. However, if there's a race between
+	// cleanup's map scan and Register, cleanup might have already
+	// collected the dead tunnel. In that case, the replacement check
+	// before sending "offline" should prevent the stale notification.
+	manager.cleanupDeadTunnelsOnce()
+
+	// Wait for async notifications to settle
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	calls := statusCalls
+	mu.Unlock()
+
+	for _, s := range calls {
+		if s == "offline" {
+			t.Fatalf("stale offline notification sent during cleanup when replacement tunnel exists; notifications: %v", calls)
+		}
+	}
 }
 
 func TestSendReturnsErrorAfterClose(t *testing.T) {

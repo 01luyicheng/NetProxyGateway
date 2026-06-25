@@ -328,6 +328,17 @@ func (m *TunnelManager) Unregister(deviceID string, tunnel *TunnelConn) {
 
 	log.Printf("Tunnel unregistered for device: %s", deviceID)
 
+	// Re-check map: if a new tunnel was registered for this device between
+	// the delete and now, the device is online and we must not send a stale
+	// "offline" notification that would overwrite the "online" status at
+	// the API server (which uses upsert).
+	m.mu.RLock()
+	_, hasReplacement := m.tunnels[deviceID]
+	m.mu.RUnlock()
+	if hasReplacement {
+		return
+	}
+
 	// Check stopped before wg.Add(1) to prevent WaitGroup reuse panic
 	// after Stop() has called wg.Wait().
 	m.stopMu.Lock()
@@ -503,6 +514,18 @@ func (m *TunnelManager) cleanupDeadTunnelsOnce() {
 
 	for i, tunnel := range deadTunnels {
 		tunnel.Close()
+
+		// Re-check map: if a new tunnel was registered for this device
+		// between the delete and now, the device is online and we must
+		// not send a stale "offline" notification that would overwrite
+		// the "online" status at the API server (which uses upsert).
+		m.mu.RLock()
+		_, hasReplacement := m.tunnels[deadIDs[i]]
+		m.mu.RUnlock()
+		if hasReplacement {
+			continue
+		}
+
 		// Check stopped before wg.Add(1) to prevent WaitGroup reuse panic
 		// after Stop() has called wg.Wait(). Consistent with Register/Unregister.
 		m.stopMu.Lock()

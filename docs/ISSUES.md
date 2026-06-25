@@ -1532,3 +1532,11 @@
 - **风险**: **低**。逻辑正确但测试不完整
 - **修复方式**: 添加 `TestUpdatePairingSession_UsedFieldPreserved`（覆盖 connected→disconnected，原 REV35 测试迁移）和 `TestUpdatePairingSession_UsedFieldPreservedOnExpire`（覆盖 connected→expired）
 
+### REV38: Unregister/cleanupDeadTunnelsOnce 过期 "offline" 通知竞态覆盖 "online" 状态
+- **状态**: 已修复
+- **位置**: `server/tunnel/main.go` (`Unregister` L324-339, `cleanupDeadTunnelsOnce` L503-524)
+- **问题描述**: `Unregister` 和 `cleanupDeadTunnelsOnce` 在从 map 中删除隧道后异步发送 "offline" 通知给 API 服务。在删除 map 条目和发送通知之间，设备可以快速重连（通过 `Register` 注册新隧道并发送 "online" 通知）。由于 API 服务使用 `ON CONFLICT(device_id) DO UPDATE SET status = excluded.status`（upsert），后到达的通知覆盖先到达的通知。如果 "offline" 通知晚于 "online" 通知到达 API，设备实际在线但 API 中状态被错误覆盖为 "offline"，导致工程师无法在 UI 上发现可用设备。
+- **触发场景**: (1) 设备隧道死亡（网络中断）；(2) `cleanupDeadTunnelsOnce` 或 `Unregister` 从 map 中删除死隧道；(3) 设备快速重连，`Register` 添加新隧道并发送 "online" 通知；(4) 清理函数/Unregister 发送 "offline" 通知；(5) "offline" 通知到达 API 服务晚于 "online" 通知，upsert 覆盖状态为 "offline"；**结果**：设备实际在线但 API 中状态为 "offline"
+- **风险**: **高**。用户可感知的严重功能退化——设备状态错误导致工程师无法发现可用设备，可能阻断远程协助流程
+- **修复方式**: 在 `Unregister` 和 `cleanupDeadTunnelsOnce` 发送 "offline" 通知前，重新检查 map 中是否已有替换隧道（`m.mu.RLock(); _, hasReplacement := m.tunnels[deviceID]; m.mu.RUnlock()`），如有则跳过 "offline" 通知
+
