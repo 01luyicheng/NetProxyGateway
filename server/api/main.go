@@ -592,9 +592,9 @@ func (s *Server) upsertDeviceStatusDB(status *DeviceStatus) error {
 		`INSERT INTO device_status (device_id, status, last_seen, tunnel_addr)
 		 VALUES (?, ?, ?, ?)
 		 ON CONFLICT(device_id) DO UPDATE SET
-		 status = excluded.status,
-		 last_seen = excluded.last_seen,
-		 tunnel_addr = excluded.tunnel_addr`,
+		 status = CASE WHEN excluded.last_seen > device_status.last_seen THEN excluded.status ELSE device_status.status END,
+		 last_seen = CASE WHEN excluded.last_seen > device_status.last_seen THEN excluded.last_seen ELSE device_status.last_seen END,
+		 tunnel_addr = CASE WHEN excluded.last_seen > device_status.last_seen THEN excluded.tunnel_addr ELSE device_status.tunnel_addr END`,
 		status.DeviceID,
 		status.Status,
 		status.LastSeen.Unix(),
@@ -1094,6 +1094,7 @@ func (s *Server) updateDeviceStatus(c *gin.Context) {
 		DeviceID   string `json:"device_id" binding:"required"`
 		Status     string `json:"status" binding:"required"`
 		TunnelAddr string `json:"tunnel_addr"`
+		NotifiedAt int64  `json:"notified_at"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1101,10 +1102,15 @@ func (s *Server) updateDeviceStatus(c *gin.Context) {
 		return
 	}
 
+	lastSeen := time.Now()
+	if req.NotifiedAt > 0 {
+		lastSeen = time.Unix(req.NotifiedAt, 0)
+	}
+
 	status := &DeviceStatus{
 		DeviceID:   req.DeviceID,
 		Status:     req.Status,
-		LastSeen:   time.Now(),
+		LastSeen:   lastSeen,
 		TunnelAddr: req.TunnelAddr,
 	}
 

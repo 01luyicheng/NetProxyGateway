@@ -1204,3 +1204,47 @@ func TestUpdatePairingSession_UsedFieldPreservedOnExpire(t *testing.T) {
 		t.Fatal("expected used=true to be preserved after expire, got false — REV35 regression")
 	}
 }
+
+// TestUpsertDeviceStatusRejectsStaleUpdate verifies that a stale "offline"
+// notification with an older timestamp cannot overwrite a more recent "online"
+// status. This is a regression test for REV40.
+func TestUpsertDeviceStatusRejectsStaleUpdate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+
+	// Insert an "online" status with a recent timestamp
+	now := time.Now()
+	onlineStatus := &DeviceStatus{
+		DeviceID:   "device-stale-test",
+		Status:     "online",
+		LastSeen:   now,
+		TunnelAddr: "10.0.0.1:8080",
+	}
+	if err := server.upsertDeviceStatusDB(onlineStatus); err != nil {
+		t.Fatalf("failed to insert online status: %v", err)
+	}
+
+	// Try to upsert an "offline" status with an older timestamp
+	staleStatus := &DeviceStatus{
+		DeviceID:   "device-stale-test",
+		Status:     "offline",
+		LastSeen:   now.Add(-10 * time.Second), // older than the online timestamp
+		TunnelAddr: "",
+	}
+	if err := server.upsertDeviceStatusDB(staleStatus); err != nil {
+		t.Fatalf("failed to upsert stale status: %v", err)
+	}
+
+	// Verify that the status remains "online"
+	result, err := server.getDeviceStatusDB("device-stale-test")
+	if err != nil {
+		t.Fatalf("failed to get device status: %v", err)
+	}
+	if result.Status != "online" {
+		t.Fatalf("expected status to remain 'online' after stale update, got %q — REV40 regression", result.Status)
+	}
+	if result.TunnelAddr != "10.0.0.1:8080" {
+		t.Fatalf("expected tunnel_addr to remain '10.0.0.1:8080' after stale update, got %q", result.TunnelAddr)
+	}
+}

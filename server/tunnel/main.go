@@ -370,10 +370,11 @@ func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string) 
 	m.stopMu.Unlock()
 
 	defer m.wg.Done()
-	payload := map[string]string{
+	payload := map[string]interface{}{
 		"device_id":   deviceID,
 		"status":      status,
 		"tunnel_addr": tunnelAddr,
+		"notified_at": time.Now().Unix(),
 	}
 
 	data, err := json.Marshal(payload)
@@ -410,8 +411,20 @@ func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string) 
 				case <-m.ctx.Done():
 					return
 				case <-time.After(notifyStatusBackoff(attempt)):
-					continue
 				}
+				// For "offline" notifications, re-check whether a replacement tunnel
+				// was registered since we started.  If so, the device is online and
+				// sending "offline" would overwrite the correct "online" status.
+				if status == "offline" {
+					m.mu.RLock()
+					_, replaced := m.tunnels[deviceID]
+					m.mu.RUnlock()
+					if replaced {
+						log.Printf("Skipping stale offline notification for device %s: replacement tunnel registered", deviceID)
+						return
+					}
+				}
+				continue
 			}
 			log.Printf("Failed to notify device status after %d attempts: %v", attempt, err)
 			return
@@ -430,8 +443,20 @@ func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string) 
 			case <-m.ctx.Done():
 				return
 			case <-time.After(notifyStatusBackoff(attempt)):
-				continue
 			}
+			// For "offline" notifications, re-check whether a replacement tunnel
+			// was registered since we started.  If so, the device is online and
+			// sending "offline" would overwrite the correct "online" status.
+			if status == "offline" {
+				m.mu.RLock()
+				_, replaced := m.tunnels[deviceID]
+				m.mu.RUnlock()
+				if replaced {
+					log.Printf("Skipping stale offline notification for device %s: replacement tunnel registered", deviceID)
+					return
+				}
+			}
+			continue
 		}
 
 		if shouldRetryNotifyStatusCode(statusCode) {

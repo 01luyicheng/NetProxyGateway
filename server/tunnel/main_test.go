@@ -1132,6 +1132,121 @@ func TestCleanupDeadTunnelsSkipsOfflineNotificationWhenReplaced(t *testing.T) {
 	}
 }
 
+// TestOfflineNotificationSkippedOnRetryWhenReplaced verifies that when an
+// "offline" notification's first attempt fails and triggers a retry, the
+// re-check in the retry path detects a replacement tunnel and skips the
+// stale "offline" notification. Without this re-check, the retry could
+// succeed after the device has reconnected, overwriting the correct
+// "online" status at the API server.
+func TestOfflineNotificationSkippedOnRetryWhenReplaced(t *testing.T) {
+	var (
+		mu              sync.Mutex
+		statusCalls     []string
+		offlineAttempts int32
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		status, _ := payload["status"].(string)
+
+		// First "offline" attempt: fail to trigger retry
+		if status == "offline" {
+			attempt := atomic.AddInt32(&offlineAttempts, 1)
+			if attempt == 1 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+		}
+
+		mu.Lock()
+		statusCalls = append(statusCalls, status)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	manager := NewTunnelManager(&Config{APIEndpoint: server.URL})
+	defer manager.Stop()
+
+	// Register tunnel
+	_ = manager.Register("device-retry-recheck", nil)
+
+	// Unregister — the first "offline" attempt will fail
+	manager.Unregister("device-retry-recheck", nil)
+
+	// Wait a bit for the first attempt to fail, then register replacement
+	// during the backoff period
+	time.Sleep(50 * time.Millisecond)
+	replacement := manager.Register("device-retry-recheck", nil)
+
+	// Wait for async operations to settle
+	time.Sleep(500 * time.Millisecond)
+
+	mu.Lock()
+	calls := statusCalls
+	mu.Unlock()
+
+	for _, s := range calls {
+		if s == "offline" {
+			t.Fatalf("stale offline notification sent on retry when replacement tunnel exists; notifications: %v", calls)
+		}
+	}
+
+	// Clean up
+	manager.Unregister("device-retry-recheck", replacement)
+}
+
+// TestUnregisterSendsOfflineWhenNoReplacement verifies the negative case:
+// when there is no replacement tunnel, Unregister should still send the
+// "offline" notification. This ensures the re-check does not incorrectly
+// suppress legitimate offline notifications.
+func TestUnregisterSendsOfflineWhenNoReplacement(t *testing.T) {
+	var (
+		mu          sync.Mutex
+		statusCalls []string
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		status, _ := payload["status"].(string)
+		mu.Lock()
+		statusCalls = append(statusCalls, status)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	manager := NewTunnelManager(&Config{APIEndpoint: server.URL})
+	defer manager.Stop()
+
+	_ = manager.Register("device-no-replacement", nil)
+	manager.Unregister("device-no-replacement", nil)
+
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	calls := statusCalls
+	mu.Unlock()
+
+	found := false
+	for _, s := range calls {
+		if s == "offline" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected offline notification when no replacement exists; notifications: %v", calls)
+	}
+}
+
 func TestSendReturnsErrorAfterClose(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

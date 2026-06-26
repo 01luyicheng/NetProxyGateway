@@ -1539,4 +1539,32 @@
 - **触发场景**: (1) 设备隧道死亡（网络中断）；(2) `cleanupDeadTunnelsOnce` 或 `Unregister` 从 map 中删除死隧道；(3) 设备快速重连，`Register` 添加新隧道并发送 "online" 通知；(4) 清理函数/Unregister 发送 "offline" 通知；(5) "offline" 通知到达 API 服务晚于 "online" 通知，upsert 覆盖状态为 "offline"；**结果**：设备实际在线但 API 中状态为 "offline"
 - **风险**: **高**。用户可感知的严重功能退化——设备状态错误导致工程师无法发现可用设备，可能阻断远程协助流程
 - **修复方式**: 在 `Unregister` 和 `cleanupDeadTunnelsOnce` 发送 "offline" 通知前，重新检查 map 中是否已有替换隧道（`m.mu.RLock(); _, hasReplacement := m.tunnels[deviceID]; m.mu.RUnlock()`），如有则跳过 "offline" 通知
+- **遗留问题**: (1) 通知重试期间缺少替换检查（见 REV39）；(2) API 端 upsert 缺少时间戳保护（见 REV40）；(3) REV38 新增测试未覆盖 re-check 代码路径（见 REV41）
+
+### REV39: notifyDeviceStatus 重试期间缺少替换检查 — 过期 "offline" 重试覆盖 "online" 状态
+
+- **状态**: 已修复
+- **位置**: `server/tunnel/main.go` (`notifyDeviceStatus` 重试路径)
+- **问题描述**: REV38 的替换检查仅在启动通知 goroutine 前执行。`notifyDeviceStatus` 有最多 3 次重试（指数退避 100ms/200ms/400ms）。若首次 "offline" HTTP 请求失败（网络超时/API 过载），在退避期间设备重连并注册新隧道，"online" 通知先成功，随后 "offline" 重试成功将覆盖正确的 "online" 状态。REV38 的 re-check 在 goroutine 启动时已通过，无法检测退避期间的新注册。
+- **触发场景**: (1) 设备断开，Unregister 删除 map 条目，re-check 无替换，启动 "offline" goroutine；(2) "offline" 首次请求失败（HTTP 503/网络超时）；(3) 退避 ~100ms 期间设备重连，Register 添加新隧道，"online" 通知成功；(4) "offline" 重试成功，API 盲 upsert 覆盖 "online" → "offline"；**结果**：设备在线但 API 显示 "offline"
+- **风险**: **高**。API 不稳定时易触发，导致设备状态错误
+- **修复方式**: 在 `notifyDeviceStatus` 的两条重试路径（错误重试和状态码重试）的退避等待后，对 "offline" 通知重新检查 `m.tunnels[deviceID]`，若存在替换隧道则跳过重试
+
+### REV40: API 端 upsertDeviceStatusDB 无时间戳保护 — 迟到通知覆盖正确状态
+
+- **状态**: 已修复
+- **位置**: `server/api/main.go` (`upsertDeviceStatusDB`, `updateDeviceStatus`)
+- **问题描述**: `upsertDeviceStatusDB` 使用 `ON CONFLICT DO UPDATE SET status = excluded.status` 无条件覆盖，无 recency 校验。且 `updateDeviceStatus` 将 `last_seen = time.Now()`（API 接收时间），而非通知生成时间，导致迟到的过期通知反而有更"新"的时间戳，使基于 `last_seen` 的比较无效。
+- **触发场景**: (1) 设备在线，API 中状态为 "online"（last_seen = T1）；(2) 设备断开，"offline" 通知首次失败；(3) 设备重连，"online" 通知成功（last_seen = T2）；(4) "offline" 重试成功（last_seen = T3 > T2），盲覆盖状态为 "offline"；**结果**：即使有客户端 re-check，API 端仍可被覆盖
+- **风险**: **高**。根本性数据完整性缺陷，使所有客户端侧防护可被绕过
+- **修复方式**: (1) 隧道服务通知 payload 添加 `notified_at` Unix 时间戳（通知生成时间）；(2) API 端 `updateDeviceStatus` 优先使用 `notified_at` 作为 `last_seen`；(3) `upsertDeviceStatusDB` 改为 `CASE WHEN excluded.last_seen > device_status.last_seen` 条件更新，仅当新记录时间戳更晚时才覆盖
+
+### REV41: REV38 新增测试未实际覆盖 re-check 代码路径
+
+- **状态**: 已修复
+- **位置**: `server/tunnel/main_test.go`
+- **问题描述**: `TestUnregisterSkipsOfflineNotificationWhenReplaced` 先调用 `Register` 注册替换隧道，再调用 `Unregister` 注销旧隧道。由于 `Register` 已替换 map 中的隧道，`Unregister` 的 identity check（`current == tunnel`）失败，`closedTunnel` 为 nil，函数在 `if closedTunnel == nil { return }` 处返回，re-check 代码从未执行。同理，`TestCleanupDeadTunnelsSkipsOfflineNotificationWhenReplaced` 中 `Register` 替换旧隧道后 `cleanupDeadTunnelsOnce` 扫描不到死隧道，re-check 从未执行。两个测试验证的是 identity check 而非 re-check。
+- **触发场景**: N/A（测试覆盖缺陷，非运行时 Bug）
+- **风险**: **中**。re-check 是 REV38 的核心修复，但无测试覆盖，回归风险高
+- **修复方式**: 添加 `TestOfflineNotificationSkippedOnRetryWhenReplaced`（验证重试 re-check 路径）和 `TestUnregisterSendsOfflineWhenNoReplacement`（验证无替换时仍发送 "offline"）
 
