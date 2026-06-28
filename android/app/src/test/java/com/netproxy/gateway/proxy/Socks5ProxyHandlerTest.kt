@@ -308,5 +308,41 @@ class Socks5ProxyHandlerTest {
             }
         }
     }
-}
 
+
+    // C77: Socks5ProxyHandler double-free 修复缺少 write-failure 回归测试
+    @Test
+    fun relayHandler_onWriteFailure_closesChannelsAndDoesNotDoubleFree() {
+        val upstreamChannel = io.mockk.mockk<io.netty.channel.Channel>(relaxed = true)
+        val mockFuture = io.mockk.mockk<io.netty.channel.ChannelFuture>(relaxed = true)
+
+        io.mockk.every { upstreamChannel.isActive } returns true
+        io.mockk.every { upstreamChannel.writeAndFlush(any()) } returns mockFuture
+        io.mockk.every { mockFuture.addListener(any()) } answers {
+            val listener = it.invocation.args[0] as io.netty.util.concurrent.GenericFutureListener<io.netty.channel.ChannelFuture>
+
+            val failedFuture = io.mockk.mockk<io.netty.channel.ChannelFuture>(relaxed = true)
+            io.mockk.every { failedFuture.isSuccess } returns false
+
+            listener.operationComplete(failedFuture)
+            mockFuture
+        }
+
+        val relayHandlerClass = Class.forName("com.netproxy.gateway.proxy.RelayHandler")
+        val constructor = relayHandlerClass.getDeclaredConstructor(io.netty.channel.Channel::class.java)
+        constructor.isAccessible = true
+        val relayHandler = constructor.newInstance(upstreamChannel) as io.netty.channel.ChannelInboundHandlerAdapter
+
+        val clientChannel = io.netty.channel.embedded.EmbeddedChannel(relayHandler)
+        val msg = io.netty.buffer.Unpooled.wrappedBuffer(byteArrayOf(1, 2, 3))
+
+        try {
+            clientChannel.writeInbound(msg)
+        } catch (e: io.netty.util.IllegalReferenceCountException) {
+            org.junit.Assert.fail("Double free detected: \${e.message}")
+        }
+
+        org.junit.Assert.assertFalse(clientChannel.isActive)
+        io.mockk.verify { upstreamChannel.close() }
+    }
+}

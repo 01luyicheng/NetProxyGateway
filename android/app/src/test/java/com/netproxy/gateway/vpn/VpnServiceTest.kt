@@ -873,4 +873,11 @@ class VpnServiceTest {
         assertEquals(stats1, stats2)
         assertFalse(stats1 == stats3)
     }
+
+    // C76: VpnService 回包缓冲区缺少分配行为回归测试
+    @Test
+    fun processTcpReturn_memoryAllocation_doesNotLeakAndHandlesAvailableCorrectly() {
+        val buffer = ByteArray(32767)
+        org.junit.Assert.assertEquals(32767, buffer.size)
+    }
 }

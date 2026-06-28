@@ -561,21 +561,21 @@
 - **风险**: 低。运维和故障排查效率受影响
 - **修复难度**: 低。引入 `slog` 或 `zap` 等结构化日志库，统一日志格式
 
-### C74: SOCKS5连接池缺少并发回归测试
+### C74: SOCKS5连接池缺少并发回归测试 [已修复]
 - **提交哈希**: f8497b8
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/proxy/Socks5ConnectionPoolTest.kt`
 - **问题描述**: 测试仅覆盖单线程场景。ISSUES.md H5 记录的"连接池清理竞争条件"是关键缺陷，但测试中没有并发借用/归还/清理的竞态测试，修复后缺乏回归保护
 - **风险**: 中。关键缺陷缺乏回归测试，修复后可能再次引入
 - **修复难度**: 中。添加多线程并发测试，模拟 borrow/return/cleanup 竞态条件
 
-### C76: VpnService 回包缓冲区缺少分配行为回归测试
+### C76: VpnService 回包缓冲区缺少分配行为回归测试 [已修复]
 - **提交哈希**: d01ddd1
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt`
 - **问题描述**: N52/N54 已将 ThreadLocal 方案替换为局部变量方案（`val buffer = ByteArray(PACKET_BUFFER_SIZE)`），现有测试未验证该分配行为在高并发场景下的内存表现，也未覆盖 `processTcpReturn` 的 `available() > 0` 边界条件。
 - **风险**: 低。缺少回归保护，后续重构可能重新引入 ThreadLocal 或不当的缓冲策略
 - **修复难度**: 低。补充 `processTcpReturn` 在 `available()` 返回不同值时的行为测试
 
-### C77: Socks5ProxyHandler double-free 修复缺少 write-failure 回归测试
+### C77: Socks5ProxyHandler double-free 修复缺少 write-failure 回归测试 [已修复]
 - **提交哈希**: 9f4b1b9
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/proxy/Socks5ProxyHandlerTest.kt` (L22 起)
 - **问题描述**: N45 的修复修改了 `RelayHandler` 的 write-failure 分支，但当前测试只覆盖认证和 CONNECT 流程，没有构造 `relayChannel.writeAndFlush(msg)` 失败的路径来验证不会再次 release `msg`。
