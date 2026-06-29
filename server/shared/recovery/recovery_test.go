@@ -484,6 +484,26 @@ func TestWithLogger_Nil_DoesNotPanic(t *testing.T) {
 	}
 }
 
+func ExampleRecover() {
+	var n int
+	var err error
+	func() {
+		defer Recover("StreamConn.Read", WithStreamID("stream-123"), WithNamedReturn(&n, &err, "read panic"))
+		panic("connection lost")
+	}()
+	// Note: We're not matching the output exactly because it contains date/time
+}
+
+func ExampleRecoverAction() {
+	func() {
+		defer RecoverAction("handleConnection", func() {
+			// e.g. _ = c.Close()
+		})
+		panic("connection reset")
+	}()
+	// Note: We're not matching the output exactly because it contains date/time
+}
+
 func TestRecoverAction_WithLogger_Nil_DoesNotPanic(t *testing.T) {
 	var buf bytes.Buffer
 	oldOutput := log.Writer()
