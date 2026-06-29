@@ -17,6 +17,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
@@ -40,6 +41,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.hilt.navigation.compose.hiltViewModel
 
 import com.netproxy.gateway.R
@@ -516,10 +519,17 @@ fun PairingSection(
 
             OutlinedTextField(
                 value = pairingCode,
-                onValueChange = { pairingCode = it },
+                onValueChange = { newValue ->
+                    if (newValue.length <= 6 && newValue.all { it.isDigit() }) {
+                        pairingCode = newValue
+                    }
+                },
                 label = { Text(stringResource(R.string.pairing_code_input_label)) },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !uiState.isPairingInProgress
+                enabled = !uiState.isPairingInProgress,
+                singleLine = true,
+                placeholder = { Text(stringResource(R.string.pairing_hint)) },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done)
             )
 
             Spacer(modifier = Modifier.height(16.dp))
