@@ -264,31 +264,26 @@ object DebugDetector {
             "persist.sys.usb.config"
         )
 
-        for (prop in debugProps) {
-            try {
-                val process = ProcessBuilder("getprop", prop)
-                    .redirectErrorStream(true)
-                    .start()
-                try {
-                    BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8)).use { reader ->
-                        val value = reader.readLine()
-                        val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                        if (!finished) {
-                            return@use
-                        }
+        try {
+            val systemPropertiesClass = Class.forName("android.os.SystemProperties")
+            val getMethod = systemPropertiesClass.getMethod("get", String::class.java)
 
+            for (prop in debugProps) {
+                try {
+                    val value = getMethod.invoke(null, prop) as? String
+                    if (value != null) {
                         when (prop) {
                             "ro.debuggable" -> if (value == "1") return true
                             "ro.secure" -> if (value == "0") return true
-                            "persist.sys.usb.config" -> if (value?.contains("adb") == true) return true
+                            "persist.sys.usb.config" -> if (value.contains("adb")) return true
                         }
                     }
-                } finally {
-                    process.destroyForcibly()
+                } catch (e: Exception) {
+                    // 忽略异常
                 }
-            } catch (e: Exception) {
-                // 忽略异常
             }
+        } catch (e: Exception) {
+            // 忽略反射异常
         }
         return false
     }
