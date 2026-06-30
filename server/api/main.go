@@ -825,14 +825,40 @@ func (s *Server) getPairingSession(c *gin.Context) {
 	c.JSON(http.StatusOK, session)
 }
 
+// getEngineerID extracts and validates the engineer_id from the Gin context.
+func getEngineerID(c *gin.Context) (string, error) {
+	engineerIDValue, exists := c.Get("engineer_id")
+	engineerID, ok := engineerIDValue.(string)
+	if !exists || !ok || engineerID == "" {
+		return "", ErrMissingEngineer
+	}
+	return engineerID, nil
+}
+
+// isValidSessionTransition validates if a pairing session can transition from current to requested status.
+func isValidSessionTransition(current, requested string) bool {
+	validTransitions := map[string][]string{
+		"pending":      {"connected", "expired"},
+		"connected":    {"disconnected", "expired"},
+		"disconnected": {},
+		"expired":      {},
+	}
+
+	for _, t := range validTransitions[current] {
+		if t == requested {
+			return true
+		}
+	}
+	return false
+}
+
 // updatePairingSession updates a pairing session status.
 func (s *Server) updatePairingSession(c *gin.Context) {
 	code := c.Param("code")
 
-	engineerIDValue, exists := c.Get("engineer_id")
-	engineerID, ok := engineerIDValue.(string)
-	if !exists || !ok || engineerID == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": ErrMissingEngineer.Error()})
+	engineerID, err := getEngineerID(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -873,22 +899,7 @@ func (s *Server) updatePairingSession(c *gin.Context) {
 	}
 
 	// Validate status transition
-	validTransitions := map[string][]string{
-		"pending":      {"connected", "expired"},
-		"connected":    {"disconnected", "expired"},
-		"disconnected": {},
-		"expired":      {},
-	}
-
-	valid := false
-	for _, t := range validTransitions[session.Status] {
-		if t == req.Status {
-			valid = true
-			break
-		}
-	}
-
-	if !valid {
+	if !isValidSessionTransition(session.Status, req.Status) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": ErrInvalidStatusTransition.Error()})
 		return
 	}
@@ -951,10 +962,9 @@ func (s *Server) validateSession(c *gin.Context) {
 
 // createSessionToken creates a new session token.
 func (s *Server) createSessionToken(c *gin.Context) {
-	engineerIDValue, exists := c.Get("engineer_id")
-	engineerID, ok := engineerIDValue.(string)
-	if !exists || !ok || engineerID == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": ErrMissingEngineer.Error()})
+	engineerID, err := getEngineerID(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
 	}
 
