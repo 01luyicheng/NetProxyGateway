@@ -1511,19 +1511,21 @@
 - **修复方式**: 将原子 UPDATE 中的 `used = ?` 改为 `used = CASE WHEN ? = 'connected' THEN 1 ELSE used END`，仅在连接时设为 1，其他状态转换保持原值。同时修正回退 JSON 响应中的 `used` 值为 `session.Used || req.Status == "connected"`
 
 ### REV36: `updatePairingSessionDB` 死代码可重新引入 used 字段覆盖 Bug
-- **状态**: 已修复
+- **修复状态**: 已修复
 - **位置**: `server/api/main.go` (L471-481, 已删除)
 - **问题描述**: REV31 将 `markSessionExpired` 改为条件 UPDATE 后，`updatePairingSessionDB` 函数不再被任何代码调用，成为死代码。该函数执行全字段无条件 UPDATE（`SET status = ?, engineer_id = ?, used = ?`），如果被重新调用，会用内存中的陈旧值覆盖 DB 中已更新的 `engineer_id` 和 `used` 字段，重新引入 REV31/REV35 同类的数据完整性 Bug。
 - **触发场景**: 开发者在新功能中调用 `updatePairingSessionDB` 而非使用安全的原子条件 UPDATE，导致并发更新场景下 `used` 和 `engineer_id` 被陈旧值覆盖
 - **风险**: **中**。死代码本身不产生 Bug，但误用会引入高严重度数据完整性问题
+- **修复难度**: 低。纯删除操作，无调用点需要迁移，不影响其他代码逻辑
 - **修复方式**: 删除 `updatePairingSessionDB` 死代码函数，防止未来误用
 
 ### REV37: connected→expired 转换缺少 used 字段保持测试
-- **状态**: 已修复
+- **修复状态**: 已修复
 - **位置**: `server/api/main_test.go`
 - **问题描述**: REV35 的回归测试 `TestUpdatePairingSession_UsedFieldPreserved` 仅覆盖 connected→disconnected 转换，未覆盖 connected→expired 转换。虽然 CASE WHEN 逻辑对两种转换同样正确（`ELSE used END` 保留原值），但缺少显式测试覆盖，若未来代码变更影响 expired 路径可能引入回归。
 - **触发场景**: N/A（测试覆盖缺口，非运行时 Bug）
 - **风险**: **低**。逻辑正确但测试不完整
+- **修复难度**: 低。新增独立测试函数，复用现有测试辅助函数（`newPairingTestServer`、`insertPendingPairingSession`、`issueAuthToken`），无需修改被测代码
 - **修复方式**: 添加 `TestUpdatePairingSession_UsedFieldPreservedOnExpire` 测试，验证 connected→expired 转换后 used 保持 true
 
 
