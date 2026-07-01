@@ -919,10 +919,11 @@ func TestCompareAndUpdatePairingSessionDB_ConcurrentModification(t *testing.T) {
 	}
 
 	// Simulate a concurrent modification: directly update the session in DB
-	session.Status = "connected"
-	session.EngineerID = "other-engineer"
-	session.Used = true
-	if err := server.updatePairingSessionDB(session); err != nil {
+	_, err = server.db.Exec(
+		`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ?`,
+		"connected", "other-engineer", 1, session.Code,
+	)
+	if err != nil {
 		t.Fatalf("failed to simulate concurrent modification: %v", err)
 	}
 
@@ -1000,10 +1001,11 @@ func TestCompareAndUpdatePairingSessionDB_StatusChangedConcurrently(t *testing.T
 	}
 
 	// Simulate a concurrent modification: another engineer already connected
-	session.Status = "connected"
-	session.EngineerID = "other-engineer"
-	session.Used = true
-	if err := server.updatePairingSessionDB(session); err != nil {
+	_, err = server.db.Exec(
+		`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ?`,
+		"connected", "other-engineer", 1, session.Code,
+	)
+	if err != nil {
 		t.Fatalf("failed to simulate concurrent modification: %v", err)
 	}
 
@@ -1087,5 +1089,118 @@ func TestUpdatePairingSession_ConcurrentModificationReturns409(t *testing.T) {
 
 	if !sawConflict {
 		t.Fatalf("expected at least one of %d trials to trigger a 409 Conflict from concurrent modification", trials)
+	}
+}
+
+// TestUpdatePairingSession_UsedFieldPreserved verifies that the `used` field
+// is never reset from true to false during status transitions. Once a session
+// has been connected (used=true), disconnecting must not revert used to false.
+// Migrated from the closed REV35 PR (#37).
+func TestUpdatePairingSession_UsedFieldPreserved(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	insertPendingPairingSession(t, server, "666666", "device-used-test")
+
+	engineerToken := issueAuthToken(t, server.jwtSecret, jwt.MapClaims{
+		"sub":  "engineer-used",
+		"role": "engineer",
+		"iat":  time.Now().Unix(),
+		"exp":  time.Now().Add(10 * time.Minute).Unix(),
+	})
+
+	router := gin.New()
+	router.PUT("/api/pair/:code", server.authMiddleware(), server.updatePairingSession)
+
+	// Step 1: Connect — should set used=true
+	req := httptest.NewRequest(http.MethodPut, "/api/pair/666666", strings.NewReader(`{"status":"connected"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+engineerToken)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200 for connect, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	session, err := server.getPairingSessionDB("666666")
+	if err != nil {
+		t.Fatalf("failed to get session: %v", err)
+	}
+	if !session.Used {
+		t.Fatal("expected used=true after connected, got false")
+	}
+
+	// Step 2: Disconnect — used must remain true
+	req2 := httptest.NewRequest(http.MethodPut, "/api/pair/666666", strings.NewReader(`{"status":"disconnected"}`))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("Authorization", "Bearer "+engineerToken)
+	recorder2 := httptest.NewRecorder()
+	router.ServeHTTP(recorder2, req2)
+	if recorder2.Code != http.StatusOK {
+		t.Fatalf("expected 200 for disconnect, got %d: %s", recorder2.Code, recorder2.Body.String())
+	}
+
+	session2, err := server.getPairingSessionDB("666666")
+	if err != nil {
+		t.Fatalf("failed to get session: %v", err)
+	}
+	if !session2.Used {
+		t.Fatal("expected used=true to be preserved after disconnect, got false — REV35 regression")
+	}
+}
+
+// TestUpdatePairingSession_UsedFieldPreservedOnExpire verifies that the `used`
+// field remains true after a connected→expired transition. This complements
+// TestUpdatePairingSession_UsedFieldPreserved which only tests connected→disconnected.
+func TestUpdatePairingSession_UsedFieldPreservedOnExpire(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	insertPendingPairingSession(t, server, "555555", "device-used-expire")
+
+	engineerToken := issueAuthToken(t, server.jwtSecret, jwt.MapClaims{
+		"sub":  "engineer-expire",
+		"role": "engineer",
+		"iat":  time.Now().Unix(),
+		"exp":  time.Now().Add(10 * time.Minute).Unix(),
+	})
+
+	router := gin.New()
+	router.PUT("/api/pair/:code", server.authMiddleware(), server.updatePairingSession)
+
+	// Step 1: Connect — should set used=true
+	req := httptest.NewRequest(http.MethodPut, "/api/pair/555555", strings.NewReader(`{"status":"connected"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+engineerToken)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200 for connect, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	session, err := server.getPairingSessionDB("555555")
+	if err != nil {
+		t.Fatalf("failed to get session: %v", err)
+	}
+	if !session.Used {
+		t.Fatal("expected used=true after connected, got false")
+	}
+
+	// Step 2: Expire — used must remain true
+	req2 := httptest.NewRequest(http.MethodPut, "/api/pair/555555", strings.NewReader(`{"status":"expired"}`))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("Authorization", "Bearer "+engineerToken)
+	recorder2 := httptest.NewRecorder()
+	router.ServeHTTP(recorder2, req2)
+	if recorder2.Code != http.StatusOK {
+		t.Fatalf("expected 200 for expire, got %d: %s", recorder2.Code, recorder2.Body.String())
+	}
+
+	session2, err := server.getPairingSessionDB("555555")
+	if err != nil {
+		t.Fatalf("failed to get session: %v", err)
+	}
+	if !session2.Used {
+		t.Fatal("expected used=true to be preserved after expire, got false — REV35 regression")
 	}
 }

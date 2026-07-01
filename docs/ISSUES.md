@@ -1516,3 +1516,19 @@
 - **风险**: **低**。当前调用路径下 wg 计数器始终 ≥ 1，但未来代码变更可能引入风险
 - **修复方式**: 在循环内 `m.wg.Add(1)` 前增加 `m.stopMu` 检查，与 Register/Unregister 保持一致
 
+### REV36: `updatePairingSessionDB` 死代码可重新引入 used 字段覆盖 Bug
+- **状态**: 已修复
+- **位置**: `server/api/main.go` (L473-481, 已删除)
+- **问题描述**: PR #49 引入 `compareAndUpdatePairingSessionDB` 后，`updatePairingSessionDB` 函数不再被任何生产代码调用，成为死代码。该函数执行全字段无条件 UPDATE（`SET status = ?, engineer_id = ?, used = ?`），如果被重新调用，会用内存中的陈旧值覆盖 DB 中已更新的 `engineer_id` 和 `used` 字段，重新引入 REV31/REV35 同类的数据完整性 Bug。
+- **触发场景**: 开发者在新功能中调用 `updatePairingSessionDB` 而非使用安全的乐观锁更新，导致并发更新场景下 `used` 和 `engineer_id` 被陈旧值覆盖
+- **风险**: **中**。死代码本身不产生 Bug，但误用会引入高严重度数据完整性问题
+- **修复方式**: 删除 `updatePairingSessionDB` 死代码函数，防止未来误用；同步调整现有测试使用直接 SQL 模拟并发更新
+
+### REV37: connected→expired / connected→disconnected 转换 used 字段保持测试
+- **状态**: 已修复
+- **位置**: `server/api/main_test.go`
+- **问题描述**: PR #49 的乐观锁更新写入内存中的 `session.Used`，因此 `used` 字段一旦连接即为 true 且不会回退。但缺少显式回归测试覆盖 connected→disconnected 和 connected→expired 两种转换路径。
+- **触发场景**: N/A（测试覆盖缺口，非运行时 Bug）
+- **风险**: **低**。逻辑正确但测试不完整
+- **修复方式**: 添加 `TestUpdatePairingSession_UsedFieldPreserved`（覆盖 connected→disconnected，原 REV35 测试迁移）和 `TestUpdatePairingSession_UsedFieldPreservedOnExpire`（覆盖 connected→expired）
+

@@ -470,18 +470,6 @@ func (s *Server) getPairingSessionDB(code string) (*PairingSession, error) {
 	return &session, nil
 }
 
-// updatePairingSessionDB updates a pairing session in the database.
-func (s *Server) updatePairingSessionDB(session *PairingSession) error {
-	_, err := s.db.Exec(
-		`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ?`,
-		session.Status,
-		session.EngineerID,
-		boolToInt(session.Used),
-		session.Code,
-	)
-	return err
-}
-
 // compareAndUpdatePairingSessionDB performs a conditional update on a pairing session,
 // ensuring the session hasn't been modified since it was read (optimistic locking).
 // Returns ErrConcurrentModification if the session was modified concurrently.
