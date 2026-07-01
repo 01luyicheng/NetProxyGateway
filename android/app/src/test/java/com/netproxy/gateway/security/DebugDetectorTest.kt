@@ -276,37 +276,24 @@ class DebugDetectorTest {
     }
 
     @Test
-    fun readDebugPropertyValue_returnsReflectionValue_whenReflectionSucceeds() {
+    fun readPropertyValueViaReflection_returnsValue_whenReflectionSucceeds() {
         FakeSystemProperties.values = mapOf("ro.debuggable" to "1")
 
-        val value = DebugDetector.readDebugPropertyValue(
+        val value = DebugDetector.readPropertyValueViaReflection(
             prop = "ro.debuggable",
-            getMethod = fakeGetMethod(),
-            processPropertyReader = { fail("反射成功时不应回退到 getprop 子进程"); null }
+            getMethod = fakeGetMethod()
         )
 
         assertEquals("1", value)
     }
 
     @Test
-    fun readDebugPropertyValue_fallsBackToProcessReader_whenReflectionThrows() {
+    fun readPropertyValueViaReflection_returnsNull_whenReflectionThrows() {
         ThrowingSystemProperties.throwOnKeys = setOf("ro.debuggable")
 
-        val value = DebugDetector.readDebugPropertyValue(
+        val value = DebugDetector.readPropertyValueViaReflection(
             prop = "ro.debuggable",
-            getMethod = throwingGetMethod(),
-            processPropertyReader = { "1" }
-        )
-
-        assertEquals("1", value)
-    }
-
-    @Test
-    fun readDebugPropertyValue_returnsNull_whenGetMethodIsNullAndProcessReaderReturnsNull() {
-        val value = DebugDetector.readDebugPropertyValue(
-            prop = "ro.debuggable",
-            getMethod = null,
-            processPropertyReader = { null }
+            getMethod = throwingGetMethod()
         )
 
         assertNull(value)
@@ -355,5 +342,42 @@ class DebugDetectorTest {
 
     private fun isWindows(): Boolean {
         return System.getProperty("os.name")?.contains("Windows", ignoreCase = true) == true
+    }
+
+    @Test
+    fun readPropertyValueViaReflection_returnsNull_whenGetMethodIsNull() {
+        val value = DebugDetector.readPropertyValueViaReflection(
+            prop = "ro.debuggable",
+            getMethod = null
+        )
+
+        assertNull(value)
+    }
+
+    @Test
+    fun resolveDebugPropertiesState_detectsDebugViaProcess_whenReflectionIsHooked() {
+        // Simulate Frida hook: reflection returns safe values, but getprop returns debug values
+        FakeSystemProperties.values = mapOf(
+            "ro.debuggable" to "0",   // Hooked: returns "0" (safe)
+            "ro.secure" to "1",        // Hooked: returns "1" (safe)
+            "persist.sys.usb.config" to "mtp"  // Hooked: returns "mtp" (safe)
+        )
+
+        var processCalls = mutableListOf<String>()
+        val result = DebugDetector.resolveDebugPropertiesState(
+            getMethodProvider = { fakeGetMethod() },
+            processPropertyReader = { prop ->
+                processCalls.add(prop)
+                when (prop) {
+                    "ro.debuggable" -> "1"   // Real value from getprop
+                    "ro.secure" -> "1"
+                    "persist.sys.usb.config" -> "mtp"
+                    else -> null
+                }
+            }
+        )
+
+        assertTrue(result)
+        assertTrue(processCalls.contains("ro.debuggable"))
     }
 }

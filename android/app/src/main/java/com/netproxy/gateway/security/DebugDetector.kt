@@ -7,11 +7,7 @@ import java.io.File
 import java.io.FileReader
 import java.io.InputStreamReader
 import java.lang.reflect.Method
-import java.util.concurrent.Callable
-import java.util.concurrent.ExecutionException
-import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.TimeoutException
 
 /**
  * 反调试检测器
@@ -290,35 +286,44 @@ object DebugDetector {
         }
 
         for (prop in debugProps) {
-            val value = readDebugPropertyValue(prop, getMethod, processPropertyReader)
-            if (value != null) {
-                when (prop) {
-                    "ro.debuggable" -> if (value == "1") return true
-                    "ro.secure" -> if (value == "0") return true
-                    "persist.sys.usb.config" -> if (value.contains("adb")) return true
-                }
+            // Always check both reflection and getprop for security-critical properties.
+            // If either source detects a debug indicator, treat it as true.
+            // This prevents Frida hooking of SystemProperties.get() from bypassing detection,
+            // since getprop serves as an independent verification path.
+            val reflectionValue = readPropertyValueViaReflection(prop, getMethod)
+            val processValue = try {
+                processPropertyReader(prop)
+            } catch (_: Exception) {
+                null
             }
+
+            val isDebugViaReflection = isDebugPropertyValue(prop, reflectionValue)
+            val isDebugViaProcess = isDebugPropertyValue(prop, processValue)
+
+            if (isDebugViaReflection || isDebugViaProcess) return true
         }
 
         return false
     }
 
-    internal fun readDebugPropertyValue(
-        prop: String,
-        getMethod: Method?,
-        processPropertyReader: (String) -> String?
-    ): String? {
-        if (getMethod != null) {
-            try {
-                val value = getMethod.invoke(null, prop) as? String
-                if (value != null) return value
-            } catch (e: Exception) {
-                // 反射失败，回退到 getprop 子进程
-            }
+    private fun isDebugPropertyValue(prop: String, value: String?): Boolean {
+        if (value == null) return false
+        return when (prop) {
+            "ro.debuggable" -> value == "1"
+            "ro.secure" -> value == "0"
+            "persist.sys.usb.config" -> value.contains("adb")
+            else -> false
         }
+    }
+
+    internal fun readPropertyValueViaReflection(
+        prop: String,
+        getMethod: Method?
+    ): String? {
+        if (getMethod == null) return null
         return try {
-            processPropertyReader(prop)
-        } catch (e: Exception) {
+            getMethod.invoke(null, prop) as? String
+        } catch (_: Exception) {
             null
         }
     }
@@ -345,31 +350,33 @@ object DebugDetector {
             val process = ProcessBuilder(command)
                 .redirectErrorStream(true)
                 .start()
-            val executor = Executors.newSingleThreadExecutor { r ->
-                Thread(r, "process-reader").apply { isDaemon = true }
-            }
             try {
-                val future = executor.submit(Callable<String?> {
-                    BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8)).use { reader ->
-                        reader.readLine()
+                // Start a reader thread to avoid readLine() blocking indefinitely.
+                // If the process hangs without producing output, readLine() would block
+                // forever and the waitFor(timeout) below would never be reached.
+                var output: String? = null
+                val readerThread = Thread {
+                    try {
+                        BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8)).use { reader ->
+                            output = reader.readLine()
+                        }
+                    } catch (_: Exception) {
                     }
-                })
-
-                val value = try {
-                    future.get(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                } catch (e: TimeoutException) {
-                    future.cancel(true)
-                    return null
-                } catch (e: ExecutionException) {
-                    null
                 }
+                readerThread.start()
 
-                // 读取成功后等待子进程结束，避免产生僵尸进程
-                process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                value
+                val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                if (!finished) {
+                    // Process timed out; destroy and return null
+                    process.destroyForcibly()
+                    readerThread.interrupt()
+                    return null
+                }
+                // Process exited; wait briefly for reader thread to finish
+                readerThread.join(PROCESS_TIMEOUT_SECONDS * 1000)
+                output
             } finally {
-                executor.shutdownNow()
-                process.destroyForcibly()
+                process.destroyForcibly().waitFor(PROCESS_TIMEOUT_SECONDS.toLong(), TimeUnit.SECONDS)
             }
         } catch (e: Exception) {
             null

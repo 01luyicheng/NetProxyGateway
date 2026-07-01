@@ -1771,3 +1771,79 @@ func TestGetPairingSession_ConcurrentModification_RefreshedToUnexpired(t *testin
 		t.Fatalf("response mismatch: got %+v, want %+v", got, refreshedSession)
 	}
 }
+
+// TestCreateSessionToken_RejectsExpiredSession verifies that createSessionToken
+// rejects pairing sessions whose ExpiresAt has passed, even if the session
+// status is still "connected". (REV43)
+func TestCreateSessionToken_RejectsExpiredSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	// Insert a session that is already expired but still "connected"
+	if err := server.createPairingSessionDB(&PairingSession{
+		Code:       "exp-1",
+		DeviceID:   "device-exp",
+		Status:     "connected",
+		EngineerID: "engineer-1",
+		Used:       true,
+		CreatedAt:  time.Now().Add(-2 * PairingCodeTTL),
+		ExpiresAt:  time.Now().Add(-1 * time.Second), // already expired
+	}); err != nil {
+		t.Fatalf("failed to create expired session: %v", err)
+	}
+
+	router := gin.New()
+	router.POST("/session/token", func(c *gin.Context) {
+		c.Set("engineer_id", "engineer-1")
+		server.createSessionToken(c)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/session/token", strings.NewReader(`{"code":"exp-1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for expired session, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+// TestGetPairingSession_ConcurrentModificationReturns410 verifies that
+// getPairingSession returns 410 Gone (not 200) when a session is expired
+// but marking it as expired fails due to concurrent modification. (REV44)
+func TestGetPairingSession_ConcurrentModificationReturns410(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+
+	// Create a session that is expired but still "connected" (simulate race where
+	// another request set status=connected after the session expired)
+	if err := server.createPairingSessionDB(&PairingSession{
+		Code:       "concurrent-exp",
+		DeviceID:   "device-ce",
+		Status:     "connected",
+		EngineerID: "other-engineer",
+		Used:       false,
+		CreatedAt:  time.Now().Add(-2 * PairingCodeTTL),
+		ExpiresAt:  time.Now().Add(-1 * time.Second), // already expired
+	}); err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+
+	router := gin.New()
+	router.GET("/pair/:code", func(c *gin.Context) {
+		server.getPairingSession(c)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/pair/concurrent-exp", nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	// Should return 410 Gone, not 200 OK, even though the session status
+	// is "connected" — the session is expired by ExpiresAt.
+	// The optimistic lock in markSessionExpired will fail (status != pending),
+	// but we should still return 410, not 200.
+	if recorder.Code != http.StatusGone {
+		t.Fatalf("expected 410 Gone for expired session with concurrent modification, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
