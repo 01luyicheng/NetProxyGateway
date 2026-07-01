@@ -256,6 +256,13 @@ object DebugDetector {
 
     /**
      * 检查调试属性
+     *
+     * 优先通过反射调用 `android.os.SystemProperties.get` 读取属性以获得更好的性能。
+     * 注意：`SystemProperties` 属于 `@hide` API，在 Android 9 (API 28) 及以上版本可能
+     * 受 Hidden API 限制（greylist/blacklist）影响，反射获取类/方法或调用 invoke 时可能
+     * 抛出异常或被系统阻断，且该限制策略可能随 targetSdk 提升或系统版本演进而更严格。
+     * 因此当反射不可用时（类/方法获取失败，或 invoke 被阻断），会针对该属性回退到原有的
+     * `getprop` 子进程读取方式，以保证在反射受限的设备/版本上检测逻辑依然可用。
      */
     fun checkDebugProperties(): Boolean {
         val debugProps = arrayOf(
@@ -264,28 +271,56 @@ object DebugDetector {
             "persist.sys.usb.config"
         )
 
-        try {
-            val systemPropertiesClass = Class.forName("android.os.SystemProperties")
-            val getMethod = systemPropertiesClass.getMethod("get", String::class.java)
+        val getMethod = try {
+            Class.forName("android.os.SystemProperties").getMethod("get", String::class.java)
+        } catch (e: Exception) {
+            // 反射类/方法获取失败（如 Hidden API 限制），后续逐项回退到 getprop 子进程
+            null
+        }
 
-            for (prop in debugProps) {
+        for (prop in debugProps) {
+            val value = if (getMethod != null) {
                 try {
-                    val value = getMethod.invoke(null, prop) as? String
-                    if (value != null) {
-                        when (prop) {
-                            "ro.debuggable" -> if (value == "1") return true
-                            "ro.secure" -> if (value == "0") return true
-                            "persist.sys.usb.config" -> if (value.contains("adb")) return true
-                        }
-                    }
+                    getMethod.invoke(null, prop) as? String
                 } catch (e: Exception) {
-                    // 忽略异常
+                    // 反射调用被阻断，回退到 getprop 子进程兜底
+                    readPropertyViaProcess(prop)
+                }
+            } else {
+                readPropertyViaProcess(prop)
+            }
+
+            if (value != null) {
+                when (prop) {
+                    "ro.debuggable" -> if (value == "1") return true
+                    "ro.secure" -> if (value == "0") return true
+                    "persist.sys.usb.config" -> if (value.contains("adb")) return true
                 }
             }
-        } catch (e: Exception) {
-            // 忽略反射异常
         }
         return false
+    }
+
+    /**
+     * 通过 `getprop` 子进程读取系统属性（反射方案受限时的兜底实现）
+     */
+    private fun readPropertyViaProcess(prop: String): String? {
+        return try {
+            val process = ProcessBuilder("getprop", prop)
+                .redirectErrorStream(true)
+                .start()
+            try {
+                BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8)).use { reader ->
+                    val value = reader.readLine()
+                    val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                    if (!finished) null else value
+                }
+            } finally {
+                process.destroyForcibly()
+            }
+        } catch (e: Exception) {
+            null
+        }
     }
 
     /**
