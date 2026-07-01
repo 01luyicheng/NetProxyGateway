@@ -434,7 +434,7 @@
 - **风险**: 中。输入验证缺失，超长输入可能导致显示异常
 - **修复难度**: 低。添加 `keyboardOptions` 和 `onValueChange` 过滤
 
-### C56: MainScreen审计日志滚动位置丢失
+### C56: MainScreen审计日志滚动位置丢失 [已修复]
 - **提交哈希**: 1f9acee
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt` (L286-L333)
 - **问题描述**: `AuditLogsScreen` 的 `LazyColumn` 未使用 `rememberLazyListState()`，配置变更后滚动位置丢失

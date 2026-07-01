@@ -13,6 +13,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
@@ -352,8 +353,10 @@ private fun AuditLogsScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         } else {
+            val listState = rememberLazyListState()
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
+                state = listState,
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(
@@ -529,7 +532,6 @@ fun PairingSection(
                 modifier = Modifier.fillMaxWidth(),
                 enabled = !uiState.isPairingInProgress,
                 singleLine = true,
-                placeholder = { Text(stringResource(R.string.pairing_hint)) },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done)
             )
 
