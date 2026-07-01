@@ -520,7 +520,7 @@ fun PairingSection(
             OutlinedTextField(
                 value = pairingCode,
                 onValueChange = { newValue ->
-                    if (newValue.length <= 6 && newValue.all { it.isDigit() }) {
+                    if (newValue.length <= 6 && newValue.all { it in '0'..'9' }) {
                         pairingCode = newValue
                     }
                 },
