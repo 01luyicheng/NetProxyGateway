@@ -318,7 +318,10 @@ class MqttConnectionManager @Inject constructor(
                 validateBrokerUrl(brokerUrl)
                 val clientId = "${CLIENT_ID}_$deviceId"
 
-                // 在同一个同步块内完成"generation 校验 + 交换客户端引用"，避免并发 connect() 覆盖 mqttClient
+                // 在同一个同步块内完成"generation 校验 + 交换客户端引用 + 状态更新"，
+                // 避免并发 connect()/disconnect() 覆盖 mqttClient 或状态。
+                // 状态更新必须在 synchronized 块内，否则 disconnect() 可能在状态设置前
+                // 将状态设为 Disconnected，随后被 Connecting 覆盖，导致状态机永久卡死。
                 val (oldClient, createdClient) = synchronized(this@MqttConnectionManager) {
                     if (!shouldStayConnected || generation != connectionGeneration.get()) {
                         null
@@ -326,13 +329,11 @@ class MqttConnectionManager @Inject constructor(
                         val created = MqttClient(brokerUrl, clientId, MemoryPersistence())
                         val old = mqttClient
                         mqttClient = created
+                        _connectionState.value = MqttConnectionState.Connecting
+                        _diagnostics.update { it.copy(connectionGeneration = generation) }
                         old to created
                     }
                 } ?: return@launch
-
-                // 在 generation 校验通过后更新状态，避免竞态条件
-                _connectionState.value = MqttConnectionState.Connecting
-                _diagnostics.update { it.copy(connectionGeneration = generation) }
 
                 localClient = createdClient
 

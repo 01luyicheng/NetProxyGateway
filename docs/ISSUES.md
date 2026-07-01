@@ -1436,7 +1436,7 @@
 - **提交哈希**: `97b4a3c`（审查时发现；问题为既有缺陷，非该提交引入）
 - **位置**: `server/api/main.go` (`updatePairingSession`, L888-L968; `updatePairingSessionDB`, L472-L481; `markSessionExpired`, L510-L519)
 - **编号说明**: 原编号为 REV25，因与 PR #35（OPEN，占用 REV25-REV41）冲突，重新编号为 REV42。
-- **关联/替代关系**: 本修复与 PR #35 的 REV29 针对同一个 `updatePairingSession` TOCTOU 竞态问题。本修复是更完整的超集（新增 `status` 条件、`markSessionExpired` 保护、独立的 `ErrConcurrentModification` 错误类型），**将替代/覆盖 REV29**；PR #35 合入时应移除或标注 REV29 为重复项。
+- **关联/替代关系**: 本修复与 PR #35 的 REV29 针对同一个 `updatePairingSession` TOCTOU 竞态问题。本修复是更完整的超集（新增 `status` 条件、`markSessionExpired` 保护、独立的 `ErrConcurrentModification` 错误类型），**已替代/覆盖 REV29**；PR #35 合入时已移除 REV29 的重复实现。
 - **问题描述**: `updatePairingSession` 使用 Read-Validate-Modify-Write 模式，但在 Read 和 Write 之间没有乐观锁保护。`updatePairingSessionDB` 使用简单的 `UPDATE ... WHERE code = ?`，不检查 session 的 status 或 engineer_id 是否在读取后被修改。两个并发请求对同一 pairing code 执行时，可能都读到相同的过期数据（如 `status=pending, engineerID=""`），都通过验证检查，第二个写入覆盖第一个，导致会话被分配给错误的工程师。
 - **触发场景**: (1) 配对码显示在设备屏幕上；(2) 工程师 A 和工程师 B 同时看到并尝试配对；(3) 两个请求同时到达服务器，都读到 `status=pending, engineerID=""`；(4) 两个请求都通过 `engineerID != "" && engineerID != myID` 检查（因为 `engineerID == ""`）；(5) 请求 A 写入 `(status=connected, engineerID=A)`；(6) 请求 B 写入 `(status=connected, engineerID=B)`，**覆盖请求 A 的结果**；(7) 工程师 A 的后续操作（如 `createSessionToken`）因 `engineerID` 不匹配而返回 403。
 - **风险**: **高**。会话劫持：错误的工程师获得配对会话，原工程师的操作失败。安全漏洞：未经授权的工程师可能获得对设备的远程访问权限。
@@ -1449,4 +1449,54 @@
   5. 检测到并发修改时返回 HTTP 409 Conflict，客户端可重试。
 - **验证**: `TestCompareAndUpdatePairingSessionDB_ConcurrentModification`、`TestCompareAndUpdatePairingSessionDB_SuccessWhenNoConflict`、`TestCompareAndUpdatePairingSessionDB_StatusChangedConcurrently`、`TestIsValidSessionTransition`、`TestGetEngineerID`、`TestUpdatePairingSession_ConcurrentModificationReturns409` 全部通过。
 
+## 提交后正确性检查发现（2026-06-22）
+
+### REV25: MqttConnectionManager `_connectionState.value = Connecting` 竞态导致状态机永久卡死 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 低
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (connect LAZY 协程, L334)
+- **问题描述**: `connect()` 的 LAZY 协程在 synchronized 块外设置 `_connectionState.value = Connecting`。如果 `disconnect()` 在 LAZY 协程退出 synchronized 块后、设置状态前执行，`disconnect()` 将状态设为 `Disconnected`，随后 LAZY 协程覆盖为 `Connecting`。由于后续 generation 检查不匹配时不会修正状态，状态机永久卡死在 `Connecting`。
+- **触发场景**: 用户调用 `connect()` → LAZY 协程通过 generation 检查退出 synchronized → 另一线程调用 `disconnect()` 设置 `Disconnected` → LAZY 协程设置 `Connecting` 覆盖 `Disconnected` → 状态永久卡死
+- **风险**: **高**。UI 永久显示"连接中"，用户无法操作
+- **修复方式**: 将 `_connectionState.value = Connecting` 和 `_diagnostics.update` 移入 synchronized 块内，与 generation 校验和客户端交换在同一原子操作中完成
+
+### REV26: server/tunnel Register/Unregister 未检查 stopped 导致 WaitGroup 重用 panic [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 低
+- **位置**: `server/tunnel/main.go` (Register L284, Unregister L312)
+- **问题描述**: `Register` 和 `Unregister` 在调用 `m.wg.Add(1)` 前未检查 `m.stopped`。`Stop()` 调用 `wg.Wait()` 后计数器归零，如果 `handleTunnel` 的 defer 随后调用 `Unregister`，`m.wg.Add(1)` 会触发 `panic: sync: WaitGroup is reused before previous Wait has returned`。`notifyDeviceStatus` 入口已有 `m.stopped` 检查（N82 修复），但 `wg.Add(1)` 在 goroutine 启动之前调用，不受其保护。
+- **风险**: **高**。服务关闭时可能 panic
+- **修复方式**: 在 `Register` 和 `Unregister` 中，在 `m.wg.Add(1)` 前获取 `m.stopMu` 并检查 `m.stopped`，若已停止则跳过 `m.wg.Add(1)` 和 goroutine 启动
+
+### REV27: server/tunnel Register/Unregister 在 m.mu 锁内调用 tunnel.Close() 执行阻塞 I/O [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 中
+- **位置**: `server/tunnel/main.go` (Register L278, Unregister L300)
+- **问题描述**: `Register` 和 `Unregister` 在持有 `m.mu` 锁时调用 `tunnel.Close()`。`Close()` 需要获取 `connMu`，如果 `sendLoop` 正在持有 `connMu` 执行 `WriteMessage`（最多阻塞 10 秒），`m.mu` 会被间接阻塞，导致所有设备的 `Get`/`Register`/`Unregister`/`handleStats` 操作全部阻塞。与 N27（Socks5ConnectionPool 同类问题，已修复）和 `cleanupDeadTunnelsOnce`（已正确将 Close() 移到锁外）模式一致。
+- **风险**: **高**。单设备网络异常可导致全服务阻塞（DoS）
+- **修复方式**: 仿照 `cleanupDeadTunnelsOnce` 模式——锁内仅做 map 删除和收集待关闭 tunnel，锁外再调用 `Close()`
+
+### REV28: server/api GET /api/pair/:code 无认证可枚举配对码 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 低
+- **位置**: `server/api/main.go` (L1182 路由注册)
+- **问题描述**: `GET /api/pair/:code` 路由没有认证中间件，也无速率限制。攻击者无需任何凭据即可遍历 6 位配对码（100 万种可能），获取活跃配对会话的完整信息（engineer_id、device_id、status、expires_at 等）。对比同组 POST 和 PUT 路由均有 `authMiddleware` 保护，GET 路由是明显的授权遗漏。`internalOrUserAuthMiddleware` 已定义且经过测试，但未在生产路由中使用。
+- **风险**: **高**。配对码枚举 + 信息泄露，可配合 REV29 劫持会话
+- **修复方式**: 将 `GET /api/pair/:code` 路由的中间件从无改为 `internalOrUserAuthMiddleware()`，支持 Internal API Key 或 JWT Bearer Token 双模式认证
+
+### REV29: server/api updatePairingSession TOCTOU 竞态可致会话劫持 [已修复]
+- **修复状态**: 已修复（由 PR #49 / REV42 更完整的乐观锁覆盖；PR #35 中的原子 UPDATE 代码已移除）
+- **修复难度**: 高
+- **位置**: `server/api/main.go` (`updatePairingSession`, L888-L968)
+- **问题描述**: `updatePairingSession` 的 read-check-update 是非原子的两步操作。两个工程师可同时读取 `EngineerID == ""` 的 session，都通过授权检查，然后先后覆写，后者覆盖前者，导致设备配对到非预期工程师。SQLite WAL 模式不解决应用层 TOCTOU。
+- **风险**: **高**。设备被配对到错误工程师，远程协助场景下安全风险严重
+- **修复方式**: 由 PR #49 的 `compareAndUpdatePairingSessionDB` 乐观锁实现覆盖；PR #35 原先的原子条件 UPDATE 代码已移除，避免重复/冲突实现。
+
+### REV30: SOCKS5 代理域名连接绕过 IP 验证（安全漏洞） [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 低
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt` (L129-134)
+- **问题描述**: `validateTargetAddress` 对域名（ATYP=0x03）无条件返回 `true`，完全绕过 IP 验证。IPv4 地址仅允许 RFC1918 私有地址，但域名连接可解析到任何公网 IP，违反"仅允许访问客户内网"的安全策略。代码注释声称"连接到本地 SOCKS5 服务器"但实际 `NettyOutboundConnector` 直接连接目标地址，注释与架构不符。N30 描述的修复（拒绝域名）在当前代码中未体现。
+- **风险**: **高**。工程师可通过域名访问公网资源，完全绕过私有网络访问策略
+- **修复方式**: 对域名目标返回 `false`，拒绝所有域名连接，确保安全策略一致。更新注释说明拒绝原因
 
