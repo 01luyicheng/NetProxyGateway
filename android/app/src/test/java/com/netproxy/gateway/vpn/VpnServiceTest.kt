@@ -15,8 +15,15 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.io.File
+import java.io.FileOutputStream
+import java.net.InetAddress
+import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -874,10 +881,286 @@ class VpnServiceTest {
         assertFalse(stats1 == stats3)
     }
 
-    // C76: VpnService 回包缓冲区缺少分配行为回归测试
+    // ==================== C76: processTcpReturn 回归测试 ====================
+    // 使用真实的本地回环 socket 对（而非仅断言 ByteArray 大小）来实际调用
+    // ConnectionSessionManager.processTcpReturn，覆盖数据读取、无数据时的
+    // soTimeout 非阻塞语义边界，以及高并发下每次调用独立分配缓冲区、互不干扰的行为。
+
+    /**
+     * 创建一对已连接的本地回环 socket：[Pair.first] 为客户端侧（供
+     * PooledSocks5Connection 使用），[Pair.second] 为服务端侧（模拟上游，用于写入
+     * 待回传的数据）。调用方负责关闭返回的两个 socket 及底层 ServerSocket。
+     */
+    private fun createLoopbackSocketPair(): Triple<ServerSocket, Socket, Socket> {
+        val serverSocket = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
+        val clientSocket = Socket("127.0.0.1", serverSocket.localPort)
+        val acceptedSocket = serverSocket.accept()
+        return Triple(serverSocket, clientSocket, acceptedSocket)
+    }
+
+    private fun newSessionManagerWithFileSink(
+        activeConnections: ConcurrentHashMap<String, ConnectionSession>
+    ): Pair<ConnectionSessionManager, File> {
+        val manager = ConnectionSessionManager(
+            packetProcessor = VpnPacketProcessor(),
+            activeConnections = activeConnections
+        )
+        val tempFile = File.createTempFile("vpn_return_test", ".bin")
+        tempFile.deleteOnExit()
+        manager.vpnOutputStream = FileOutputStream(tempFile)
+        return manager to tempFile
+    }
+
     @Test
-    fun processTcpReturn_memoryAllocation_doesNotLeakAndHandlesAvailableCorrectly() {
-        val buffer = ByteArray(32767)
-        org.junit.Assert.assertEquals(32767, buffer.size)
+    fun processTcpReturn_readsDataFromSocket_constructsPacketAndInjectsToVpn() {
+        val (serverSocket, clientSocket, acceptedSocket) = createLoopbackSocketPair()
+        try {
+            val pooledConnection = PooledSocks5Connection(
+                socket = clientSocket,
+                destinationIp = "192.168.1.1",
+                destinationPort = 443
+            )
+            val session = ConnectionSession(
+                srcIp = "10.0.0.2",
+                srcPort = 12345,
+                dstIp = "192.168.1.1",
+                dstPort = 443,
+                protocol = 6,
+                pooledConnection = pooledConnection,
+                virtualSrcIp = "10.0.0.1"
+            )
+            val sessionKey = "10.0.0.2:12345-192.168.1.1:443"
+            val activeConnections = ConcurrentHashMap<String, ConnectionSession>()
+            activeConnections[sessionKey] = session
+
+            val (manager, tempFile) = newSessionManagerWithFileSink(activeConnections)
+            try {
+                val payload = "hello-from-upstream".toByteArray()
+                acceptedSocket.getOutputStream().apply {
+                    write(payload)
+                    flush()
+                }
+
+                // 等待数据通过回环网络实际到达，避免读端偶发看到空数据
+                val processed = awaitTrue(timeoutMs = 2000) {
+                    manager.processTcpReturn(session, sessionKey)
+                }
+
+                assertTrue("Should process the data available on the socket", processed)
+                assertEquals(payload.size.toLong(), session.ackNum)
+                assertEquals(payload.size.toLong(), session.seqNum)
+
+                manager.vpnOutputStream?.flush()
+                val written = tempFile.readBytes()
+                assertEquals(
+                    "Injected packet should contain IP+TCP headers (40 bytes) plus the payload",
+                    40 + payload.size,
+                    written.size
+                )
+
+                // TCP 源端口字段（回包中为原始目标端口）应等于 session.dstPort
+                val tcpSrcPort = ((written[20].toInt() and 0xFF) shl 8) or (written[21].toInt() and 0xFF)
+                assertEquals(443, tcpSrcPort)
+            } finally {
+                manager.vpnOutputStream?.close()
+                tempFile.delete()
+            }
+        } finally {
+            acceptedSocket.close()
+            clientSocket.close()
+            serverSocket.close()
+        }
+    }
+
+    @Test
+    fun processTcpReturn_noDataAvailable_returnsFalseAndDoesNotAdvanceSequence() {
+        val (serverSocket, clientSocket, acceptedSocket) = createLoopbackSocketPair()
+        try {
+            val pooledConnection = PooledSocks5Connection(
+                socket = clientSocket,
+                destinationIp = "192.168.1.1",
+                destinationPort = 443
+            )
+            val session = ConnectionSession(
+                srcIp = "10.0.0.2",
+                srcPort = 12346,
+                dstIp = "192.168.1.1",
+                dstPort = 443,
+                protocol = 6,
+                pooledConnection = pooledConnection,
+                virtualSrcIp = "10.0.0.1"
+            )
+            val sessionKey = "10.0.0.2:12346-192.168.1.1:443"
+            val activeConnections = ConcurrentHashMap<String, ConnectionSession>()
+            activeConnections[sessionKey] = session
+
+            val (manager, tempFile) = newSessionManagerWithFileSink(activeConnections)
+            try {
+                // 没有对端写入任何数据：soTimeout=1 的非阻塞读取应超时，
+                // 且由于没有待发送的控制标志，应返回 false 且不推进 seq/ack。
+                val processed = manager.processTcpReturn(session, sessionKey)
+
+                assertFalse("No data and no pending control flags should not be processed", processed)
+                assertEquals(0L, session.ackNum)
+                assertEquals(0L, session.seqNum)
+                assertTrue("Session should remain valid/active after a timeout read", pooledConnection.isValid())
+            } finally {
+                manager.vpnOutputStream?.close()
+                tempFile.delete()
+            }
+        } finally {
+            acceptedSocket.close()
+            clientSocket.close()
+            serverSocket.close()
+        }
+    }
+
+    @Test
+    fun processTcpReturn_noDataButPendingControlFlags_injectsZeroLengthControlPacket() {
+        val (serverSocket, clientSocket, acceptedSocket) = createLoopbackSocketPair()
+        try {
+            val pooledConnection = PooledSocks5Connection(
+                socket = clientSocket,
+                destinationIp = "192.168.1.1",
+                destinationPort = 443
+            )
+            val session = ConnectionSession(
+                srcIp = "10.0.0.2",
+                srcPort = 12347,
+                dstIp = "192.168.1.1",
+                dstPort = 443,
+                protocol = 6,
+                pooledConnection = pooledConnection,
+                virtualSrcIp = "10.0.0.1",
+                tcpState = TcpState.FIN_WAIT,
+                pendingControlFlags = TcpFlags.FIN_ACK
+            )
+            val sessionKey = "10.0.0.2:12347-192.168.1.1:443"
+            val activeConnections = ConcurrentHashMap<String, ConnectionSession>()
+            activeConnections[sessionKey] = session
+
+            val (manager, tempFile) = newSessionManagerWithFileSink(activeConnections)
+            try {
+                val processed = manager.processTcpReturn(session, sessionKey)
+
+                assertTrue("A pending control flag should still trigger a 0-length packet injection", processed)
+                assertEquals("Pending flags should be consumed", 0, session.pendingControlFlags)
+
+                manager.vpnOutputStream?.flush()
+                val written = tempFile.readBytes()
+                assertEquals("Control packet should be header-only (no payload)", 40, written.size)
+                assertEquals(TcpFlags.FIN_ACK, written[33].toInt() and 0xFF)
+            } finally {
+                manager.vpnOutputStream?.close()
+                tempFile.delete()
+            }
+        } finally {
+            acceptedSocket.close()
+            clientSocket.close()
+            serverSocket.close()
+        }
+    }
+
+    @Test
+    fun processTcpReturn_concurrentSessions_noCrossContaminationOrErrors() {
+        val threadCount = 16
+        val executor = Executors.newFixedThreadPool(threadCount)
+        val latch = CountDownLatch(threadCount)
+        val errorCount = AtomicInteger(0)
+
+        try {
+            for (i in 0 until threadCount) {
+                executor.submit {
+                    var serverSocket: ServerSocket? = null
+                    var clientSocket: Socket? = null
+                    var acceptedSocket: Socket? = null
+                    var tempFile: File? = null
+                    try {
+                        val triple = createLoopbackSocketPair()
+                        serverSocket = triple.first
+                        clientSocket = triple.second
+                        acceptedSocket = triple.third
+
+                        val pooledConnection = PooledSocks5Connection(
+                            socket = clientSocket,
+                            destinationIp = "192.168.1.1",
+                            destinationPort = 443
+                        )
+                        val srcPort = 20000 + i
+                        val sessionKey = "10.0.0.2:$srcPort-192.168.1.1:443"
+                        val session = ConnectionSession(
+                            srcIp = "10.0.0.2",
+                            srcPort = srcPort,
+                            dstIp = "192.168.1.1",
+                            dstPort = 443,
+                            protocol = 6,
+                            pooledConnection = pooledConnection,
+                            virtualSrcIp = "10.0.0.1"
+                        )
+                        val activeConnections = ConcurrentHashMap<String, ConnectionSession>()
+                        activeConnections[sessionKey] = session
+
+                        val (manager, file) = newSessionManagerWithFileSink(activeConnections)
+                        tempFile = file
+
+                        val payload = "payload-$i".toByteArray()
+                        acceptedSocket.getOutputStream().apply {
+                            write(payload)
+                            flush()
+                        }
+
+                        val processed = awaitTrue(timeoutMs = 3000) {
+                            manager.processTcpReturn(session, sessionKey)
+                        }
+                        manager.vpnOutputStream?.flush()
+
+                        if (!processed) {
+                            errorCount.incrementAndGet()
+                        } else {
+                            val written = tempFile.readBytes()
+                            val tcpDstPort = ((written[22].toInt() and 0xFF) shl 8) or (written[23].toInt() and 0xFF)
+                            if (written.size != 40 + payload.size || tcpDstPort != srcPort) {
+                                // 缓冲区被跨线程污染或数据错乱
+                                errorCount.incrementAndGet()
+                            }
+                        }
+                        manager.vpnOutputStream?.close()
+                    } catch (e: Exception) {
+                        errorCount.incrementAndGet()
+                    } finally {
+                        tempFile?.delete()
+                        acceptedSocket?.close()
+                        clientSocket?.close()
+                        serverSocket?.close()
+                        latch.countDown()
+                    }
+                }
+            }
+
+            latch.await(30, TimeUnit.SECONDS)
+        } finally {
+            executor.shutdown()
+        }
+
+        assertEquals(
+            "Should be no errors or cross-session buffer contamination during concurrent processTcpReturn calls",
+            0,
+            errorCount.get()
+        )
+    }
+
+    /**
+     * 反复调用 [check] 直至其返回 true 或超时，用于容忍回环网络数据到达的轻微延迟，
+     * 而不依赖固定的 Thread.sleep 时长。
+     */
+    private fun awaitTrue(timeoutMs: Long, check: () -> Boolean): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var result = false
+        while (System.currentTimeMillis() < deadline) {
+            result = check()
+            if (result) break
+            Thread.sleep(5)
+        }
+        return result
     }
 }
