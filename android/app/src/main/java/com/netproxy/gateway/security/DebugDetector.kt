@@ -264,27 +264,62 @@ object DebugDetector {
             "persist.sys.usb.config"
         )
 
-        try {
-            val systemPropertiesClass = Class.forName("android.os.SystemProperties")
-            val getMethod = systemPropertiesClass.getMethod("get", String::class.java)
+        var reflectionFailed = false
+        var systemPropertiesClass: Class<*>? = null
+        var getMethod: java.lang.reflect.Method? = null
 
-            for (prop in debugProps) {
+        try {
+            systemPropertiesClass = Class.forName("android.os.SystemProperties")
+            getMethod = systemPropertiesClass.getMethod("get", String::class.java)
+        } catch (e: Exception) {
+            reflectionFailed = true
+        }
+
+        for (prop in debugProps) {
+            var value: String? = null
+            var propertyChecked = false
+
+            if (!reflectionFailed && getMethod != null) {
                 try {
-                    val value = getMethod.invoke(null, prop) as? String
-                    if (value != null) {
-                        when (prop) {
-                            "ro.debuggable" -> if (value == "1") return true
-                            "ro.secure" -> if (value == "0") return true
-                            "persist.sys.usb.config" -> if (value.contains("adb")) return true
-                        }
-                    }
+                    value = getMethod.invoke(null, prop) as? String
+                    propertyChecked = true
                 } catch (e: Exception) {
-                    // 忽略异常
+                    // 如果单条属性反射调用失败，不标记整个 reflectionFailed，让其走到后续判断（value = null）或尝试通过 process fallback
+                    // 但是按理说 invoke 本身被阻断的话，我们应该 fallback 到 process
+                    reflectionFailed = true
                 }
             }
-        } catch (e: Exception) {
-            // 忽略反射异常
+
+            if (reflectionFailed || !propertyChecked) {
+                try {
+                    val process = ProcessBuilder("getprop", prop)
+                        .redirectErrorStream(true)
+                        .start()
+                    try {
+                        BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8)).use { reader ->
+                            value = reader.readLine()
+                            val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                            if (!finished) {
+                                value = null
+                            }
+                        }
+                    } finally {
+                        process.destroyForcibly()
+                    }
+                } catch (e: Exception) {
+                    // 忽略进程异常
+                }
+            }
+
+            if (value != null) {
+                when (prop) {
+                    "ro.debuggable" -> if (value == "1") return true
+                    "ro.secure" -> if (value == "0") return true
+                    "persist.sys.usb.config" -> if (value!!.contains("adb")) return true
+                }
+            }
         }
+
         return false
     }
 
