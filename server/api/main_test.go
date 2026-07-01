@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1023,5 +1024,68 @@ func TestCompareAndUpdatePairingSessionDB_StatusChangedConcurrently(t *testing.T
 	}
 	if current.EngineerID != "other-engineer" {
 		t.Fatalf("session was overwritten: engineer_id = %q, want %q", current.EngineerID, "other-engineer")
+	}
+}
+
+// TestUpdatePairingSession_ConcurrentModificationReturns409 exercises the full
+// HTTP handler path (not just the DB layer) to verify that when two requests
+// race to claim the same pending pairing session, exactly one succeeds and
+// the loser observes a 409 Conflict rather than silently overwriting the
+// winner's claim (the TOCTOU race described in REV42).
+func TestUpdatePairingSession_ConcurrentModificationReturns409(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+
+	router := gin.New()
+	router.PUT("/pair/:code", func(c *gin.Context) {
+		c.Set("engineer_id", c.GetHeader("X-Engineer-ID"))
+		server.updatePairingSession(c)
+	})
+
+	sendConnectRequest := func(code, engineerID string) int {
+		req := httptest.NewRequest(http.MethodPut, "/pair/"+code, strings.NewReader(`{"status":"connected"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Engineer-ID", engineerID)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, req)
+		return recorder.Code
+	}
+
+	const trials = 30
+	sawConflict := false
+
+	for i := 0; i < trials; i++ {
+		pairingCode := fmt.Sprintf("race-%03d", i)
+		insertPendingPairingSession(t, server, pairingCode, "device-race")
+
+		var wg sync.WaitGroup
+		statusCodes := make([]int, 2)
+		wg.Add(2)
+		go func() { defer wg.Done(); statusCodes[0] = sendConnectRequest(pairingCode, "engineer-A") }()
+		go func() { defer wg.Done(); statusCodes[1] = sendConnectRequest(pairingCode, "engineer-B") }()
+		wg.Wait()
+
+		successCount := 0
+		for _, statusCode := range statusCodes {
+			switch statusCode {
+			case http.StatusOK:
+				successCount++
+			case http.StatusConflict:
+				sawConflict = true
+			case http.StatusForbidden:
+				// Acceptable: this request only read the session after the
+				// other had already committed its update.
+			default:
+				t.Fatalf("trial %d: unexpected status code %d (codes=%v)", i, statusCode, statusCodes)
+			}
+		}
+		if successCount != 1 {
+			t.Fatalf("trial %d: expected exactly one concurrent request to succeed, got %d (codes=%v)", i, successCount, statusCodes)
+		}
+	}
+
+	if !sawConflict {
+		t.Fatalf("expected at least one of %d trials to trigger a 409 Conflict from concurrent modification", trials)
 	}
 }
