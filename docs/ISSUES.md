@@ -1425,4 +1425,28 @@
 - **修复难度**: 低
 - **修复方式**: 将 TLS 配置（`socketFactory`、`sslHostnameVerifier` 赋值）从 `apply` 块中移出，在 `connectOptions = options` 赋值之后再进行 TLS 配置。这样即使 TLS 配置抛出异常，`connectOptions` 已赋值，`finally` 块能正确清除 Paho 内部密码副本。
 
+---
+
+## 提交后审查发现（2026-07-01，审查提交 97b4a3c 和 abd1603）
+
+> 以下问题由多 subagent 对过去 24 小时内各分支的提交进行深度审查发现。
+
+### REV42: `updatePairingSession` TOCTOU 竞态条件导致会话劫持 [已修复]
+- **修复状态**: 已修复
+- **提交哈希**: `97b4a3c`（审查时发现；问题为既有缺陷，非该提交引入）
+- **位置**: `server/api/main.go` (`updatePairingSession`, L888-L968; `updatePairingSessionDB`, L472-L481; `markSessionExpired`, L510-L519)
+- **编号说明**: 原编号为 REV25，因与 PR #35（OPEN，占用 REV25-REV41）冲突，重新编号为 REV42。
+- **关联/替代关系**: 本修复与 PR #35 的 REV29 针对同一个 `updatePairingSession` TOCTOU 竞态问题。本修复是更完整的超集（新增 `status` 条件、`markSessionExpired` 保护、独立的 `ErrConcurrentModification` 错误类型），**将替代/覆盖 REV29**；PR #35 合入时应移除或标注 REV29 为重复项。
+- **问题描述**: `updatePairingSession` 使用 Read-Validate-Modify-Write 模式，但在 Read 和 Write 之间没有乐观锁保护。`updatePairingSessionDB` 使用简单的 `UPDATE ... WHERE code = ?`，不检查 session 的 status 或 engineer_id 是否在读取后被修改。两个并发请求对同一 pairing code 执行时，可能都读到相同的过期数据（如 `status=pending, engineerID=""`），都通过验证检查，第二个写入覆盖第一个，导致会话被分配给错误的工程师。
+- **触发场景**: (1) 配对码显示在设备屏幕上；(2) 工程师 A 和工程师 B 同时看到并尝试配对；(3) 两个请求同时到达服务器，都读到 `status=pending, engineerID=""`；(4) 两个请求都通过 `engineerID != "" && engineerID != myID` 检查（因为 `engineerID == ""`）；(5) 请求 A 写入 `(status=connected, engineerID=A)`；(6) 请求 B 写入 `(status=connected, engineerID=B)`，**覆盖请求 A 的结果**；(7) 工程师 A 的后续操作（如 `createSessionToken`）因 `engineerID` 不匹配而返回 403。
+- **风险**: **高**。会话劫持：错误的工程师获得配对会话，原工程师的操作失败。安全漏洞：未经授权的工程师可能获得对设备的远程访问权限。
+- **修复难度**: 中
+- **修复方式**:
+  1. 新增 `compareAndUpdatePairingSessionDB` 函数，在 UPDATE 的 WHERE 子句中加入 `status = ? AND engineer_id = ?` 条件，实现乐观锁。
+  2. 新增 `ErrConcurrentModification` 错误，当 `RowsAffected() == 0` 时返回。
+  3. `updatePairingSession` 在读取 session 后立即捕获 `expectedStatus` 和 `expectedEngineerID`，写入时使用 `compareAndUpdatePairingSessionDB`。
+  4. `markSessionExpired` 同样使用乐观锁，防止过期标记覆盖并发修改。
+  5. 检测到并发修改时返回 HTTP 409 Conflict，客户端可重试。
+- **验证**: `TestCompareAndUpdatePairingSessionDB_ConcurrentModification`、`TestCompareAndUpdatePairingSessionDB_SuccessWhenNoConflict`、`TestCompareAndUpdatePairingSessionDB_StatusChangedConcurrently`、`TestIsValidSessionTransition`、`TestGetEngineerID`、`TestUpdatePairingSession_ConcurrentModificationReturns409` 全部通过。
+
 

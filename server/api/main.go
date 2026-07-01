@@ -60,6 +60,7 @@ var (
 	ErrInternalAPIKeyNotConfigured        = errors.New("internal api key not configured")
 	ErrMissingInternalAPIKey              = errors.New("missing internal api key")
 	ErrInvalidInternalAPIKey              = errors.New("invalid internal api key")
+	ErrConcurrentModification            = errors.New("session was modified by another request, please retry")
 )
 
 var (
@@ -481,12 +482,39 @@ func (s *Server) updatePairingSessionDB(session *PairingSession) error {
 	return err
 }
 
+// compareAndUpdatePairingSessionDB performs a conditional update on a pairing session,
+// ensuring the session hasn't been modified since it was read (optimistic locking).
+// Returns ErrConcurrentModification if the session was modified concurrently.
+func (s *Server) compareAndUpdatePairingSessionDB(session *PairingSession, expectedStatus, expectedEngineerID string) error {
+	result, err := s.db.Exec(
+		`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ? AND status = ? AND engineer_id = ?`,
+		session.Status,
+		session.EngineerID,
+		boolToInt(session.Used),
+		session.Code,
+		expectedStatus,
+		expectedEngineerID,
+	)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return ErrConcurrentModification
+	}
+	return nil
+}
+
 // markSessionExpired marks a session as expired and updates the database.
+// Uses optimistic locking with expectedStatus and expectedEngineerID to prevent
+// overwriting concurrent modifications.
 // Returns an error if the database update fails.
-func (s *Server) markSessionExpired(session *PairingSession) error {
-	// Update in-memory state first, then persist to ensure consistency.
+func (s *Server) markSessionExpired(session *PairingSession, expectedStatus, expectedEngineerID string) error {
 	session.Status = "expired"
-	if err := s.updatePairingSessionDB(session); err != nil {
+	if err := s.compareAndUpdatePairingSessionDB(session, expectedStatus, expectedEngineerID); err != nil {
 		return err
 	}
 	return nil
@@ -820,7 +848,17 @@ func (s *Server) getPairingSession(c *gin.Context) {
 
 	// Check if expired
 	if time.Now().After(session.ExpiresAt) {
-		if err := s.markSessionExpired(session); err != nil {
+		if err := s.markSessionExpired(session, session.Status, session.EngineerID); err != nil {
+			if errors.Is(err, ErrConcurrentModification) {
+				// Session was modified concurrently; re-fetch to return current state
+				refreshed, refreshErr := s.getPairingSessionDB(code)
+				if refreshErr != nil || refreshed == nil {
+					c.JSON(http.StatusGone, gin.H{"error": ErrSessionExpired.Error()})
+					return
+				}
+				c.JSON(http.StatusOK, refreshed)
+				return
+			}
 			log.Printf("Failed to mark session %s as expired: %v", session.Code, err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateSession.Error()})
 			return
@@ -894,9 +932,17 @@ func (s *Server) updatePairingSession(c *gin.Context) {
 		return
 	}
 
+	// Capture expected values before any modification for optimistic locking.
+	expectedStatus := session.Status
+	expectedEngineerID := session.EngineerID
+
 	// Check if expired
 	if time.Now().After(session.ExpiresAt) {
-		if err := s.markSessionExpired(session); err != nil {
+		if err := s.markSessionExpired(session, expectedStatus, expectedEngineerID); err != nil {
+			if errors.Is(err, ErrConcurrentModification) {
+				c.JSON(http.StatusConflict, gin.H{"error": ErrConcurrentModification.Error()})
+				return
+			}
 			log.Printf("Failed to mark session %s as expired: %v", session.Code, err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateSession.Error()})
 			return
@@ -919,7 +965,11 @@ func (s *Server) updatePairingSession(c *gin.Context) {
 		session.Used = true
 	}
 
-	if err := s.updatePairingSessionDB(session); err != nil {
+	if err := s.compareAndUpdatePairingSessionDB(session, expectedStatus, expectedEngineerID); err != nil {
+		if errors.Is(err, ErrConcurrentModification) {
+			c.JSON(http.StatusConflict, gin.H{"error": ErrConcurrentModification.Error()})
+			return
+		}
 		log.Printf("Failed to update pairing session %s: %v", session.Code, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateSession.Error()})
 		return

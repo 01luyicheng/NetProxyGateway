@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -823,5 +824,268 @@ func TestNewHTTPServerSetsMaxHeaderBytes(t *testing.T) {
 
 	if server.MaxHeaderBytes != MaxHTTPHeaderBytes {
 		t.Fatalf("expected MaxHeaderBytes=%d, got %d", MaxHTTPHeaderBytes, server.MaxHeaderBytes)
+	}
+}
+
+func TestIsValidSessionTransition(t *testing.T) {
+	tests := []struct {
+		name      string
+		current   string
+		requested string
+		want      bool
+	}{
+		{"pending to connected", "pending", "connected", true},
+		{"pending to expired", "pending", "expired", true},
+		{"pending to disconnected", "pending", "disconnected", false},
+		{"connected to disconnected", "connected", "disconnected", true},
+		{"connected to expired", "connected", "expired", true},
+		{"connected to pending", "connected", "pending", false},
+		{"disconnected has no transitions", "disconnected", "connected", false},
+		{"disconnected to expired", "disconnected", "expired", false},
+		{"expired has no transitions", "expired", "pending", false},
+		{"expired to connected", "expired", "connected", false},
+		{"unknown current status", "unknown", "connected", false},
+		{"unknown requested status", "pending", "unknown", false},
+		{"empty current status", "", "connected", false},
+		{"same status pending", "pending", "pending", false},
+		{"same status connected", "connected", "connected", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isValidSessionTransition(tt.current, tt.requested)
+			if got != tt.want {
+				t.Errorf("isValidSessionTransition(%q, %q) = %v, want %v", tt.current, tt.requested, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetEngineerID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name          string
+		contextValue  interface{}
+		contextExists bool
+		wantID        string
+		wantErr       bool
+	}{
+		{"valid engineer_id", "engineer-1", true, "engineer-1", false},
+		{"missing engineer_id", nil, false, "", true},
+		{"empty engineer_id", "", true, "", true},
+		{"non-string engineer_id (int)", 12345, true, "", true},
+		{"non-string engineer_id (bool)", true, true, "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			if tt.contextExists {
+				c.Set("engineer_id", tt.contextValue)
+			}
+
+			gotID, err := getEngineerID(c)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("getEngineerID() expected error, got nil")
+				}
+				if !errors.Is(err, ErrMissingEngineer) {
+					t.Errorf("getEngineerID() error = %v, want ErrMissingEngineer", err)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("getEngineerID() unexpected error: %v", err)
+				}
+				if gotID != tt.wantID {
+					t.Errorf("getEngineerID() = %q, want %q", gotID, tt.wantID)
+				}
+			}
+		})
+	}
+}
+
+func TestCompareAndUpdatePairingSessionDB_ConcurrentModification(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	insertPendingPairingSession(t, server, "123456", "device-1")
+
+	// Read the session
+	session, err := server.getPairingSessionDB("123456")
+	if err != nil {
+		t.Fatalf("failed to get session: %v", err)
+	}
+
+	// Simulate a concurrent modification: directly update the session in DB
+	session.Status = "connected"
+	session.EngineerID = "other-engineer"
+	session.Used = true
+	if err := server.updatePairingSessionDB(session); err != nil {
+		t.Fatalf("failed to simulate concurrent modification: %v", err)
+	}
+
+	// Now try to update with stale expected values (pending, empty engineer)
+	staleSession := &PairingSession{
+		Code:       "123456",
+		DeviceID:   "device-1",
+		Status:     "connected",
+		EngineerID: "my-engineer",
+		Used:       true,
+		CreatedAt:  session.CreatedAt,
+		ExpiresAt:  session.ExpiresAt,
+	}
+
+	err = server.compareAndUpdatePairingSessionDB(staleSession, "pending", "")
+	if !errors.Is(err, ErrConcurrentModification) {
+		t.Fatalf("expected ErrConcurrentModification, got %v", err)
+	}
+
+	// Verify the session was NOT overwritten
+	current, err := server.getPairingSessionDB("123456")
+	if err != nil {
+		t.Fatalf("failed to get session after failed update: %v", err)
+	}
+	if current.EngineerID != "other-engineer" {
+		t.Fatalf("session was overwritten: engineer_id = %q, want %q", current.EngineerID, "other-engineer")
+	}
+}
+
+func TestCompareAndUpdatePairingSessionDB_SuccessWhenNoConflict(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	insertPendingPairingSession(t, server, "654321", "device-2")
+
+	// Read the session
+	session, err := server.getPairingSessionDB("654321")
+	if err != nil {
+		t.Fatalf("failed to get session: %v", err)
+	}
+
+	// Update with correct expected values
+	session.Status = "connected"
+	session.EngineerID = "engineer-1"
+	session.Used = true
+
+	err = server.compareAndUpdatePairingSessionDB(session, "pending", "")
+	if err != nil {
+		t.Fatalf("expected successful update, got error: %v", err)
+	}
+
+	// Verify the update took effect
+	current, err := server.getPairingSessionDB("654321")
+	if err != nil {
+		t.Fatalf("failed to get session after update: %v", err)
+	}
+	if current.Status != "connected" {
+		t.Fatalf("status = %q, want %q", current.Status, "connected")
+	}
+	if current.EngineerID != "engineer-1" {
+		t.Fatalf("engineer_id = %q, want %q", current.EngineerID, "engineer-1")
+	}
+}
+
+func TestCompareAndUpdatePairingSessionDB_StatusChangedConcurrently(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	insertPendingPairingSession(t, server, "111222", "device-3")
+
+	// Read the session (simulates handler reading stale data)
+	session, err := server.getPairingSessionDB("111222")
+	if err != nil {
+		t.Fatalf("failed to get session: %v", err)
+	}
+
+	// Simulate a concurrent modification: another engineer already connected
+	session.Status = "connected"
+	session.EngineerID = "other-engineer"
+	session.Used = true
+	if err := server.updatePairingSessionDB(session); err != nil {
+		t.Fatalf("failed to simulate concurrent modification: %v", err)
+	}
+
+	// Now try to update with stale expected values (pending, empty engineer)
+	// This simulates the TOCTOU race where both engineers read the same stale data
+	session.Status = "connected"
+	session.EngineerID = "my-engineer"
+
+	err = server.compareAndUpdatePairingSessionDB(session, "pending", "")
+	if !errors.Is(err, ErrConcurrentModification) {
+		t.Fatalf("expected ErrConcurrentModification, got %v", err)
+	}
+
+	// Verify the session was NOT overwritten - first engineer's claim is preserved
+	current, err := server.getPairingSessionDB("111222")
+	if err != nil {
+		t.Fatalf("failed to get session after failed update: %v", err)
+	}
+	if current.EngineerID != "other-engineer" {
+		t.Fatalf("session was overwritten: engineer_id = %q, want %q", current.EngineerID, "other-engineer")
+	}
+}
+
+// TestUpdatePairingSession_ConcurrentModificationReturns409 exercises the full
+// HTTP handler path (not just the DB layer) to verify that when two requests
+// race to claim the same pending pairing session, exactly one succeeds and
+// the loser observes a 409 Conflict rather than silently overwriting the
+// winner's claim (the TOCTOU race described in REV42).
+func TestUpdatePairingSession_ConcurrentModificationReturns409(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+
+	router := gin.New()
+	router.PUT("/pair/:code", func(c *gin.Context) {
+		c.Set("engineer_id", c.GetHeader("X-Engineer-ID"))
+		server.updatePairingSession(c)
+	})
+
+	sendConnectRequest := func(code, engineerID string) int {
+		req := httptest.NewRequest(http.MethodPut, "/pair/"+code, strings.NewReader(`{"status":"connected"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Engineer-ID", engineerID)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, req)
+		return recorder.Code
+	}
+
+	const trials = 30
+	sawConflict := false
+
+	for i := 0; i < trials; i++ {
+		pairingCode := fmt.Sprintf("race-%03d", i)
+		insertPendingPairingSession(t, server, pairingCode, "device-race")
+
+		var wg sync.WaitGroup
+		statusCodes := make([]int, 2)
+		wg.Add(2)
+		go func() { defer wg.Done(); statusCodes[0] = sendConnectRequest(pairingCode, "engineer-A") }()
+		go func() { defer wg.Done(); statusCodes[1] = sendConnectRequest(pairingCode, "engineer-B") }()
+		wg.Wait()
+
+		successCount := 0
+		for _, statusCode := range statusCodes {
+			switch statusCode {
+			case http.StatusOK:
+				successCount++
+			case http.StatusConflict:
+				sawConflict = true
+			case http.StatusForbidden:
+				// Acceptable: this request only read the session after the
+				// other had already committed its update.
+			default:
+				t.Fatalf("trial %d: unexpected status code %d (codes=%v)", i, statusCode, statusCodes)
+			}
+		}
+		if successCount != 1 {
+			t.Fatalf("trial %d: expected exactly one concurrent request to succeed, got %d (codes=%v)", i, successCount, statusCodes)
+		}
+	}
+
+	if !sawConflict {
+		t.Fatalf("expected at least one of %d trials to trigger a 409 Conflict from concurrent modification", trials)
 	}
 }
