@@ -600,10 +600,16 @@ class MqttConnectionManager @Inject constructor(
                 if (consecutiveFailures >= MAX_HEARTBEAT_FAILURES) {
                     logger.warn("Max heartbeat failures reached, triggering reconnect")
                     AppAuditLogStore.warn("MQTT", "Max heartbeat failures reached; reconnecting")
-                    if (shouldStayConnected && generation == connectionGeneration.get()) {
-                        _connectionState.value = MqttConnectionState.Error("Max heartbeat failures reached")
-                        onReconnectAttemptFailed()
-                        scheduleReconnect(deviceId, generation)
+                    // Move state update and reconnect scheduling into synchronized block
+                    // to prevent race with disconnect(): if disconnect() sets Disconnected
+                    // between the condition check and the state update, Error would override
+                    // Disconnected, causing state machine inconsistency (same class as REV25).
+                    synchronized(this@MqttConnectionManager) {
+                        if (shouldStayConnected && generation == connectionGeneration.get()) {
+                            _connectionState.value = MqttConnectionState.Error("Max heartbeat failures reached")
+                            onReconnectAttemptFailed()
+                            scheduleReconnect(deviceId, generation)
+                        }
                     }
                     break
                 }

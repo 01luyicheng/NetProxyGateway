@@ -1500,3 +1500,19 @@
 - **风险**: **高**。工程师可通过域名访问公网资源，完全绕过私有网络访问策略
 - **修复方式**: 对域名目标返回 `false`，拒绝所有域名连接，确保安全策略一致。更新注释说明拒绝原因
 
+### REV32: `startHeartbeat` 中 `_connectionState.value = Error` 在 synchronized 块外（竞态条件）
+- **状态**: 已修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L603-607)
+- **问题描述**: `startHeartbeat` 在检测到最大心跳失败次数后，在 synchronized 块外设置 `_connectionState.value = Error`。如果 `disconnect()` 在条件检查通过后、状态设置前执行，`disconnect()` 将状态设为 `Disconnected`，随后心跳协程覆盖为 `Error`，导致状态机不一致。与 REV25 同类竞态条件。
+- **触发场景**: (1) 心跳协程检测到 MAX_HEARTBEAT_FAILURES，条件 `shouldStayConnected && generation == connectionGeneration.get()` 为 true；(2) 另一线程调用 `disconnect()`，获取锁，设 `shouldStayConnected=false`，增 generation，设 `_connectionState = Disconnected`；(3) 心跳协程设置 `_connectionState = Error`，覆盖 `Disconnected`
+- **风险**: **高**。状态机不一致，UI 可能短暂显示错误信息后无法恢复
+- **修复方式**: 将状态更新和重连调度包裹在 `synchronized(this@MqttConnectionManager)` 块内，并在块内二次检查 `shouldStayConnected && generation == connectionGeneration.get()`
+
+### REV34: `cleanupDeadTunnelsOnce` 中 `wg.Add(1)` 缺少 stopMu 保护
+- **状态**: 已修复
+- **位置**: `server/tunnel/main.go` (L505)
+- **问题描述**: `cleanupDeadTunnelsOnce` 函数开头的 `m.stopped` 检查与循环内 `m.wg.Add(1)` 之间存在 TOCTOU 竞态窗口。在检查通过后、`m.wg.Add(1)` 调用前，`Stop()` 可能已完成 `wg.Wait()`，此时 `m.wg.Add(1)` 会触发 `panic: sync: WaitGroup is reused before previous Wait has returned`。与 REV26 同类问题。当前调用路径下风险低（`cleanupDeadTunnels` 自身被 wg 跟踪），但为防御性编程应保持一致。
+- **触发场景**: (1) `cleanupDeadTunnelsOnce` 检查 `m.stopped=false` 通过；(2) `Stop()` 获取 stopMu，设 `m.stopped=true`，调用 `wg.Wait()` 返回；(3) `cleanupDeadTunnelsOnce` 在循环中调用 `m.wg.Add(1)`，触发 WaitGroup 重用 panic
+- **风险**: **低**。当前调用路径下 wg 计数器始终 ≥ 1，但未来代码变更可能引入风险
+- **修复方式**: 在循环内 `m.wg.Add(1)` 前增加 `m.stopMu` 检查，与 Register/Unregister 保持一致
+
