@@ -1032,6 +1032,49 @@ func TestCompareAndUpdatePairingSessionDB_StatusChangedConcurrently(t *testing.T
 	}
 }
 
+func TestCompareAndUpdatePairingSessionDB_ExpiredSessionReturnsConcurrentModification(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+
+	// Insert an already-expired pending session.
+	expiredSession := &PairingSession{
+		Code:      "000000",
+		DeviceID:  "device-expired",
+		Status:    "pending",
+		CreatedAt: time.Now().Add(-2 * PairingCodeTTL),
+		ExpiresAt: time.Now().Add(-time.Minute),
+		Used:      false,
+	}
+	if err := server.createPairingSessionDB(expiredSession); err != nil {
+		t.Fatalf("failed to insert expired session: %v", err)
+	}
+
+	// Attempting to connect an expired session must fail with ErrConcurrentModification,
+	// even though status/engineer_id match, because expires_at is in the past.
+	err := server.compareAndUpdatePairingSessionDB(&PairingSession{
+		Code:       "000000",
+		DeviceID:   "device-expired",
+		Status:     "connected",
+		EngineerID: "engineer-1",
+		Used:       true,
+		CreatedAt:  expiredSession.CreatedAt,
+		ExpiresAt:  expiredSession.ExpiresAt,
+	}, "pending", "")
+	if !errors.Is(err, ErrConcurrentModification) {
+		t.Fatalf("expected ErrConcurrentModification for expired session, got %v", err)
+	}
+
+	// Verify the session was NOT overwritten.
+	current, err := server.getPairingSessionDB("000000")
+	if err != nil {
+		t.Fatalf("failed to get session after failed update: %v", err)
+	}
+	if current.Status != "pending" {
+		t.Fatalf("status = %q, want %q; expired session was overwritten", current.Status, "pending")
+	}
+}
+
 // TestUpdatePairingSession_ConcurrentModificationReturns409 exercises the full
 // HTTP handler path (not just the DB layer) to verify that when two requests
 // race to claim the same pending pairing session, exactly one succeeds and

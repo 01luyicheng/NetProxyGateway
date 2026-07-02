@@ -485,17 +485,20 @@ func (s *Server) updatePairingSessionDB(session *PairingSession) error {
 }
 
 // compareAndUpdatePairingSessionDB performs a conditional update on a pairing session,
-// ensuring the session hasn't been modified since it was read (optimistic locking).
-// Returns ErrConcurrentModification if the session was modified concurrently.
+// ensuring the session hasn't been modified since it was read (optimistic locking)
+// and that it has not already expired.
+// Returns ErrConcurrentModification if the session was modified concurrently or has expired.
 func (s *Server) compareAndUpdatePairingSessionDB(session *PairingSession, expectedStatus, expectedEngineerID string) error {
+	now := time.Now().Unix()
 	result, err := s.db.Exec(
-		`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ? AND status = ? AND engineer_id = ?`,
+		`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ? AND status = ? AND engineer_id = ? AND expires_at > ?`,
 		session.Status,
 		session.EngineerID,
 		boolToInt(session.Used),
 		session.Code,
 		expectedStatus,
 		expectedEngineerID,
+		now,
 	)
 	if err != nil {
 		return err

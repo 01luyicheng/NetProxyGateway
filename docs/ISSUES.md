@@ -1660,3 +1660,35 @@
 - **风险**: **中**。调试检测可能冻结 UI 线程或后台检测协程，影响应用响应
 - **修复方式**: 将 `process.waitFor(timeout)` 放到读取之前或改为异步等待；使用带超时的读取（如协程 + `withTimeout`），确保子进程不会阻塞检测流程
 
+### REV36: server/api `compareAndUpdatePairingSessionDB` 未校验会话是否已过期 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 低
+- **位置**: `server/api/main.go` (`compareAndUpdatePairingSessionDB`)
+- **问题描述**: `compareAndUpdatePairingSessionDB` 的乐观锁 WHERE 条件仅检查 `code = ? AND status = ? AND engineer_id = ?`，未包含 `expires_at > ?`。如果会话在读取后已经过期，并发请求仍可能将其成功更新为 `connected`，绕过过期检查。
+- **风险**: **高**。过期的配对会话可能被错误地激活，导致安全风险
+- **修复方式**: 在 WHERE 条件中增加 `AND expires_at > ?` 并使用当前时间作为参数；返回 `ErrConcurrentModification` 时同时覆盖"已过期"场景。补充针对过期会话的单元测试。
+
+### REV37: server/shared/recovery example_test 示例质量 [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 低
+- **位置**: `server/shared/recovery/example_test.go`
+- **问题描述**: Copilot review 指出 `ExampleRecover` 使用 `WithNamedReturn(&n, &err, ...)` 但接收的是普通局部变量而非命名返回值，示例误导；`ExampleRecoverAction` 的 action 函数没有可观察行为，示例失去演示意义。
+- **风险**: **低**。仅影响文档/示例可读性
+- **修复方式**: 修正 `ExampleRecover` 使用真正的命名返回值；为 `ExampleRecoverAction` 的 action 添加可观察副作用并补充 `// Output:`。
+
+### REV38: DebugDetector 异常处理与测试稳定性 [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 低
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt`、`DebugDetectorTest.kt`
+- **问题描述**: Copilot/CodeRabbit review 指出 `DebugDetector` 中 `catch (e: Exception)` 可能触发 detekt `SwallowedException`；`DebugDetectorTest.checkDebugProperties_doesNotThrow_inUnitTestEnvironment` 断言 `assertFalse(...)`，受宿主机属性影响，测试可能不稳定。
+- **风险**: **低**。代码风格与测试稳定性问题
+- **修复方式**: 具体化捕获的异常类型或为 `catch` 块添加注释说明；将受环境影响的测试改为注入可控属性或使用更稳定的断言。
+
+### REV39: `TestUpdatePairingSession_ConcurrentModificationReturns409` 可能不稳定 [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 中
+- **位置**: `server/api/main_test.go` (`TestUpdatePairingSession_ConcurrentModificationReturns409`)
+- **问题描述**: Copilot review 指出该测试使用 "至少一次 409" 断言，并发赛跑结果依赖调度，存在 CI 不稳定风险。
+- **风险**: **低**。测试偶发失败会增加维护成本
+- **修复方式**: 使用确定性同步（如 barrier 或 hook）替代概率性断言，或增加重试次数并明确失败阈值。
+
