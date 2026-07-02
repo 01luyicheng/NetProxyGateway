@@ -75,10 +75,15 @@ func newPairingTestServer(t *testing.T) *Server {
 		_ = db.Close()
 	})
 
-	return &Server{
+	server := &Server{
 		db:          db,
 		rateLimiter: ratelimit.NewRateLimiterWithDefaults(),
 	}
+	t.Cleanup(func() {
+		server.rateLimiter.Stop()
+	})
+
+	return server
 }
 
 func insertPendingPairingSession(t *testing.T, server *Server, code string, deviceID string) {
@@ -1087,5 +1092,229 @@ func TestUpdatePairingSession_ConcurrentModificationReturns409(t *testing.T) {
 
 	if !sawConflict {
 		t.Fatalf("expected at least one of %d trials to trigger a 409 Conflict from concurrent modification", trials)
+	}
+}
+
+func TestRateLimitKeyPrefersAuthenticatedIdentity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name       string
+		setup      func(*gin.Context)
+		remoteAddr string
+		wantPrefix string
+	}{
+		{
+			name: "internal role",
+			setup: func(c *gin.Context) {
+				c.Set("role", "internal")
+			},
+			wantPrefix: "internal",
+		},
+		{
+			name: "jwt engineer_id",
+			setup: func(c *gin.Context) {
+				c.Set("engineer_id", "engineer-1")
+			},
+			wantPrefix: "jwt:engineer-1",
+		},
+		{
+			name:       "no identity falls back to client ip",
+			remoteAddr: "192.0.2.1:1234",
+			wantPrefix: "192.0.2.1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+			c.Request.RemoteAddr = tt.remoteAddr
+			if tt.setup != nil {
+				tt.setup(c)
+			}
+
+			got := rateLimitKey(c)
+			if got != tt.wantPrefix {
+				t.Errorf("rateLimitKey() = %q, want %q", got, tt.wantPrefix)
+			}
+		})
+	}
+}
+
+func TestRateLimitMiddlewareAllowsRequestsUnderLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := &Server{
+		rateLimiter: ratelimit.NewRateLimiterWithDefaults(),
+	}
+	defer server.rateLimiter.Stop()
+
+	router := gin.New()
+	router.GET("/limited", func(c *gin.Context) {
+		c.Set("engineer_id", "engineer-1")
+		c.Next()
+	}, server.rateLimitMiddleware(), func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	for i := 0; i < 5; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/limited", nil)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("request %d: expected 200, got %d", i+1, recorder.Code)
+		}
+	}
+}
+
+func TestRateLimitMiddlewareBlocksRequestsOverLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := &Server{
+		rateLimiter: ratelimit.NewRateLimiterWithDefaults(),
+	}
+	defer server.rateLimiter.Stop()
+
+	router := gin.New()
+	router.GET("/limited", func(c *gin.Context) {
+		c.Set("engineer_id", "engineer-1")
+		c.Next()
+	}, server.rateLimitMiddleware(), func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	for i := 0; i < 5; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/limited", nil)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("setup request %d: expected 200, got %d", i+1, recorder.Code)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/limited", nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after exceeding rate limit, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), ErrRateLimitExceeded.Error()) {
+		t.Fatalf("expected error %q in response, got %s", ErrRateLimitExceeded.Error(), recorder.Body.String())
+	}
+}
+
+func TestRateLimitMiddlewareUsesSeparateBucketsPerIdentity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := &Server{
+		rateLimiter: ratelimit.NewRateLimiterWithDefaults(),
+	}
+	defer server.rateLimiter.Stop()
+
+	router := gin.New()
+	router.GET("/limited/:engineer", func(c *gin.Context) {
+		c.Set("engineer_id", c.Param("engineer"))
+		c.Next()
+	}, server.rateLimitMiddleware(), func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	// Exhaust the limit for engineer-A.
+	for i := 0; i < 5; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/limited/engineer-A", nil)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("setup request %d for engineer-A: expected 200, got %d", i+1, recorder.Code)
+		}
+	}
+
+	blockedRecorder := httptest.NewRecorder()
+	router.ServeHTTP(blockedRecorder, httptest.NewRequest(http.MethodGet, "/limited/engineer-A", nil))
+	if blockedRecorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected engineer-A to be rate limited, got %d", blockedRecorder.Code)
+	}
+
+	// engineer-B should still be allowed because it uses a separate bucket.
+	allowedRecorder := httptest.NewRecorder()
+	router.ServeHTTP(allowedRecorder, httptest.NewRequest(http.MethodGet, "/limited/engineer-B", nil))
+	if allowedRecorder.Code != http.StatusOK {
+		t.Fatalf("expected engineer-B to be allowed, got %d", allowedRecorder.Code)
+	}
+}
+
+func TestGetPairingSessionRateLimitedByJWTIdentity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	server.jwtSecret = []byte("jwt-secret")
+	server.internalAPIKey = []byte("internal-secret")
+	insertPendingPairingSession(t, server, "123456", "device-1")
+
+	tokenString := issueAuthToken(t, server.jwtSecret, jwt.MapClaims{
+		"sub":  "engineer-1",
+		"role": "engineer",
+		"iat":  time.Now().Unix(),
+		"exp":  time.Now().Add(10 * time.Minute).Unix(),
+	})
+
+	router := gin.New()
+	router.GET("/api/pair/:code", server.internalOrUserAuthMiddleware(), server.rateLimitMiddleware(), server.getPairingSession)
+
+	makeRequest := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/pair/123456", nil)
+		req.Header.Set("Authorization", "Bearer "+tokenString)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, req)
+		return recorder
+	}
+
+	for i := 0; i < 5; i++ {
+		recorder := makeRequest()
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("setup request %d: expected 200, got %d", i+1, recorder.Code)
+		}
+	}
+
+	recorder := makeRequest()
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after exceeding rate limit, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), ErrRateLimitExceeded.Error()) {
+		t.Fatalf("expected error %q in response, got %s", ErrRateLimitExceeded.Error(), recorder.Body.String())
+	}
+}
+
+func TestGetPairingSessionRateLimitedByInternalAPIKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	server.jwtSecret = []byte("jwt-secret")
+	server.internalAPIKey = []byte("internal-secret")
+	insertPendingPairingSession(t, server, "123456", "device-1")
+
+	router := gin.New()
+	router.GET("/api/pair/:code", server.internalOrUserAuthMiddleware(), server.rateLimitMiddleware(), server.getPairingSession)
+
+	makeRequest := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/pair/123456", nil)
+		req.Header.Set("X-Internal-API-Key", "internal-secret")
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, req)
+		return recorder
+	}
+
+	for i := 0; i < 5; i++ {
+		recorder := makeRequest()
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("setup request %d: expected 200, got %d", i+1, recorder.Code)
+		}
+	}
+
+	recorder := makeRequest()
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after exceeding rate limit, got %d", recorder.Code)
 	}
 }

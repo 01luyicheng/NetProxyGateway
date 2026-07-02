@@ -1625,13 +1625,18 @@
 - **风险**: **高**。高频重连场景下状态机不可靠，可能把在线设备判定为离线
 - **修复方式**: `last_seen` 改用毫秒/微秒级时间戳（`UnixMilli`/`UnixMicro`）；`upsertDeviceStatusDB` 增加 `WHERE excluded.last_seen > device_status.last_seen` 条件；`notifyDeviceStatus` 携带单调递增版本号或客户端时间戳，API 据此判定是否接受
 
-### REV34: server/api GET `/api/pair/:code` 缺少限流 [未修复]
-- **修复状态**: 未修复
+### REV34: server/api GET `/api/pair/:code` 缺少限流 [已修复]
+- **修复状态**: 已修复
 - **修复难度**: 低
-- **位置**: `server/api/main.go` (`GET /api/pair/:code` 路由)
+- **位置**: `server/api/main.go` (`GET /api/pair/:code` 路由, `rateLimitMiddleware`, `rateLimitKey`)
 - **问题描述**: REV28 已为该路由补充认证，但仍无速率限制。已认证用户仍可高频枚举 6 位配对码，存在信息泄露和会话探测风险。
 - **风险**: **中**。认证后仍可遍历配对码空间，获取其他工程师/设备的配对会话信息
-- **修复方式**: 为该路由添加 per-IP 或 per-account 速率限制；可复用项目中已有的限流中间件或基于 `golang.org/x/time/rate` 实现
+- **修复方式**:
+  - 新增 `rateLimitMiddleware` Gin 中间件，复用 `Server.rateLimiter`（`server/shared/ratelimit/ratelimit.go`）。
+  - 限流 key 优先取认证身份：JWT `sub` 用 `jwt:<sub>` 作 key；Internal API Key 用 `internal` 作 key；无身份时回退 `ClientIP()`。
+  - 在 `GET /api/pair/:code` 路由上挂载 `internalOrUserAuthMiddleware()` + `rateLimitMiddleware()` + `getPairingSession`。
+  - 超限时返回 `429 Too Many Requests`，响应体包含 `ErrRateLimitExceeded` 错误信息。
+  - 在 `server/api/main_test.go` 中补充测试：正常请求通过、超限返回 429、JWT 与 Internal API Key 分别限流、不同身份使用独立限流桶。
 
 ### REV35: Android `DebugDetector.getprop` 超时顺序失效 [已修复]
 - **修复状态**: 已修复

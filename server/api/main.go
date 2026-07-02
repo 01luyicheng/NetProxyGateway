@@ -765,6 +765,37 @@ func (s *Server) internalAuthMiddleware() gin.HandlerFunc {
 	}
 }
 
+// rateLimitKey returns the key used for rate limiting.
+// It prefers the authenticated account identity (JWT sub or internal API key)
+// and falls back to the client IP when no identity is present.
+func rateLimitKey(c *gin.Context) string {
+	if role, exists := c.Get("role"); exists && role == "internal" {
+		return "internal"
+	}
+
+	if engineerIDValue, exists := c.Get("engineer_id"); exists {
+		if engineerID, ok := engineerIDValue.(string); ok && engineerID != "" {
+			return "jwt:" + engineerID
+		}
+	}
+
+	return c.ClientIP()
+}
+
+// rateLimitMiddleware enforces per-identity rate limiting using the server's
+// shared rate limiter. It must run after an authentication middleware so that
+// the authenticated identity is available in the Gin context.
+func (s *Server) rateLimitMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		key := rateLimitKey(c)
+		if !s.rateLimiter.Allow(key) {
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": ErrRateLimitExceeded.Error()})
+			return
+		}
+		c.Next()
+	}
+}
+
 // createPairingSession creates a new pairing session.
 func (s *Server) createPairingSession(c *gin.Context) {
 	clientIP := c.ClientIP()
@@ -1237,7 +1268,7 @@ func main() {
 	{
 		// Pairing session management
 		api.POST("/pair", server.authMiddleware(), server.createPairingSession)
-		api.GET("/pair/:code", server.internalOrUserAuthMiddleware(), server.getPairingSession)
+		api.GET("/pair/:code", server.internalOrUserAuthMiddleware(), server.rateLimitMiddleware(), server.getPairingSession)
 		api.PUT("/pair/:code", server.authMiddleware(), server.updatePairingSession)
 
 		// Session tokens
