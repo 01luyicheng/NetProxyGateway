@@ -359,10 +359,14 @@ func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string) 
 	m.stopMu.Unlock()
 
 	defer m.wg.Done()
-	payload := map[string]string{
+	// Capture the event timestamp at notification time so delayed retries do
+	// not accidentally present a fresher wall-clock time than a newer status
+	// already stored by the API (REV33).
+	payload := map[string]any{
 		"device_id":   deviceID,
 		"status":      status,
 		"tunnel_addr": tunnelAddr,
+		"last_seen":   time.Now().UnixMilli(),
 	}
 
 	data, err := json.Marshal(payload)

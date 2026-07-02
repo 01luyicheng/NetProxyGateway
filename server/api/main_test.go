@@ -1095,6 +1095,175 @@ func TestUpdatePairingSession_ConcurrentModificationReturns409(t *testing.T) {
 	}
 }
 
+func TestUpsertDeviceStatusDB_WritesMillisecondTimestamp(t *testing.T) {
+	server := newPairingTestServer(t)
+
+	// Use a time with sub-second nanoseconds so Unix() and UnixMilli() differ.
+	lastSeen := time.Unix(1700000000, 123456789)
+	status := &DeviceStatus{
+		DeviceID:   "device-ms",
+		Status:     "online",
+		LastSeen:   lastSeen,
+		TunnelAddr: "192.168.1.1:8080",
+	}
+	if err := server.upsertDeviceStatusDB(status); err != nil {
+		t.Fatalf("upsertDeviceStatusDB failed: %v", err)
+	}
+
+	var storedMs int64
+	err := server.db.QueryRow("SELECT last_seen FROM device_status WHERE device_id = ?", status.DeviceID).Scan(&storedMs)
+	if err != nil {
+		t.Fatalf("failed to read stored last_seen: %v", err)
+	}
+
+	wantMs := lastSeen.UnixMilli()
+	if storedMs != wantMs {
+		t.Fatalf("stored last_seen = %d, want %d (millisecond precision)", storedMs, wantMs)
+	}
+
+	stored, err := server.getDeviceStatusDB(status.DeviceID)
+	if err != nil {
+		t.Fatalf("getDeviceStatusDB failed: %v", err)
+	}
+	if stored.LastSeen.UnixMilli() != wantMs {
+		t.Fatalf("parsed LastSeen = %d, want %d", stored.LastSeen.UnixMilli(), wantMs)
+	}
+}
+
+func TestGetDeviceStatusDB_BackwardCompatibleWithSecondPrecision(t *testing.T) {
+	server := newPairingTestServer(t)
+
+	// Simulate a legacy row where last_seen was stored in seconds (REV33).
+	deviceID := "device-legacy"
+	legacySeconds := int64(1700000000)
+	_, err := server.db.Exec(
+		"INSERT INTO device_status (device_id, status, last_seen, tunnel_addr) VALUES (?, ?, ?, ?)",
+		deviceID, "online", legacySeconds, "192.168.1.1:8080",
+	)
+	if err != nil {
+		t.Fatalf("failed to insert legacy row: %v", err)
+	}
+
+	stored, err := server.getDeviceStatusDB(deviceID)
+	if err != nil {
+		t.Fatalf("getDeviceStatusDB failed: %v", err)
+	}
+
+	wantMs := legacySeconds * 1000
+	if stored.LastSeen.UnixMilli() != wantMs {
+		t.Fatalf("legacy second-precision last_seen parsed as %d ms, want %d ms", stored.LastSeen.UnixMilli(), wantMs)
+	}
+}
+
+func TestUpsertDeviceStatusDB_StaleOfflineDoesNotOverwriteNewerOnline(t *testing.T) {
+	server := newPairingTestServer(t)
+	base := time.Unix(1700000000, 0)
+
+	// A newer online event is stored first.
+	if err := server.upsertDeviceStatusDB(&DeviceStatus{
+		DeviceID: "device-stale",
+		Status:   "online",
+		LastSeen: base.Add(time.Millisecond),
+	}); err != nil {
+		t.Fatalf("upsert online failed: %v", err)
+	}
+
+	// A delayed offline notification with an older timestamp must be ignored.
+	if err := server.upsertDeviceStatusDB(&DeviceStatus{
+		DeviceID: "device-stale",
+		Status:   "offline",
+		LastSeen: base,
+	}); err != nil {
+		t.Fatalf("upsert stale offline failed: %v", err)
+	}
+
+	stored, err := server.getDeviceStatusDB("device-stale")
+	if err != nil {
+		t.Fatalf("getDeviceStatusDB failed: %v", err)
+	}
+	if stored.Status != "online" {
+		t.Fatalf("status = %q, want %q; stale offline overwrote newer online", stored.Status, "online")
+	}
+}
+
+func TestUpsertDeviceStatusDB_SameMillisecondEventIsIgnored(t *testing.T) {
+	server := newPairingTestServer(t)
+	ts := time.Unix(1700000000, 0)
+
+	if err := server.upsertDeviceStatusDB(&DeviceStatus{
+		DeviceID: "device-same-ms",
+		Status:   "online",
+		LastSeen: ts,
+	}); err != nil {
+		t.Fatalf("upsert online failed: %v", err)
+	}
+
+	// An event with the exact same timestamp must not overwrite the existing row
+	// because the guard uses a strict greater-than comparison.
+	if err := server.upsertDeviceStatusDB(&DeviceStatus{
+		DeviceID: "device-same-ms",
+		Status:   "offline",
+		LastSeen: ts,
+	}); err != nil {
+		t.Fatalf("upsert same-ms offline failed: %v", err)
+	}
+
+	stored, err := server.getDeviceStatusDB("device-same-ms")
+	if err != nil {
+		t.Fatalf("getDeviceStatusDB failed: %v", err)
+	}
+	if stored.Status != "online" {
+		t.Fatalf("status = %q, want %q; same-millisecond event overwrote existing row", stored.Status, "online")
+	}
+}
+
+func TestUpdateDeviceStatus_AcceptsLastSeenFromRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	server.internalAPIKey = []byte("internal-secret")
+
+	router := gin.New()
+	router.POST("/api/device/status", server.internalAuthMiddleware(), server.updateDeviceStatus)
+
+	base := time.Now()
+	onlineTs := base.Add(time.Millisecond).UnixMilli()
+	offlineTs := base.UnixMilli()
+
+	// Online event with explicit last_seen.
+	reqBody := fmt.Sprintf(`{"device_id":"device-req","status":"online","last_seen":%d}`, onlineTs)
+	req := httptest.NewRequest(http.MethodPost, "/api/device/status", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-API-Key", "internal-secret")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("online update expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	// Delayed offline event with an older last_seen.
+	reqBody = fmt.Sprintf(`{"device_id":"device-req","status":"offline","last_seen":%d}`, offlineTs)
+	req = httptest.NewRequest(http.MethodPost, "/api/device/status", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-API-Key", "internal-secret")
+	recorder = httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("offline update expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	stored, err := server.getDeviceStatusDB("device-req")
+	if err != nil {
+		t.Fatalf("getDeviceStatusDB failed: %v", err)
+	}
+	if stored.Status != "online" {
+		t.Fatalf("status = %q, want %q; stale offline from request overwrote newer online", stored.Status, "online")
+	}
+	if stored.LastSeen.UnixMilli() != onlineTs {
+		t.Fatalf("LastSeen = %d, want %d", stored.LastSeen.UnixMilli(), onlineTs)
+	}
+}
+
 func TestRateLimitKeyPrefersAuthenticatedIdentity(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

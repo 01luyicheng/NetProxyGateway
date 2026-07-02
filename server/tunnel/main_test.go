@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -55,6 +56,56 @@ func TestNotifyDeviceStatusAddsInternalAPIKeyHeader(t *testing.T) {
 
 	if headerValue != "internal-secret" {
 		t.Fatalf("expected internal api key header to be forwarded, got %q", headerValue)
+	}
+}
+
+func TestNotifyDeviceStatusIncludesLastSeenTimestamp(t *testing.T) {
+	var (
+		body map[string]interface{}
+		wg   sync.WaitGroup
+	)
+	wg.Add(1)
+
+	before := time.Now().UnixMilli()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("failed to decode payload: %v", err)
+		}
+		_ = r.Body.Close()
+		wg.Done()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	manager := NewTunnelManager(&Config{APIEndpoint: server.URL})
+
+	manager.wg.Add(1)
+	manager.notifyDeviceStatus("device-123", "online", "")
+
+	waitDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(waitDone)
+	}()
+
+	select {
+	case <-waitDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for notifyDeviceStatus")
+	}
+
+	after := time.Now().UnixMilli()
+
+	raw, ok := body["last_seen"]
+	if !ok {
+		t.Fatalf("expected payload to contain last_seen, got %v", body)
+	}
+	lastSeen, ok := raw.(float64)
+	if !ok {
+		t.Fatalf("expected last_seen to be a JSON number, got %T", raw)
+	}
+	if int64(lastSeen) < before || int64(lastSeen) > after {
+		t.Fatalf("last_seen = %d, want between %d and %d", int64(lastSeen), before, after)
 	}
 }
 
