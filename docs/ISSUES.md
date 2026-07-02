@@ -1623,13 +1623,17 @@
 - **风险**: **高**。工程师端可能看到设备已离线，但实际上隧道已重建，导致远程协助中断或误判
 - **修复方式**: 发送 `offline` 前再次检查该设备是否存在活跃隧道；为 `notifyDeviceStatus` 的写入增加条件（如版本号/时间戳），避免过期的 `offline` 覆盖较新的 `online`
 
-### REV33: server/api + server/tunnel 秒级 `last_seen` 导致同秒重连状态丢失 [未修复]
-- **修复状态**: 未修复
+### REV33: server/api + server/tunnel 秒级 `last_seen` 导致同秒重连状态丢失 [已修复]
+- **修复状态**: 已修复
 - **修复难度**: 中
-- **位置**: `server/api/main.go` (`updateDeviceStatus` / `upsertDeviceStatusDB`)、`server/tunnel/main.go` (`notifyDeviceStatus`)
+- **位置**: `server/api/main.go` (`updateDeviceStatus` / `upsertDeviceStatusDB` / `getDeviceStatusDB`)、`server/tunnel/main.go` (`notifyDeviceStatus`)
 - **问题描述**: `server/api/main.go` 写入设备状态时仍使用秒级 `Unix()` 作为 `last_seen`，且 `upsertDeviceStatusDB` 当前为无条件 `ON CONFLICT DO UPDATE`，没有 `excluded.last_seen > device_status.last_seen` 保护。`server/tunnel/main.go` 的 `notifyDeviceStatus` 带指数退避重试，旧的 `offline` 通知可能延迟到达 API，加上同秒内 `last_seen` 相同，无法判断事件先后顺序，导致过期的 `offline` 覆盖较新的 `online`。
 - **风险**: **高**。高频重连场景下状态机不可靠，可能把在线设备判定为离线
-- **修复方式**: `last_seen` 改用毫秒/微秒级时间戳（`UnixMilli`/`UnixMicro`）；`upsertDeviceStatusDB` 增加 `WHERE excluded.last_seen > device_status.last_seen` 条件；`notifyDeviceStatus` 携带单调递增版本号或客户端时间戳，API 据此判定是否接受
+- **修复方式**:
+  - `server/api/main.go`：`last_seen` 改用毫秒级 `UnixMilli()`；`upsertDeviceStatusDB` 的 `ON CONFLICT DO UPDATE` 增加 `WHERE excluded.last_seen > device_status.last_seen` 保护；`getDeviceStatusDB` 按毫秒解析；`updateDeviceStatus` 接受请求体中的可选 `last_seen`（毫秒 Unix 时间戳），未提供时回落为当前时间。
+  - `server/tunnel/main.go`：`notifyDeviceStatus` 在事件发生时捕获 `time.Now().UnixMilli()` 并通过 `last_seen` 字段发送给 API，使延迟到达的 `offline` 携带原始时间戳。
+  - 测试覆盖：毫秒时间戳写入、过期 `offline` 不覆盖较新的 `online`、同毫秒事件不覆盖、`updateDeviceStatus` 按请求时间戳处理、`notifyDeviceStatus` 携带 `last_seen`。
+- **迁移说明**: 数据库表结构不变（`last_seen INTEGER`）。`getDeviceStatusDB` 已添加向后兼容逻辑：读取到小于 `1e12` 的值时自动视为秒级并乘以 1000 转换为毫秒，因此无需停机即可兼容旧数据。若需要一次性统一存量数据的单位为毫秒，可执行：`UPDATE device_status SET last_seen = last_seen * 1000;`。
 
 ### REV34: server/api GET `/api/pair/:code` 缺少限流 [已修复]
 - **修复状态**: 已修复

@@ -595,12 +595,21 @@ func (s *Server) getDeviceStatusDB(deviceID string) (*DeviceStatus, error) {
 		return nil, err
 	}
 
-	ds.LastSeen = time.Unix(lastSeen, 0)
+	// Backward compatibility: legacy rows stored last_seen in seconds. Any
+	// realistic second-precision timestamp is below 1e12, while a millisecond
+	// timestamp is above it, so treat small values as seconds and convert.
+	if lastSeen > 0 && lastSeen < 1e12 {
+		lastSeen *= 1000
+	}
+	ds.LastSeen = time.UnixMilli(lastSeen)
 
 	return &ds, nil
 }
 
 // upsertDeviceStatusDB inserts or updates device status in the database.
+// The update is applied only when the incoming last_seen is strictly newer
+// than the stored value, preventing delayed/stale notifications from
+// overwriting a more recent status (REV33).
 func (s *Server) upsertDeviceStatusDB(status *DeviceStatus) error {
 	_, err := s.db.Exec(
 		`INSERT INTO device_status (device_id, status, last_seen, tunnel_addr)
@@ -608,10 +617,11 @@ func (s *Server) upsertDeviceStatusDB(status *DeviceStatus) error {
 		 ON CONFLICT(device_id) DO UPDATE SET
 		 status = excluded.status,
 		 last_seen = excluded.last_seen,
-		 tunnel_addr = excluded.tunnel_addr`,
+		 tunnel_addr = excluded.tunnel_addr
+		 WHERE excluded.last_seen > device_status.last_seen`,
 		status.DeviceID,
 		status.Status,
-		status.LastSeen.Unix(),
+		status.LastSeen.UnixMilli(),
 		status.TunnelAddr,
 	)
 	return err
@@ -1144,6 +1154,7 @@ func (s *Server) updateDeviceStatus(c *gin.Context) {
 		DeviceID   string `json:"device_id" binding:"required"`
 		Status     string `json:"status" binding:"required"`
 		TunnelAddr string `json:"tunnel_addr"`
+		LastSeen   int64  `json:"last_seen"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1151,10 +1162,15 @@ func (s *Server) updateDeviceStatus(c *gin.Context) {
 		return
 	}
 
+	lastSeen := time.Now()
+	if req.LastSeen > 0 {
+		lastSeen = time.UnixMilli(req.LastSeen)
+	}
+
 	status := &DeviceStatus{
 		DeviceID:   req.DeviceID,
 		Status:     req.Status,
-		LastSeen:   time.Now(),
+		LastSeen:   lastSeen,
 		TunnelAddr: req.TunnelAddr,
 	}
 
