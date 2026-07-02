@@ -1591,3 +1591,48 @@
 - **风险**: **低**。测试偶发失败会增加维护成本
 - **修复方式**: 使用确定性同步（如 barrier 或 hook）替代概率性断言，或增加重试次数并明确失败阈值。
 
+### PR16-1: `server/api/Dockerfile` 使用 `CGO_ENABLED=0` 导致 SQLite 驱动无法运行 [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 低
+- **提交哈希**: `7fbe5e9`
+- **位置**: `server/api/Dockerfile` (L8)
+- **问题描述**: PR #16 的 Codex review 指出，API 服务依赖 `mattn/go-sqlite3`，该驱动需要 CGO。`Dockerfile` 中使用 `CGO_ENABLED=0` 编译出的二进制在容器内启动时会因无法加载 SQLite 驱动而失败。
+- **风险**: **高**。服务端 Docker 镜像无法运行，阻塞容器化部署。
+- **修复方式**: 移除 `CGO_ENABLED=0`，或迁移到纯 Go 的 SQLite 驱动（如 `modernc.org/sqlite`）。
+
+### PR16-2: `server/docker-compose.yml` build context 未包含 `shared` 本地模块 [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 低
+- **提交哈希**: `7fbe5e9`
+- **位置**: `server/docker-compose.yml` (L12, L44)
+- **问题描述**: PR #16 的 Codex review 指出，各服务的 `build.context` 仅指向各自子目录（如 `./api`），但 `go.mod` 通过 `replace` 依赖上层或同层的 `shared` 模块，导致 `docker compose build` 时找不到本地替换模块而失败。
+- **风险**: **高**。Docker Compose 无法构建服务。
+- **修复方式**: 将 `build.context` 设置为 `server/` 根目录，并在各 `Dockerfile` 中调整 `COPY` 路径；或重新组织模块以消除本地 `replace`。
+
+### PR16-3: `server/docker-compose.yml` TLS 健康检查仍默认使用 HTTP [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 低
+- **提交哈希**: `7fbe5e9`
+- **位置**: `server/docker-compose.yml` (L35)
+- **问题描述**: PR #16 的 Codex review 指出，`healthcheck` 的默认 URL 是 `http://localhost:8080/health`。当 `ENABLE_TLS=true` 时，HTTP 请求会被拒绝，健康检查始终失败。
+- **风险**: **中**。启用 TLS 后容器被误判为不健康，导致服务反复重启。
+- **修复方式**: 健康检查根据 `ENABLE_TLS` 自动切换 `https://` 协议，或单独提供 `/health` 的 HTTP _plain_ 端点。
+
+### PR16-4: Release 构建未强制要求 `MQTT_TLS_PUBLIC_KEY_PINS_RELEASE` [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 低
+- **提交哈希**: `7fbe5e9`
+- **位置**: `android/app/build.gradle.kts` (L60-L62, L95)
+- **问题描述**: PR #16 的 Codex review 指出，`mqttTlsPublicKeyPinsRelease` 在未配置时会静默回退到 `mqttTlsPublicKeyPinsDebug`（L61），release 构建不会失败。虽然运行时 `MqttConnectionManager` 会抛异常阻止启动，但缺少构建期强制检查。
+- **风险**: **中**。Release 包可能因配置遗漏在运行时崩溃，应像 `MQTT_BROKER_URL_TLS_RELEASE` 一样在构建阶段 fail-fast。
+- **修复方式**: 在 `validateReleaseConfig` 中增加对 `MQTT_TLS_PUBLIC_KEY_PINS_RELEASE` 非空校验，未配置时抛出 `GradleException`。
+
+### PR16-5: `VpnService` 核心路径存在多处设计缺陷 [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 高
+- **提交哈希**: `7fbe5e9`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt`、`ConnectionSessionManager.kt`、`VpnPacketProcessor.kt`
+- **问题描述**: PR #16 的 Codex review 指出 VPN 核心路径存在多项基础缺陷：TCP SYN 无 payload 被丢弃、DNS 响应未回注、UDP 走 SOCKS CONNECT、源 IP 硬编码 10.0.0.1、TCP 逐包开新 Socket 等。这些问题与 `docs/TECH_DEBT.md` 中 C1/C3 多网络风险一致。
+- **风险**: **高**。VPN 核心功能不稳定，多网络/双 WiFi/Link Turbo 等场景下可能出现路由异常或连接失败。
+- **修复方式**: 统一评估 VPN 数据路径，引入 `Network.bindSocket()` 与多网络感知路由；将大文件拆分为 `PacketParser`、`ConnectionManager` 等模块（参见 `docs/TECH_DEBT.md` C1/C3 与 `docs/ISSUES.md` N2）。
+
