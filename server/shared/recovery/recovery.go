@@ -70,15 +70,6 @@ func WithNamedReturn(n *int, err *error, prefix string) Option {
 
 // Recover must be called via defer. It recovers from panics, logs them with
 // contextual information, and optionally sets named return values.
-//
-// Usage:
-//
-//	func (s *StreamConn) Read(p []byte) (n int, err error) {
-//	    defer recovery.Recover("StreamConn.Read",
-//	        recovery.WithStreamID(s.StreamID),
-//	        recovery.WithNamedReturn(&n, &err, "read panic"))
-//	    // ...
-//	}
 func Recover(component string, opts ...Option) {
 	ctx := setupCtx(component, opts...)
 	if r := recover(); r != nil {
@@ -117,15 +108,6 @@ func setupCtx(component string, opts ...Option) *recoverCtx {
 // and executes the provided action function. If the action function itself
 // panics, that panic is also recovered and logged; it will not propagate
 // to the caller.
-//
-// Usage:
-//
-//	go func(c net.Conn) {
-//	    defer recovery.RecoverAction("handleConnection", func() {
-//	        _ = c.Close()
-//	    })
-//	    s.handleConnection(c)
-//	}(conn)
 func RecoverAction(component string, action func(), opts ...Option) {
 	ctx := setupCtx(component, opts...)
 	if r := recover(); r != nil {

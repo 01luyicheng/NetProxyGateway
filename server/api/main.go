@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/tls"
 	"database/sql"
 	"encoding/binary"
 	"errors"
@@ -59,6 +60,7 @@ var (
 	ErrInternalAPIKeyNotConfigured        = errors.New("internal api key not configured")
 	ErrMissingInternalAPIKey              = errors.New("missing internal api key")
 	ErrInvalidInternalAPIKey              = errors.New("invalid internal api key")
+	ErrConcurrentModification             = errors.New("session was modified by another request, please retry")
 )
 
 var (
@@ -108,6 +110,10 @@ type Server struct {
 	cleanupStop             chan struct{}
 	cleanupWorkers          sync.WaitGroup
 	cleanupSessionsInterval time.Duration
+
+	// testHookGetPairingSessionDB is used by tests to inject controlled
+	// responses from getPairingSessionDB. When nil the real database is used.
+	testHookGetPairingSessionDB func(code string) (*PairingSession, error)
 }
 
 // handleBindError handles request binding errors uniformly.
@@ -436,6 +442,10 @@ func (s *Server) createPairingSessionDB(session *PairingSession) error {
 
 // getPairingSessionDB retrieves a pairing session from the database by code.
 func (s *Server) getPairingSessionDB(code string) (*PairingSession, error) {
+	if s.testHookGetPairingSessionDB != nil {
+		return s.testHookGetPairingSessionDB(code)
+	}
+
 	var session PairingSession
 	var createdAt, expiresAt int64
 	var used int
@@ -480,12 +490,42 @@ func (s *Server) updatePairingSessionDB(session *PairingSession) error {
 	return err
 }
 
+// compareAndUpdatePairingSessionDB performs a conditional update on a pairing session,
+// ensuring the session hasn't been modified since it was read (optimistic locking)
+// and that it has not already expired.
+// Returns ErrConcurrentModification if the session was modified concurrently or has expired.
+func (s *Server) compareAndUpdatePairingSessionDB(session *PairingSession, expectedStatus, expectedEngineerID string) error {
+	now := time.Now().Unix()
+	result, err := s.db.Exec(
+		`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ? AND status = ? AND engineer_id = ? AND expires_at > ?`,
+		session.Status,
+		session.EngineerID,
+		boolToInt(session.Used),
+		session.Code,
+		expectedStatus,
+		expectedEngineerID,
+		now,
+	)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return ErrConcurrentModification
+	}
+	return nil
+}
+
 // markSessionExpired marks a session as expired and updates the database.
+// Uses optimistic locking with expectedStatus and expectedEngineerID to prevent
+// overwriting concurrent modifications.
 // Returns an error if the database update fails.
-func (s *Server) markSessionExpired(session *PairingSession) error {
-	// Update in-memory state first, then persist to ensure consistency.
+func (s *Server) markSessionExpired(session *PairingSession, expectedStatus, expectedEngineerID string) error {
 	session.Status = "expired"
-	if err := s.updatePairingSessionDB(session); err != nil {
+	if err := s.compareAndUpdatePairingSessionDB(session, expectedStatus, expectedEngineerID); err != nil {
 		return err
 	}
 	return nil
@@ -564,12 +604,21 @@ func (s *Server) getDeviceStatusDB(deviceID string) (*DeviceStatus, error) {
 		return nil, err
 	}
 
-	ds.LastSeen = time.Unix(lastSeen, 0)
+	// Backward compatibility: legacy rows stored last_seen in seconds. Any
+	// realistic second-precision timestamp is below 1e12, while a millisecond
+	// timestamp is above it, so treat small values as seconds and convert.
+	if lastSeen > 0 && lastSeen < 1e12 {
+		lastSeen *= 1000
+	}
+	ds.LastSeen = time.UnixMilli(lastSeen)
 
 	return &ds, nil
 }
 
 // upsertDeviceStatusDB inserts or updates device status in the database.
+// The update is applied only when the incoming last_seen is strictly newer
+// than the stored value, preventing delayed/stale notifications from
+// overwriting a more recent status (REV33).
 func (s *Server) upsertDeviceStatusDB(status *DeviceStatus) error {
 	_, err := s.db.Exec(
 		`INSERT INTO device_status (device_id, status, last_seen, tunnel_addr)
@@ -577,10 +626,11 @@ func (s *Server) upsertDeviceStatusDB(status *DeviceStatus) error {
 		 ON CONFLICT(device_id) DO UPDATE SET
 		 status = excluded.status,
 		 last_seen = excluded.last_seen,
-		 tunnel_addr = excluded.tunnel_addr`,
+		 tunnel_addr = excluded.tunnel_addr
+		 WHERE excluded.last_seen > device_status.last_seen`,
 		status.DeviceID,
 		status.Status,
-		status.LastSeen.Unix(),
+		status.LastSeen.UnixMilli(),
 		status.TunnelAddr,
 	)
 	return err
@@ -742,6 +792,37 @@ func (s *Server) internalAuthMiddleware() gin.HandlerFunc {
 	}
 }
 
+// rateLimitKey returns the key used for rate limiting.
+// It prefers the authenticated account identity (JWT sub or internal API key)
+// and falls back to the client IP when no identity is present.
+func rateLimitKey(c *gin.Context) string {
+	if role, exists := c.Get("role"); exists && role == "internal" {
+		return "internal"
+	}
+
+	if engineerIDValue, exists := c.Get("engineer_id"); exists {
+		if engineerID, ok := engineerIDValue.(string); ok && engineerID != "" {
+			return "jwt:" + engineerID
+		}
+	}
+
+	return c.ClientIP()
+}
+
+// rateLimitMiddleware enforces per-identity rate limiting using the server's
+// shared rate limiter. It must run after an authentication middleware so that
+// the authenticated identity is available in the Gin context.
+func (s *Server) rateLimitMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		key := rateLimitKey(c)
+		if !s.rateLimiter.Allow(key) {
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": ErrRateLimitExceeded.Error()})
+			return
+		}
+		c.Next()
+	}
+}
+
 // createPairingSession creates a new pairing session.
 func (s *Server) createPairingSession(c *gin.Context) {
 	clientIP := c.ClientIP()
@@ -819,7 +900,22 @@ func (s *Server) getPairingSession(c *gin.Context) {
 
 	// Check if expired
 	if time.Now().After(session.ExpiresAt) {
-		if err := s.markSessionExpired(session); err != nil {
+		if err := s.markSessionExpired(session, session.Status, session.EngineerID); err != nil {
+			if errors.Is(err, ErrConcurrentModification) {
+				// Session was modified concurrently; re-fetch to return current state
+				refreshed, refreshErr := s.getPairingSessionDB(code)
+				if refreshErr != nil {
+					log.Printf("Failed to refresh session %s after concurrent modification: %v", session.Code, refreshErr)
+					c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToQueryDatabase.Error()})
+					return
+				}
+				if refreshed == nil || time.Now().After(refreshed.ExpiresAt) {
+					c.JSON(http.StatusGone, gin.H{"error": ErrSessionExpired.Error()})
+					return
+				}
+				c.JSON(http.StatusOK, refreshed)
+				return
+			}
 			log.Printf("Failed to mark session %s as expired: %v", session.Code, err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateSession.Error()})
 			return
@@ -831,14 +927,40 @@ func (s *Server) getPairingSession(c *gin.Context) {
 	c.JSON(http.StatusOK, session)
 }
 
+// getEngineerID extracts and validates the engineer_id from the Gin context.
+func getEngineerID(c *gin.Context) (string, error) {
+	engineerIDValue, exists := c.Get("engineer_id")
+	engineerID, ok := engineerIDValue.(string)
+	if !exists || !ok || engineerID == "" {
+		return "", ErrMissingEngineer
+	}
+	return engineerID, nil
+}
+
+// isValidSessionTransition validates if a pairing session can transition from current to requested status.
+func isValidSessionTransition(current, requested string) bool {
+	validTransitions := map[string][]string{
+		"pending":      {"connected", "expired"},
+		"connected":    {"disconnected", "expired"},
+		"disconnected": {},
+		"expired":      {},
+	}
+
+	for _, t := range validTransitions[current] {
+		if t == requested {
+			return true
+		}
+	}
+	return false
+}
+
 // updatePairingSession updates a pairing session status.
 func (s *Server) updatePairingSession(c *gin.Context) {
 	code := c.Param("code")
 
-	engineerIDValue, exists := c.Get("engineer_id")
-	engineerID, ok := engineerIDValue.(string)
-	if !exists || !ok || engineerID == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": ErrMissingEngineer.Error()})
+	engineerID, err := getEngineerID(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -867,9 +989,17 @@ func (s *Server) updatePairingSession(c *gin.Context) {
 		return
 	}
 
+	// Capture expected values before any modification for optimistic locking.
+	expectedStatus := session.Status
+	expectedEngineerID := session.EngineerID
+
 	// Check if expired
 	if time.Now().After(session.ExpiresAt) {
-		if err := s.markSessionExpired(session); err != nil {
+		if err := s.markSessionExpired(session, expectedStatus, expectedEngineerID); err != nil {
+			if errors.Is(err, ErrConcurrentModification) {
+				c.JSON(http.StatusConflict, gin.H{"error": ErrConcurrentModification.Error()})
+				return
+			}
 			log.Printf("Failed to mark session %s as expired: %v", session.Code, err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateSession.Error()})
 			return
@@ -879,22 +1009,7 @@ func (s *Server) updatePairingSession(c *gin.Context) {
 	}
 
 	// Validate status transition
-	validTransitions := map[string][]string{
-		"pending":      {"connected", "expired"},
-		"connected":    {"disconnected", "expired"},
-		"disconnected": {},
-		"expired":      {},
-	}
-
-	valid := false
-	for _, t := range validTransitions[session.Status] {
-		if t == req.Status {
-			valid = true
-			break
-		}
-	}
-
-	if !valid {
+	if !isValidSessionTransition(session.Status, req.Status) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": ErrInvalidStatusTransition.Error()})
 		return
 	}
@@ -907,7 +1022,11 @@ func (s *Server) updatePairingSession(c *gin.Context) {
 		session.Used = true
 	}
 
-	if err := s.updatePairingSessionDB(session); err != nil {
+	if err := s.compareAndUpdatePairingSessionDB(session, expectedStatus, expectedEngineerID); err != nil {
+		if errors.Is(err, ErrConcurrentModification) {
+			c.JSON(http.StatusConflict, gin.H{"error": ErrConcurrentModification.Error()})
+			return
+		}
 		log.Printf("Failed to update pairing session %s: %v", session.Code, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateSession.Error()})
 		return
@@ -957,10 +1076,9 @@ func (s *Server) validateSession(c *gin.Context) {
 
 // createSessionToken creates a new session token.
 func (s *Server) createSessionToken(c *gin.Context) {
-	engineerIDValue, exists := c.Get("engineer_id")
-	engineerID, ok := engineerIDValue.(string)
-	if !exists || !ok || engineerID == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": ErrMissingEngineer.Error()})
+	engineerID, err := getEngineerID(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -1045,6 +1163,7 @@ func (s *Server) updateDeviceStatus(c *gin.Context) {
 		DeviceID   string `json:"device_id" binding:"required"`
 		Status     string `json:"status" binding:"required"`
 		TunnelAddr string `json:"tunnel_addr"`
+		LastSeen   int64  `json:"last_seen"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1052,10 +1171,15 @@ func (s *Server) updateDeviceStatus(c *gin.Context) {
 		return
 	}
 
+	lastSeen := time.Now()
+	if req.LastSeen > 0 {
+		lastSeen = time.UnixMilli(req.LastSeen)
+	}
+
 	status := &DeviceStatus{
 		DeviceID:   req.DeviceID,
 		Status:     req.Status,
-		LastSeen:   time.Now(),
+		LastSeen:   lastSeen,
 		TunnelAddr: req.TunnelAddr,
 	}
 
@@ -1148,6 +1272,9 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		TLSConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
 	}
 }
 
@@ -1179,7 +1306,7 @@ func main() {
 	{
 		// Pairing session management
 		api.POST("/pair", server.authMiddleware(), server.createPairingSession)
-		api.GET("/pair/:code", server.getPairingSession)
+		api.GET("/pair/:code", server.internalOrUserAuthMiddleware(), server.rateLimitMiddleware(), server.getPairingSession)
 		api.PUT("/pair/:code", server.authMiddleware(), server.updatePairingSession)
 
 		// Session tokens

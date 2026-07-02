@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -226,6 +227,14 @@ type TunnelManager struct {
 	stopMu sync.Mutex
 	// stopped is set to true after Stop() has been called at least once.
 	stopped bool
+	// testHookAfterUnregisterRemoved is used by tests to pause Unregister after
+	// the tunnel has been removed from the map but before closing it or sending
+	// offline notifications. Nil in production.
+	testHookAfterUnregisterRemoved chan struct{}
+	// testHookAfterDeadTunnelsRemoved is used by tests to pause cleanup after
+	// dead tunnels have been removed from the map but before closing them or
+	// sending offline notifications. Nil in production.
+	testHookAfterDeadTunnelsRemoved chan struct{}
 }
 
 // NewTunnelManager creates a new tunnel manager.
@@ -272,16 +281,31 @@ func (m *TunnelManager) Stop() {
 func (m *TunnelManager) Register(deviceID string, conn *websocket.Conn) *TunnelConn {
 	tunnel := NewTunnelConn(deviceID, conn)
 
+	var oldTunnel *TunnelConn
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if old, ok := m.tunnels[deviceID]; ok {
-		old.Close()
+		oldTunnel = old
 	}
 	m.tunnels[deviceID] = tunnel
+	m.mu.Unlock()
+
+	// Close old tunnel outside m.mu to avoid blocking I/O under the lock.
+	// Close() may block if sendLoop is holding connMu for a WriteMessage call.
+	if oldTunnel != nil {
+		oldTunnel.Close()
+	}
 
 	log.Printf("Tunnel registered for device: %s", deviceID)
 
+	// Check stopped before wg.Add(1) to prevent WaitGroup reuse panic
+	// after Stop() has called wg.Wait().
+	m.stopMu.Lock()
+	if m.stopped {
+		m.stopMu.Unlock()
+		return tunnel
+	}
 	m.wg.Add(1)
+	m.stopMu.Unlock()
 	go m.notifyDeviceStatus(deviceID, "online", "")
 
 	return tunnel
@@ -293,23 +317,51 @@ func (m *TunnelManager) Register(deviceID string, conn *websocket.Conn) *TunnelC
 // prevents a concurrently registered replacement tunnel from being closed
 // and deleted by mistake.
 func (m *TunnelManager) Unregister(deviceID string, tunnel *TunnelConn) {
-	removed := false
+	var closedTunnel *TunnelConn
 
 	m.mu.Lock()
 	if current, ok := m.tunnels[deviceID]; ok && (tunnel == nil || current == tunnel) {
-		current.Close()
+		closedTunnel = current
 		delete(m.tunnels, deviceID)
-		removed = true
 	}
 	m.mu.Unlock()
 
-	if !removed {
+	if closedTunnel == nil {
 		return
 	}
 
+	// Test hook: pause after the tunnel has been removed from the map but
+	// before closing it or sending offline notifications. This allows tests
+	// to deterministically inject a replacement tunnel registration.
+	if m.testHookAfterUnregisterRemoved != nil {
+		<-m.testHookAfterUnregisterRemoved
+	}
+
+	// Close tunnel outside m.mu to avoid blocking I/O under the lock.
+	// Close() may block if sendLoop is holding connMu for a WriteMessage call.
+	closedTunnel.Close()
+
 	log.Printf("Tunnel unregistered for device: %s", deviceID)
 
+	// Re-check whether a replacement tunnel registered while we were closing
+	// the old one. If so, skip the offline notification to avoid overwriting
+	// the fresh online state (REV32).
+	m.mu.RLock()
+	if _, replaced := m.tunnels[deviceID]; replaced {
+		m.mu.RUnlock()
+		return
+	}
+	m.mu.RUnlock()
+
+	// Check stopped before wg.Add(1) to prevent WaitGroup reuse panic
+	// after Stop() has called wg.Wait().
+	m.stopMu.Lock()
+	if m.stopped {
+		m.stopMu.Unlock()
+		return
+	}
 	m.wg.Add(1)
+	m.stopMu.Unlock()
 	go m.notifyDeviceStatus(deviceID, "offline", "")
 }
 
@@ -332,10 +384,14 @@ func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string) 
 	m.stopMu.Unlock()
 
 	defer m.wg.Done()
-	payload := map[string]string{
+	// Capture the event timestamp at notification time so delayed retries do
+	// not accidentally present a fresher wall-clock time than a newer status
+	// already stored by the API (REV33).
+	payload := map[string]any{
 		"device_id":   deviceID,
 		"status":      status,
 		"tunnel_addr": tunnelAddr,
+		"last_seen":   time.Now().UnixMilli(),
 	}
 
 	data, err := json.Marshal(payload)
@@ -474,10 +530,29 @@ func (m *TunnelManager) cleanupDeadTunnelsOnce() {
 	}
 	m.mu.Unlock()
 
+	// Test hook: pause after dead tunnels have been removed from the map but
+	// before closing them or sending offline notifications. This allows tests
+	// to deterministically inject a replacement tunnel registration.
+	if m.testHookAfterDeadTunnelsRemoved != nil {
+		<-m.testHookAfterDeadTunnelsRemoved
+	}
+
 	for i, tunnel := range deadTunnels {
+		deviceID := deadIDs[i]
 		tunnel.Close()
+
+		// Re-check whether a replacement tunnel registered while we were
+		// closing the dead one. If so, skip the offline notification to avoid
+		// overwriting the fresh online state (REV32).
+		m.mu.RLock()
+		if _, replaced := m.tunnels[deviceID]; replaced {
+			m.mu.RUnlock()
+			continue
+		}
+		m.mu.RUnlock()
+
 		m.wg.Add(1)
-		go m.notifyDeviceStatus(deadIDs[i], "offline", "")
+		go m.notifyDeviceStatus(deviceID, "offline", "")
 	}
 }
 
@@ -869,6 +944,9 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		TLSConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
 	}
 }
 

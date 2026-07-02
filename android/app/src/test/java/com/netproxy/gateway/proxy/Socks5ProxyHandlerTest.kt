@@ -209,7 +209,7 @@ class Socks5ProxyHandlerTest {
         }
     }
     @Test
-    fun connectRequest_domain_callsConnectorAndReturnsSuccess() {
+    fun connectRequest_domain_returnsForbidden() {
         val fakeConnector = FakeConnector(success = true)
         val channel = EmbeddedChannel(Socks5ProxyHandler(fakeConnector, testValidator))
 
@@ -227,15 +227,15 @@ class Socks5ProxyHandlerTest {
 
             val response = channel.readOutbound<Socks5CommandResponse>()
             assertNotNull(response)
-            assertEquals(Socks5CommandStatus.SUCCESS, response.status())
-            assertTrue(fakeConnector.called)
+            assertEquals(Socks5CommandStatus.FORBIDDEN, response.status())
+            assertTrue(!fakeConnector.called)
         } finally {
             channel.finishAndReleaseAll()
         }
     }
 
     @Test
-    fun connectRequest_domainWithUpstreamFailure_returnsHostUnreachable() {
+    fun connectRequest_domainWithUpstreamFailure_returnsForbidden() {
         val fakeConnector = FakeConnector(success = false)
         val channel = EmbeddedChannel(Socks5ProxyHandler(fakeConnector, testValidator))
 
@@ -253,8 +253,8 @@ class Socks5ProxyHandlerTest {
 
             val response = channel.readOutbound<Socks5CommandResponse>()
             assertNotNull(response)
-            assertEquals(Socks5CommandStatus.HOST_UNREACHABLE, response.status())
-            assertTrue(fakeConnector.called)
+            assertEquals(Socks5CommandStatus.FORBIDDEN, response.status())
+            assertTrue(!fakeConnector.called)
         } finally {
             channel.finishAndReleaseAll()
         }
