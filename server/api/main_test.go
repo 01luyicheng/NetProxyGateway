@@ -1318,3 +1318,133 @@ func TestGetPairingSessionRateLimitedByInternalAPIKey(t *testing.T) {
 		t.Fatalf("expected 429 after exceeding rate limit, got %d", recorder.Code)
 	}
 }
+
+// TestGetPairingSession_ConcurrentModification_RefreshDBError verifies that when
+// markSessionExpired hits ErrConcurrentModification and the refresh query fails,
+// the handler returns 500 Internal Server Error instead of masking the failure
+// as 410 Gone (REV31).
+func TestGetPairingSession_ConcurrentModification_RefreshDBError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	callCount := 0
+	server.testHookGetPairingSessionDB = func(code string) (*PairingSession, error) {
+		defer func() { callCount++ }()
+		if callCount == 0 {
+			// Initial read returns an expired session.
+			return &PairingSession{
+				Code:      code,
+				DeviceID:  "device-1",
+				Status:    "pending",
+				CreatedAt: time.Now().Add(-PairingCodeTTL),
+				ExpiresAt: time.Now().Add(-time.Minute),
+				Used:      false,
+			}, nil
+		}
+		// Refresh query fails.
+		return nil, errors.New("simulated database failure")
+	}
+
+	router := gin.New()
+	router.GET("/api/pair/:code", server.getPairingSession)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/pair/123456", nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 on refresh DB error, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), ErrFailedToQueryDatabase.Error()) {
+		t.Fatalf("expected error %q in response, got %s", ErrFailedToQueryDatabase.Error(), recorder.Body.String())
+	}
+}
+
+// TestGetPairingSession_ConcurrentModification_StillExpired verifies that when
+// markSessionExpired hits ErrConcurrentModification but the refreshed session
+// is still expired, the handler returns 410 Gone consistent with the normal
+// expiration path (REV31).
+func TestGetPairingSession_ConcurrentModification_StillExpired(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	server.testHookGetPairingSessionDB = func(code string) (*PairingSession, error) {
+		return &PairingSession{
+			Code:      code,
+			DeviceID:  "device-1",
+			Status:    "pending",
+			CreatedAt: time.Now().Add(-PairingCodeTTL),
+			ExpiresAt: time.Now().Add(-time.Minute),
+			Used:      false,
+		}, nil
+	}
+
+	router := gin.New()
+	router.GET("/api/pair/:code", server.getPairingSession)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/pair/123456", nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusGone {
+		t.Fatalf("expected 410 when session still expired after refresh, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), ErrSessionExpired.Error()) {
+		t.Fatalf("expected error %q in response, got %s", ErrSessionExpired.Error(), recorder.Body.String())
+	}
+}
+
+// TestGetPairingSession_ConcurrentModification_RefreshedToUnexpired verifies
+// that when markSessionExpired hits ErrConcurrentModification and the refreshed
+// session is no longer expired, the handler returns 200 OK with the current
+// session state (REV31).
+func TestGetPairingSession_ConcurrentModification_RefreshedToUnexpired(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	refreshedSession := &PairingSession{
+		Code:       "123456",
+		DeviceID:   "device-1",
+		Status:     "connected",
+		EngineerID: "engineer-1",
+		CreatedAt:  time.Now(),
+		ExpiresAt:  time.Now().Add(PairingCodeTTL),
+		Used:       true,
+	}
+	callCount := 0
+	server.testHookGetPairingSessionDB = func(code string) (*PairingSession, error) {
+		defer func() { callCount++ }()
+		if callCount == 0 {
+			// Initial read sees an expired session.
+			return &PairingSession{
+				Code:      code,
+				DeviceID:  "device-1",
+				Status:    "pending",
+				CreatedAt: time.Now().Add(-PairingCodeTTL),
+				ExpiresAt: time.Now().Add(-time.Minute),
+				Used:      false,
+			}, nil
+		}
+		// Refresh sees the session that was concurrently updated to unexpired.
+		return refreshedSession, nil
+	}
+
+	router := gin.New()
+	router.GET("/api/pair/:code", server.getPairingSession)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/pair/123456", nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200 when refreshed to unexpired, got %d", recorder.Code)
+	}
+
+	var got PairingSession
+	if err := json.Unmarshal(recorder.Body.Bytes(), &got); err != nil {
+		t.Fatalf("failed to decode response body: %v", err)
+	}
+	if got.Status != refreshedSession.Status || got.EngineerID != refreshedSession.EngineerID {
+		t.Fatalf("response mismatch: got %+v, want %+v", got, refreshedSession)
+	}
+}
