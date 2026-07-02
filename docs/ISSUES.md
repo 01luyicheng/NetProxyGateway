@@ -1636,3 +1636,92 @@
 - **风险**: **高**。VPN 核心功能不稳定，多网络/双 WiFi/Link Turbo 等场景下可能出现路由异常或连接失败。
 - **修复方式**: 统一评估 VPN 数据路径，引入 `Network.bindSocket()` 与多网络感知路由；将大文件拆分为 `PacketParser`、`ConnectionManager` 等模块（参见 `docs/TECH_DEBT.md` C1/C3 与 `docs/ISSUES.md` N2）。
 
+---
+
+## 提交后正确性检查发现（2026-07-03，审查 PR #57/#58 分支）
+
+> 以下问题由提交后正确性检查在 `fix/rev31-36-post-commit-review`（PR #58）和
+> `fix/post-commit-review-rev43-rev47`（PR #57）分支上发现。REV34/REV36 的"修复"
+> 本身引入了新的回归缺陷，经多个独立 subagent 复审确认。
+
+### REV48: REV34 限流修复导致合法轮询被封锁 [已修复]
+- **修复状态**: 已修复（本分支）
+- **提交哈希**: `c514fc3`（引入），本分支修复
+- **修复难度**: 低
+- **位置**: `server/api/main.go` (`getPairingSession`, `rateLimitMiddleware`)
+- **问题描述**: REV34 为 `GET /api/pair/:code` 挂载了 `rateLimitMiddleware`，复用的
+  `server/shared/ratelimit` 是**失败计数器**语义（`Allow` 每次调用都递增计数，
+  `Success` 才清零）。但 `getPairingSession` 在任何返回路径（200/410/404/500）都**未
+  调用 `rateLimiter.Success`**，导致每次合法轮询都累加失败计数。默认配置
+  `MaxAttempts=5, Window=5m, BlockDuration=15m`：工程师在前端轮询配对码状态时，5 次
+  请求后即被封锁 15 分钟，远程协助流程完全中断。
+- **触发场景**: 工程师打开配对页面，前端每 2-3 秒轮询 `GET /api/pair/:code` 获取会话
+  状态。约 10-15 秒后（5 次请求）即收到 429，且封锁持续 15 分钟。这是**正常使用路
+  径**下的必然触发，非边缘情况。
+- **风险**: **严重**。100% 的合法轮询用户在 15 秒内被封锁 15 分钟，远程协助功能基
+  本不可用。测试 `TestGetPairingSessionRateLimitedByJWTIdentity` 将此破坏性行为锁定
+  为预期（5×200 后 429），进一步掩盖了问题。
+- **修复方式**:
+  - 在 `getPairingSession` 找到会话时（200 和 410 路径）调用
+    `s.rateLimiter.Success(rateLimitKey(c))`，重置失败计数器。
+  - 404（会话不存在）路径不清零计数器，保留暴力枚举配对码的防护能力。
+  - 更新测试：`TestGetPairingSessionRateLimit_AllowsLegitimatePolling` 验证 20 次合
+    法轮询不被限流；`TestGetPairingSessionRateLimit_BlocksBruteForce` 验证 5 次 404
+    后第 6 次被限流。
+
+### REV49: REV36 `expires_at > ?` 条件导致 `markSessionExpired` 永久失败 [已修复]
+- **修复状态**: 已修复（本分支）
+- **提交哈希**: `f189aac`（引入），本分支修复
+- **修复难度**: 低
+- **位置**: `server/api/main.go` (`compareAndUpdatePairingSessionDB`, `markSessionExpired`)
+- **问题描述**: REV36 在 `compareAndUpdatePairingSessionDB` 的 WHERE 条件中增加了
+  `AND expires_at > ?`（`now`），声称"防止过期的配对会话被错误地激活"。但
+  `markSessionExpired` 的唯一调用时机是 `time.Now().After(session.ExpiresAt)` 为真
+  （即会话已过期）时，此时 `expires_at > now` **恒为假**，导致 UPDATE 影响 0 行，
+  永远返回 `ErrConcurrentModification`。后果：
+  1. 会话状态永远不会被写入为 `"expired"`（DB 中保持原状态如 `"pending"`）。
+  2. `updatePairingSession` 的过期分支将 `ErrConcurrentModification` 映射为 **409
+     Conflict**，而非预期的 **410 Gone**——这是用户可感知的状态码回归。
+  3. `getPairingSession` 的过期分支走 REV31 的回退路径（重新查询），虽然最终能返回
+     410，但多了一次 DB 查询且 `markSessionExpired` 仍未生效。
+- **触发场景**: 配对码 5 分钟过期后，工程师或客户端尝试更新该会话（PUT
+  `/api/pair/:code`），收到 409 Conflict 而非 410 Gone，客户端可能误判为并发冲突
+  并重试，形成无效重试循环。
+- **风险**: **高**。过期会话状态不持久化导致数据不一致；`updatePairingSession` 状态
+  码回归（410→409）影响客户端逻辑。测试
+  `TestCompareAndUpdatePairingSessionDB_ExpiredSessionReturnsConcurrentModification`
+  将此破坏性行为锁定为预期，进一步掩盖了问题。
+- **修复方式**:
+  - 从 `compareAndUpdatePairingSessionDB` 的 WHERE 条件中移除 `AND expires_at > ?`
+    及对应的 `now` 变量，恢复为仅检查乐观锁不变量（`code + status + engineer_id`）。
+  - 过期保护由调用方的显式 `time.Now().After(session.ExpiresAt)` 检查提供（所有调用
+    点在调用 `compareAndUpdatePairingSessionDB`/`markSessionExpired` 前均有此检查）。
+  - 更新测试：`TestCompareAndUpdatePairingSessionDB_DoesNotRejectExpiredSession` 验证
+    过期会话可被成功更新；`TestMarkSessionExpired_SucceedsForExpiredSession` 验证
+    `markSessionExpired` 成功写入 `"expired"` 状态；
+    `TestUpdatePairingSession_ExpiredReturns410Gone` 验证 HTTP 层返回 410 Gone。
+- **注**: PR #57（`fix/post-commit-review-rev43-rev47`）的
+  `compareAndUpdatePairingSessionDB` 本就没有 `expires_at > ?` 条件，因此不受此问题
+  影响。两个 PR 在此函数上存在合并冲突，需协调合并顺序。
+
+### REV50: PR #57/#58 合并冲突需协调 [未修复]
+- **修复状态**: 未修复（需人工协调）
+- **位置**: `server/api/main.go`, `server/tunnel/main.go`,
+  `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt` 等 7 个文件
+- **问题描述**: PR #57（REV43-47）和 PR #58（REV31-36）在以下关键区域存在冲突：
+  1. `compareAndUpdatePairingSessionDB`：PR #57 无 `expires_at > ?`（正确），
+     PR #58 有（REV49 缺陷）。
+  2. `getPairingSession`：PR #57 的 REV44 将 `ErrConcurrentModification` 分支直接返
+     回 410；PR #58 的 REV31 采用重新查询回退逻辑。两者语义不同。
+  3. `createSessionToken`：PR #57 的 REV43 增加过期检查+乐观锁；PR #58 无此变更。
+  4. `cleanupDeadTunnelsOnce`：PR #58 有 REV32 替换检查但缺 REV45 的循环内 `stopMu`
+     保护；PR #57 有 REV45 但缺 REV32。
+  5. `DebugDetector.kt`：PR #57 的 REV47 改变了 3 个测试的契约但未更新测试。
+- **风险**: **中**。直接合并会导致部分修复丢失或编译失败。
+- **建议**: 以 PR #58 为基础合并 PR #57，逐文件解决冲突，确保：
+  - `compareAndUpdatePairingSessionDB` 不含 `expires_at > ?`（采用 PR #57 版本或本分
+    支修复）。
+  - `getPairingSession` 采用 REV31 的重新查询回退逻辑（更健壮）。
+  - `cleanupDeadTunnelsOnce` 同时包含 REV32 替换检查和 REV45 循环内 `stopMu` 保护。
+  - 更新 DebugDetector 的 3 个测试以匹配 REV47 的新契约。
+

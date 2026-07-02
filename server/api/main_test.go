@@ -1032,7 +1032,17 @@ func TestCompareAndUpdatePairingSessionDB_StatusChangedConcurrently(t *testing.T
 	}
 }
 
-func TestCompareAndUpdatePairingSessionDB_ExpiredSessionReturnsConcurrentModification(t *testing.T) {
+// TestCompareAndUpdatePairingSessionDB_DoesNotRejectExpiredSession verifies that
+// compareAndUpdatePairingSessionDB enforces only optimistic-locking invariants
+// (code + expected status + expected engineer_id). Expiry is intentionally NOT
+// part of the WHERE clause: markSessionExpired must be able to write
+// status="expired" for sessions whose expires_at is already in the past, and
+// all callers perform an explicit time.Now().After(session.ExpiresAt) check
+// before mutating state. Including expires_at > now (REV36) made
+// markSessionExpired always return ErrConcurrentModification, leaving the
+// expired status unwritten and causing updatePairingSession to regress from
+// 410 Gone to 409 Conflict.
+func TestCompareAndUpdatePairingSessionDB_DoesNotRejectExpiredSession(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	server := newPairingTestServer(t)
@@ -1050,28 +1060,63 @@ func TestCompareAndUpdatePairingSessionDB_ExpiredSessionReturnsConcurrentModific
 		t.Fatalf("failed to insert expired session: %v", err)
 	}
 
-	// Attempting to connect an expired session must fail with ErrConcurrentModification,
-	// even though status/engineer_id match, because expires_at is in the past.
+	// Updating an expired session must succeed when the optimistic-locking
+	// invariants (status + engineer_id) match. Expiry enforcement is the
+	// caller's responsibility.
 	err := server.compareAndUpdatePairingSessionDB(&PairingSession{
 		Code:       "000000",
 		DeviceID:   "device-expired",
-		Status:     "connected",
+		Status:     "expired",
 		EngineerID: "engineer-1",
 		Used:       true,
 		CreatedAt:  expiredSession.CreatedAt,
 		ExpiresAt:  expiredSession.ExpiresAt,
 	}, "pending", "")
-	if !errors.Is(err, ErrConcurrentModification) {
-		t.Fatalf("expected ErrConcurrentModification for expired session, got %v", err)
+	if err != nil {
+		t.Fatalf("expected nil error for expired session with matching invariants, got %v", err)
 	}
 
-	// Verify the session was NOT overwritten.
+	// Verify the session WAS overwritten with the new status.
 	current, err := server.getPairingSessionDB("000000")
 	if err != nil {
-		t.Fatalf("failed to get session after failed update: %v", err)
+		t.Fatalf("failed to get session after update: %v", err)
 	}
-	if current.Status != "pending" {
-		t.Fatalf("status = %q, want %q; expired session was overwritten", current.Status, "pending")
+	if current.Status != "expired" {
+		t.Fatalf("status = %q, want %q; expired session was not updated", current.Status, "expired")
+	}
+}
+
+// TestMarkSessionExpired_SucceedsForExpiredSession verifies that
+// markSessionExpired can write status="expired" for an already-expired session.
+// This is the core regression from REV36: the expires_at > now WHERE clause
+// made this operation always fail with ErrConcurrentModification.
+func TestMarkSessionExpired_SucceedsForExpiredSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+
+	expiredSession := &PairingSession{
+		Code:      "111111",
+		DeviceID:  "device-mark-expired",
+		Status:    "pending",
+		CreatedAt: time.Now().Add(-2 * PairingCodeTTL),
+		ExpiresAt: time.Now().Add(-time.Minute),
+		Used:      false,
+	}
+	if err := server.createPairingSessionDB(expiredSession); err != nil {
+		t.Fatalf("failed to insert expired session: %v", err)
+	}
+
+	if err := server.markSessionExpired(expiredSession, "pending", ""); err != nil {
+		t.Fatalf("markSessionExpired failed for expired session: %v", err)
+	}
+
+	current, err := server.getPairingSessionDB("111111")
+	if err != nil {
+		t.Fatalf("failed to get session after markSessionExpired: %v", err)
+	}
+	if current.Status != "expired" {
+		t.Fatalf("status = %q, want %q; markSessionExpired did not persist expired status", current.Status, "expired")
 	}
 }
 
@@ -1135,6 +1180,55 @@ func TestUpdatePairingSession_ConcurrentModificationReturns409(t *testing.T) {
 
 	if !sawConflict {
 		t.Fatalf("expected at least one of %d trials to trigger a 409 Conflict from concurrent modification", trials)
+	}
+}
+
+// TestUpdatePairingSession_ExpiredReturns410Gone verifies that updating an
+// expired pairing session returns 410 Gone, not 409 Conflict. This is the
+// user-facing regression from REV36: the expires_at > now WHERE clause made
+// markSessionExpired always return ErrConcurrentModification, which the
+// updatePairingSession handler mapped to 409 Conflict instead of 410 Gone.
+func TestUpdatePairingSession_ExpiredReturns410Gone(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+
+	// Insert an already-expired pending session.
+	expiredSession := &PairingSession{
+		Code:      "222222",
+		DeviceID:  "device-expired-update",
+		Status:    "pending",
+		CreatedAt: time.Now().Add(-2 * PairingCodeTTL),
+		ExpiresAt: time.Now().Add(-time.Minute),
+		Used:      false,
+	}
+	if err := server.createPairingSessionDB(expiredSession); err != nil {
+		t.Fatalf("failed to insert expired session: %v", err)
+	}
+
+	router := gin.New()
+	router.PUT("/pair/:code", func(c *gin.Context) {
+		c.Set("engineer_id", c.GetHeader("X-Engineer-ID"))
+		server.updatePairingSession(c)
+	})
+
+	req := httptest.NewRequest(http.MethodPut, "/pair/222222", strings.NewReader(`{"status":"connected"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Engineer-ID", "engineer-1")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusGone {
+		t.Fatalf("expected 410 Gone for expired session, got %d (body=%s)", recorder.Code, recorder.Body.String())
+	}
+
+	// Verify the session status was persisted as "expired".
+	current, err := server.getPairingSessionDB("222222")
+	if err != nil {
+		t.Fatalf("failed to get session after update: %v", err)
+	}
+	if current.Status != "expired" {
+		t.Fatalf("status = %q, want %q; markSessionExpired did not persist expired status", current.Status, "expired")
 	}
 }
 
@@ -1457,7 +1551,13 @@ func TestRateLimitMiddlewareUsesSeparateBucketsPerIdentity(t *testing.T) {
 	}
 }
 
-func TestGetPairingSessionRateLimitedByJWTIdentity(t *testing.T) {
+// TestGetPairingSessionRateLimit_AllowsLegitimatePolling verifies that
+// successful session lookups (200) reset the rate-limiter failure counter, so
+// engineers polling a valid pairing code are never blocked. This is the REV34
+// fix: previously getPairingSession never called rateLimiter.Success, so every
+// poll incremented the failure counter and after 5 polls within 5 minutes the
+// engineer was blocked for 15 minutes.
+func TestGetPairingSessionRateLimit_AllowsLegitimatePolling(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	server := newPairingTestServer(t)
@@ -1475,59 +1575,67 @@ func TestGetPairingSessionRateLimitedByJWTIdentity(t *testing.T) {
 	router := gin.New()
 	router.GET("/api/pair/:code", server.internalOrUserAuthMiddleware(), server.rateLimitMiddleware(), server.getPairingSession)
 
-	makeRequest := func() *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodGet, "/api/pair/123456", nil)
+	makeRequest := func(code string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/pair/"+code, nil)
 		req.Header.Set("Authorization", "Bearer "+tokenString)
 		recorder := httptest.NewRecorder()
 		router.ServeHTTP(recorder, req)
 		return recorder
 	}
 
-	for i := 0; i < 5; i++ {
-		recorder := makeRequest()
+	// Legitimate polling of a valid code must never be rate-limited, even well
+	// past the brute-force threshold (MaxAttempts=5).
+	for i := 0; i < 20; i++ {
+		recorder := makeRequest("123456")
 		if recorder.Code != http.StatusOK {
-			t.Fatalf("setup request %d: expected 200, got %d", i+1, recorder.Code)
+			t.Fatalf("legitimate poll %d: expected 200, got %d (body=%s)", i+1, recorder.Code, recorder.Body.String())
 		}
-	}
-
-	recorder := makeRequest()
-	if recorder.Code != http.StatusTooManyRequests {
-		t.Fatalf("expected 429 after exceeding rate limit, got %d", recorder.Code)
-	}
-	if !strings.Contains(recorder.Body.String(), ErrRateLimitExceeded.Error()) {
-		t.Fatalf("expected error %q in response, got %s", ErrRateLimitExceeded.Error(), recorder.Body.String())
 	}
 }
 
-func TestGetPairingSessionRateLimitedByInternalAPIKey(t *testing.T) {
+// TestGetPairingSessionRateLimit_BlocksBruteForce verifies that repeated
+// lookups of a non-existent code (404) ARE rate-limited, preserving the
+// brute-force protection that REV34 intended.
+func TestGetPairingSessionRateLimit_BlocksBruteForce(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	server := newPairingTestServer(t)
 	server.jwtSecret = []byte("jwt-secret")
 	server.internalAPIKey = []byte("internal-secret")
-	insertPendingPairingSession(t, server, "123456", "device-1")
+
+	tokenString := issueAuthToken(t, server.jwtSecret, jwt.MapClaims{
+		"sub":  "engineer-2",
+		"role": "engineer",
+		"iat":  time.Now().Unix(),
+		"exp":  time.Now().Add(10 * time.Minute).Unix(),
+	})
 
 	router := gin.New()
 	router.GET("/api/pair/:code", server.internalOrUserAuthMiddleware(), server.rateLimitMiddleware(), server.getPairingSession)
 
-	makeRequest := func() *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodGet, "/api/pair/123456", nil)
-		req.Header.Set("X-Internal-API-Key", "internal-secret")
+	makeRequest := func(code string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/pair/"+code, nil)
+		req.Header.Set("Authorization", "Bearer "+tokenString)
 		recorder := httptest.NewRecorder()
 		router.ServeHTTP(recorder, req)
 		return recorder
 	}
 
+	// First MaxAttempts (5) failed lookups return 404 and count toward the limit.
 	for i := 0; i < 5; i++ {
-		recorder := makeRequest()
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("setup request %d: expected 200, got %d", i+1, recorder.Code)
+		recorder := makeRequest("999999")
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("brute-force probe %d: expected 404, got %d", i+1, recorder.Code)
 		}
 	}
 
-	recorder := makeRequest()
+	// The 6th attempt must be blocked.
+	recorder := makeRequest("999999")
 	if recorder.Code != http.StatusTooManyRequests {
-		t.Fatalf("expected 429 after exceeding rate limit, got %d", recorder.Code)
+		t.Fatalf("expected 429 after exceeding rate limit on brute-force probes, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), ErrRateLimitExceeded.Error()) {
+		t.Fatalf("expected error %q in response, got %s", ErrRateLimitExceeded.Error(), recorder.Body.String())
 	}
 }
 
