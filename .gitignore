@@ -49,6 +49,15 @@ test_output.txt
 *.out
 cover_*
 
+# PR review / bot comment dumps (local analysis artifacts)
+pr*_comments.json
+pr*_issue_comments.json
+bot_*_summary.txt
+summarize_bot_comments.py
+
+# Go coverage reports (per-component plain-text output)
+server/**/coverage
+
 # Kotlin
 .kotlin/
 

@@ -311,4 +311,49 @@ class DebugDetectorTest {
 
         assertNull(value)
     }
+
+    // ==================== readProcessOutput() ====================
+
+    @Test
+    fun readProcessOutput_returnsFirstLine_whenProcessOutputsLine() {
+        val command = if (isWindows()) {
+            listOf("cmd", "/c", "echo hello")
+        } else {
+            listOf("sh", "-c", "echo hello")
+        }
+
+        val result = DebugDetector.readProcessOutput(command)
+
+        assertEquals("hello", result)
+    }
+
+    @Test(timeout = 10000)
+    fun readProcessOutput_returnsNull_whenProcessHangsWithoutOutput() {
+        // 模拟 getprop 子进程卡住且不输出换行的情况。
+        // 修复前 readLine() 会无限阻塞；修复后应在 PROCESS_TIMEOUT_SECONDS 内超时并返回 null。
+        val command = if (isWindows()) {
+            listOf("cmd", "/c", "ping -n 100 127.0.0.1 > nul")
+        } else {
+            listOf("sleep", "100")
+        }
+
+        val startTime = System.currentTimeMillis()
+        val result = DebugDetector.readProcessOutput(command)
+        val elapsedMs = System.currentTimeMillis() - startTime
+
+        assertNull(result)
+        // 超时时间为 3 秒，允许 4 秒调度/清理余量（实现里读取超时后还会 waitFor 一次）
+        assertTrue("Expected timeout but completed in ${elapsedMs}ms", elapsedMs < 7000)
+    }
+
+    @Test
+    fun readProcessOutput_returnsNull_whenProcessNotFound() {
+        val result = DebugDetector.readProcessOutput(listOf("nonexistent-command-xyz"))
+
+        assertNull(result)
+    }
+
+    private fun isWindows(): Boolean {
+        return System.getProperty("os.name")?.contains("Windows", ignoreCase = true) == true
+    }
 }
