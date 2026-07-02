@@ -1042,6 +1042,28 @@ func TestRegisterUnregisterAfterStop(t *testing.T) {
 	}
 }
 
+func okHTTPResponse() *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("")),
+		Header:     make(http.Header),
+	}
+}
+
+func waitTimeout(t *testing.T, wg *sync.WaitGroup, timeout time.Duration) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		wg.Wait()
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		t.Fatal("timed out waiting for WaitGroup")
+	}
+}
+
 func TestSendReturnsErrorAfterClose(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1081,5 +1103,248 @@ func TestSendReturnsErrorAfterClose(t *testing.T) {
 		if err == nil {
 			t.Fatalf("Send after close returned nil on iteration %d — data would be silently lost", i)
 		}
+	}
+}
+
+// TestUnregisterSkipsOfflineWhenReplaced verifies that Unregister does not
+// send an offline notification when a replacement tunnel registers in the
+// window between removing the old tunnel and sending the offline notification.
+// This is a regression test for REV32.
+func TestUnregisterSkipsOfflineWhenReplaced(t *testing.T) {
+	var mu sync.Mutex
+	var statuses []string
+
+	manager := NewTunnelManager(&Config{APIEndpoint: "http://test"})
+	defer manager.Stop()
+
+	// Pause Unregister after the old tunnel is removed from the map but
+	// before the offline notification is sent, so we can deterministically
+	// register a replacement in the race window.
+	hook := make(chan struct{})
+	manager.testHookAfterUnregisterRemoved = hook
+
+	manager.httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			var payload map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Errorf("failed to decode payload: %v", err)
+			}
+			_ = r.Body.Close()
+			status, _ := payload["status"].(string)
+			mu.Lock()
+			statuses = append(statuses, status)
+			mu.Unlock()
+			return okHTTPResponse(), nil
+		}),
+	}
+
+	first := manager.Register("device-123", nil)
+
+	unregisterDone := make(chan struct{})
+	go func() {
+		manager.Unregister("device-123", first)
+		close(unregisterDone)
+	}()
+
+	// Wait until Unregister has removed the old tunnel from the map.
+	for {
+		if _, ok := manager.Get("device-123"); !ok {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	replacement := manager.Register("device-123", nil)
+
+	// Let Unregister continue past the removal point.
+	close(hook)
+
+	select {
+	case <-unregisterDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for Unregister")
+	}
+
+	waitTimeout(t, &manager.wg, 2*time.Second)
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, s := range statuses {
+		if s == "offline" {
+			t.Fatalf("expected no offline notification when replaced, got statuses=%v", statuses)
+		}
+	}
+
+	current, ok := manager.Get("device-123")
+	if !ok || current != replacement {
+		t.Fatal("expected replacement tunnel to remain registered")
+	}
+}
+
+// TestUnregisterSendsOfflineWhenNotReplaced verifies that Unregister still
+// sends an offline notification when the unregistered tunnel was the current
+// one and no replacement exists.
+func TestUnregisterSendsOfflineWhenNotReplaced(t *testing.T) {
+	var mu sync.Mutex
+	var statuses []string
+
+	manager := NewTunnelManager(&Config{APIEndpoint: "http://test"})
+	manager.httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			var payload map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			_ = r.Body.Close()
+			status, _ := payload["status"].(string)
+			mu.Lock()
+			statuses = append(statuses, status)
+			mu.Unlock()
+			return okHTTPResponse(), nil
+		}),
+	}
+	defer manager.Stop()
+
+	tunnel := manager.Register("device-456", nil)
+	manager.Unregister("device-456", tunnel)
+
+	waitTimeout(t, &manager.wg, 2*time.Second)
+
+	mu.Lock()
+	defer mu.Unlock()
+	hasOffline := false
+	for _, s := range statuses {
+		if s == "offline" {
+			hasOffline = true
+			break
+		}
+	}
+	if !hasOffline {
+		t.Fatalf("expected offline notification when not replaced, got statuses=%v", statuses)
+	}
+}
+
+// TestCleanupDeadTunnelsSkipsOfflineWhenReplaced verifies that
+// cleanupDeadTunnelsOnce does not send an offline notification when a dead
+// tunnel is replaced by a new registration before the notification is sent.
+// This is a regression test for REV32.
+func TestCleanupDeadTunnelsSkipsOfflineWhenReplaced(t *testing.T) {
+	config := &Config{HeartbeatTimeout: 50 * time.Millisecond}
+	manager := NewTunnelManager(config)
+	defer manager.Stop()
+
+	// Pause cleanup after dead tunnels are removed from the map but before
+	// sending offline notifications, so we can deterministically register a
+	// replacement in the race window.
+	hook := make(chan struct{})
+	manager.testHookAfterDeadTunnelsRemoved = hook
+
+	var mu sync.Mutex
+	var statuses []string
+	manager.httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			var payload map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			_ = r.Body.Close()
+			status, _ := payload["status"].(string)
+			mu.Lock()
+			statuses = append(statuses, status)
+			mu.Unlock()
+			return okHTTPResponse(), nil
+		}),
+	}
+
+	first := manager.Register("device-cleanup", nil)
+	first.mu.Lock()
+	first.LastPing = time.Now().Add(-time.Hour)
+	first.mu.Unlock()
+
+	cleanupDone := make(chan struct{})
+	go func() {
+		manager.cleanupDeadTunnelsOnce()
+		close(cleanupDone)
+	}()
+
+	// Wait until cleanup has removed the dead tunnel from the map.
+	for {
+		if _, ok := manager.Get("device-cleanup"); !ok {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	replacement := manager.Register("device-cleanup", nil)
+
+	// Let cleanup continue past the removal point.
+	close(hook)
+
+	select {
+	case <-cleanupDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for cleanup")
+	}
+
+	waitTimeout(t, &manager.wg, 2*time.Second)
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, s := range statuses {
+		if s == "offline" {
+			t.Fatalf("expected no offline notification when replaced, got statuses=%v", statuses)
+		}
+	}
+
+	current, ok := manager.Get("device-cleanup")
+	if !ok || current != replacement {
+		t.Fatal("expected replacement tunnel to remain registered")
+	}
+}
+
+// TestCleanupDeadTunnelsSendsOfflineWhenNotReplaced verifies that
+// cleanupDeadTunnelsOnce still sends an offline notification when a dead
+// tunnel is removed and no replacement has registered.
+func TestCleanupDeadTunnelsSendsOfflineWhenNotReplaced(t *testing.T) {
+	config := &Config{HeartbeatTimeout: 50 * time.Millisecond}
+	manager := NewTunnelManager(config)
+	defer manager.Stop()
+
+	var mu sync.Mutex
+	var statuses []string
+	manager.httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			var payload map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			_ = r.Body.Close()
+			status, _ := payload["status"].(string)
+			mu.Lock()
+			statuses = append(statuses, status)
+			mu.Unlock()
+			return okHTTPResponse(), nil
+		}),
+	}
+
+	tunnel := manager.Register("device-cleanup-dead", nil)
+	tunnel.mu.Lock()
+	tunnel.LastPing = time.Now().Add(-time.Hour)
+	tunnel.mu.Unlock()
+
+	manager.cleanupDeadTunnelsOnce()
+
+	waitTimeout(t, &manager.wg, 2*time.Second)
+
+	mu.Lock()
+	defer mu.Unlock()
+	hasOffline := false
+	for _, s := range statuses {
+		if s == "offline" {
+			hasOffline = true
+			break
+		}
+	}
+	if !hasOffline {
+		t.Fatalf("expected offline notification when not replaced, got statuses=%v", statuses)
+	}
+
+	_, ok := manager.Get("device-cleanup-dead")
+	if ok {
+		t.Fatal("expected dead tunnel to be removed")
 	}
 }

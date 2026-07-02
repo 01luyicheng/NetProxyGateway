@@ -1615,13 +1615,17 @@
   - 仅当并发请求将会话刷新为未过期状态时，才返回 200 OK 及当前会话数据。
   - 新增 `Server.testHookGetPairingSessionDB` 测试钩子以注入 `getPairingSessionDB` 返回值，覆盖上述三种分支。
 
-### REV32: server/tunnel 离线通知可能覆盖新建立的在线状态 [未修复]
-- **修复状态**: 未修复
+### REV32: server/tunnel 离线通知可能覆盖新建立的在线状态 [已修复]
+- **修复状态**: 已修复
 - **修复难度**: 高
 - **位置**: `server/tunnel/main.go` (`Unregister`、`cleanupDeadTunnelsOnce`、`notifyDeviceStatus`)
 - **问题描述**: `Unregister` 和 `cleanupDeadTunnelsOnce` 在删除旧隧道后直接发送 `offline` 通知，未重新检查是否已有新的 replacement tunnel 注册。`notifyDeviceStatus` 的重试机制也可能在延迟期间把后来写入的 `online` 覆盖为 `offline`，造成设备状态与实际情况相反。
 - **风险**: **高**。工程师端可能看到设备已离线，但实际上隧道已重建，导致远程协助中断或误判
-- **修复方式**: 发送 `offline` 前再次检查该设备是否存在活跃隧道；为 `notifyDeviceStatus` 的写入增加条件（如版本号/时间戳），避免过期的 `offline` 覆盖较新的 `online`
+- **修复方式**:
+  - `server/tunnel/main.go`: `Unregister` 和 `cleanupDeadTunnelsOnce` 在关闭旧隧道后、发送 `offline` 前，重新检查 `m.tunnels[deviceID]` 是否存在活跃隧道；若存在则跳过 `offline` 通知。
+  - 补充测试覆盖：替换隧道在 `Unregister`/`cleanupDeadTunnelsOnce` 的删除-通知窗口中注册时不发送 `offline`；无替换隧道时正常发送 `offline`。
+  - `notifyDeviceStatus` 的重试延迟风险由 REV33 的毫秒级 `last_seen` 与 API upsert 的 `excluded.last_seen > device_status.last_seen` 保护覆盖，过期的 `offline` 不会覆盖较新的 `online`。
+- **剩余风险**: 检查与通知之间仍存在极小的时间窗口；在此窗口内新隧道注册且旧 `offline` 已决定发送，则仍会发出一次携带旧时间戳的 `offline`。该离线通知会被 API 的 `last_seen` 保护拒绝，不会覆盖在线状态，但会造成一次无效请求。
 
 ### REV33: server/api + server/tunnel 秒级 `last_seen` 导致同秒重连状态丢失 [已修复]
 - **修复状态**: 已修复
