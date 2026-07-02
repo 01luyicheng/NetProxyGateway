@@ -529,7 +529,6 @@ fun PairingSection(
                 modifier = Modifier.fillMaxWidth(),
                 enabled = !uiState.isPairingInProgress,
                 singleLine = true,
-                placeholder = { Text(stringResource(R.string.pairing_hint)) },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done)
             )
 
