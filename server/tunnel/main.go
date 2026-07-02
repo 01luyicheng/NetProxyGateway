@@ -227,6 +227,14 @@ type TunnelManager struct {
 	stopMu sync.Mutex
 	// stopped is set to true after Stop() has been called at least once.
 	stopped bool
+	// testHookAfterUnregisterRemoved is used by tests to pause Unregister after
+	// the tunnel has been removed from the map but before closing it or sending
+	// offline notifications. Nil in production.
+	testHookAfterUnregisterRemoved chan struct{}
+	// testHookAfterDeadTunnelsRemoved is used by tests to pause cleanup after
+	// dead tunnels have been removed from the map but before closing them or
+	// sending offline notifications. Nil in production.
+	testHookAfterDeadTunnelsRemoved chan struct{}
 }
 
 // NewTunnelManager creates a new tunnel manager.
@@ -322,11 +330,28 @@ func (m *TunnelManager) Unregister(deviceID string, tunnel *TunnelConn) {
 		return
 	}
 
+	// Test hook: pause after the tunnel has been removed from the map but
+	// before closing it or sending offline notifications. This allows tests
+	// to deterministically inject a replacement tunnel registration.
+	if m.testHookAfterUnregisterRemoved != nil {
+		<-m.testHookAfterUnregisterRemoved
+	}
+
 	// Close tunnel outside m.mu to avoid blocking I/O under the lock.
 	// Close() may block if sendLoop is holding connMu for a WriteMessage call.
 	closedTunnel.Close()
 
 	log.Printf("Tunnel unregistered for device: %s", deviceID)
+
+	// Re-check whether a replacement tunnel registered while we were closing
+	// the old one. If so, skip the offline notification to avoid overwriting
+	// the fresh online state (REV32).
+	m.mu.RLock()
+	if _, replaced := m.tunnels[deviceID]; replaced {
+		m.mu.RUnlock()
+		return
+	}
+	m.mu.RUnlock()
 
 	// Check stopped before wg.Add(1) to prevent WaitGroup reuse panic
 	// after Stop() has called wg.Wait().
@@ -505,10 +530,29 @@ func (m *TunnelManager) cleanupDeadTunnelsOnce() {
 	}
 	m.mu.Unlock()
 
+	// Test hook: pause after dead tunnels have been removed from the map but
+	// before closing them or sending offline notifications. This allows tests
+	// to deterministically inject a replacement tunnel registration.
+	if m.testHookAfterDeadTunnelsRemoved != nil {
+		<-m.testHookAfterDeadTunnelsRemoved
+	}
+
 	for i, tunnel := range deadTunnels {
+		deviceID := deadIDs[i]
 		tunnel.Close()
+
+		// Re-check whether a replacement tunnel registered while we were
+		// closing the dead one. If so, skip the offline notification to avoid
+		// overwriting the fresh online state (REV32).
+		m.mu.RLock()
+		if _, replaced := m.tunnels[deviceID]; replaced {
+			m.mu.RUnlock()
+			continue
+		}
+		m.mu.RUnlock()
+
 		m.wg.Add(1)
-		go m.notifyDeviceStatus(deadIDs[i], "offline", "")
+		go m.notifyDeviceStatus(deviceID, "offline", "")
 	}
 }
 
