@@ -1557,7 +1557,7 @@
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt` (`getprop` 回退路径)
 - **问题描述**: `getprop` 回退路径先调用 `reader.readLine()` 再调用 `process.waitFor(timeout)`。如果 `getprop` 子进程卡住或不输出换行，`readLine()` 会无限阻塞，超时参数无法生效。
 - **风险**: **中**。调试检测可能冻结 UI 线程或后台检测协程，影响应用响应
-- **修复方式**: 将 `process.waitFor(timeout)` 放到读取之前或改为异步等待；使用带超时的读取（如协程 + `withTimeout`），确保子进程不会阻塞检测流程
+- **修复方式**: 将 `getprop` 读取封装到 `readProcessOutput(command)`：在独立守护线程中执行 `BufferedReader.readLine()`，通过 `Future.get(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)` 限制读取本身；超时或异常时取消 Future 并强制销毁子进程与线程池，避免 `readLine()` 无限阻塞。
 
 ### REV36: server/api `compareAndUpdatePairingSessionDB` 未校验会话是否已过期 [已修复]
 - **修复状态**: 已修复
