@@ -485,20 +485,25 @@ func (s *Server) updatePairingSessionDB(session *PairingSession) error {
 }
 
 // compareAndUpdatePairingSessionDB performs a conditional update on a pairing session,
-// ensuring the session hasn't been modified since it was read (optimistic locking)
-// and that it has not already expired.
-// Returns ErrConcurrentModification if the session was modified concurrently or has expired.
+// ensuring the session hasn't been modified since it was read (optimistic locking).
+// Returns ErrConcurrentModification if the session was modified concurrently.
+//
+// Expiry is intentionally NOT enforced here: markSessionExpired must be able to
+// write status="expired" for sessions that have already crossed their expires_at
+// threshold, and all callers already perform an explicit
+// time.Now().After(session.ExpiresAt) check before mutating state. Including
+// expires_at > now in the WHERE clause (REV36) made markSessionExpired always
+// return ErrConcurrentModification, leaving the expired status unwritten and
+// causing updatePairingSession to regress from 410 Gone to 409 Conflict.
 func (s *Server) compareAndUpdatePairingSessionDB(session *PairingSession, expectedStatus, expectedEngineerID string) error {
-	now := time.Now().Unix()
 	result, err := s.db.Exec(
-		`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ? AND status = ? AND engineer_id = ? AND expires_at > ?`,
+		`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ? AND status = ? AND engineer_id = ?`,
 		session.Status,
 		session.EngineerID,
 		boolToInt(session.Used),
 		session.Code,
 		expectedStatus,
 		expectedEngineerID,
-		now,
 	)
 	if err != nil {
 		return err
@@ -894,6 +899,10 @@ func (s *Server) getPairingSession(c *gin.Context) {
 
 	// Check if expired
 	if time.Now().After(session.ExpiresAt) {
+		// The session was found (valid code), so this is not a brute-force
+		// attempt. Reset the failure counter to avoid blocking engineers who
+		// poll an expiring session (REV34 rate-limit fix).
+		s.rateLimiter.Success(rateLimitKey(c))
 		if err := s.markSessionExpired(session, session.Status, session.EngineerID); err != nil {
 			if errors.Is(err, ErrConcurrentModification) {
 				// Session was modified concurrently; re-fetch to return current state
@@ -918,6 +927,9 @@ func (s *Server) getPairingSession(c *gin.Context) {
 		return
 	}
 
+	// Session found and valid: reset the failure counter so legitimate polling
+	// does not accumulate toward the brute-force block (REV34 rate-limit fix).
+	s.rateLimiter.Success(rateLimitKey(c))
 	c.JSON(http.StatusOK, session)
 }
 
