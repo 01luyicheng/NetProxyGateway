@@ -1601,3 +1601,43 @@
 - **风险**: **高**。工程师可通过域名访问公网资源，完全绕过私有网络访问策略
 - **修复方式**: 对域名目标返回 `false`，拒绝所有域名连接，确保安全策略一致。更新注释说明拒绝原因
 
+### REV31: server/api `markSessionExpired` 并发过期标记回退语义错误 [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 中
+- **位置**: `server/api/main.go` (`markSessionExpired` 附近)
+- **问题描述**: `markSessionExpired` 触发 `ErrConcurrentModification` 后，重新查询会话失败时返回 410 Gone，掩盖真实的数据库错误；查询成功但会话仍过期时返回 200 OK，与正常过期行为不一致。回退路径的 HTTP 语义和错误处理需要重新审视。
+- **风险**: **中**。错误状态码不一致会误导客户端重试逻辑，且 DB 错误被隐藏不利于运维排查
+- **修复方式**: 明确并发冲突回退路径的语义：DB 查询失败应返回 5xx 并记录真实错误；会话确实过期时应保持与原过期流程一致的状态码和响应体
+
+### REV32: server/tunnel 离线通知可能覆盖新建立的在线状态 [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 高
+- **位置**: `server/tunnel/main.go` (`Unregister`、`cleanupDeadTunnelsOnce`、`notifyDeviceStatus`)
+- **问题描述**: `Unregister` 和 `cleanupDeadTunnelsOnce` 在删除旧隧道后直接发送 `offline` 通知，未重新检查是否已有新的 replacement tunnel 注册。`notifyDeviceStatus` 的重试机制也可能在延迟期间把后来写入的 `online` 覆盖为 `offline`，造成设备状态与实际情况相反。
+- **风险**: **高**。工程师端可能看到设备已离线，但实际上隧道已重建，导致远程协助中断或误判
+- **修复方式**: 发送 `offline` 前再次检查该设备是否存在活跃隧道；为 `notifyDeviceStatus` 的写入增加条件（如版本号/时间戳），避免过期的 `offline` 覆盖较新的 `online`
+
+### REV33: server/api + server/tunnel 秒级 `last_seen` 导致同秒重连状态丢失 [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 中
+- **位置**: `server/api/main.go` (`updateDeviceStatus` / `upsertDeviceStatusDB`)、`server/tunnel/main.go` (`notifyDeviceStatus`)
+- **问题描述**: `server/api/main.go` 写入设备状态时仍使用秒级 `Unix()` 作为 `last_seen`，且 `upsertDeviceStatusDB` 当前为无条件 `ON CONFLICT DO UPDATE`，没有 `excluded.last_seen > device_status.last_seen` 保护。`server/tunnel/main.go` 的 `notifyDeviceStatus` 带指数退避重试，旧的 `offline` 通知可能延迟到达 API，加上同秒内 `last_seen` 相同，无法判断事件先后顺序，导致过期的 `offline` 覆盖较新的 `online`。
+- **风险**: **高**。高频重连场景下状态机不可靠，可能把在线设备判定为离线
+- **修复方式**: `last_seen` 改用毫秒/微秒级时间戳（`UnixMilli`/`UnixMicro`）；`upsertDeviceStatusDB` 增加 `WHERE excluded.last_seen > device_status.last_seen` 条件；`notifyDeviceStatus` 携带单调递增版本号或客户端时间戳，API 据此判定是否接受
+
+### REV34: server/api GET `/api/pair/:code` 缺少限流 [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 低
+- **位置**: `server/api/main.go` (`GET /api/pair/:code` 路由)
+- **问题描述**: REV28 已为该路由补充认证，但仍无速率限制。已认证用户仍可高频枚举 6 位配对码，存在信息泄露和会话探测风险。
+- **风险**: **中**。认证后仍可遍历配对码空间，获取其他工程师/设备的配对会话信息
+- **修复方式**: 为该路由添加 per-IP 或 per-account 速率限制；可复用项目中已有的限流中间件或基于 `golang.org/x/time/rate` 实现
+
+### REV35: Android `DebugDetector.getprop` 超时顺序失效 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 低
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt` (`getprop` 回退路径)
+- **问题描述**: `getprop` 回退路径先调用 `reader.readLine()` 再调用 `process.waitFor(timeout)`。如果 `getprop` 子进程卡住或不输出换行，`readLine()` 会无限阻塞，超时参数无法生效。
+- **风险**: **中**。调试检测可能冻结 UI 线程或后台检测协程，影响应用响应
+- **修复方式**: 将 `process.waitFor(timeout)` 放到读取之前或改为异步等待；使用带超时的读取（如协程 + `withTimeout`），确保子进程不会阻塞检测流程
+

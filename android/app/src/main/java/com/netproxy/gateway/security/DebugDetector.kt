@@ -7,7 +7,11 @@ import java.io.File
 import java.io.FileReader
 import java.io.InputStreamReader
 import java.lang.reflect.Method
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 /**
  * 反调试检测器
@@ -327,18 +331,44 @@ object DebugDetector {
         }
     }
 
-    private fun readPropertyViaProcess(prop: String): String? {
+    private fun readPropertyViaProcess(prop: String): String? =
+        readProcessOutput(listOf("getprop", prop))
+
+    /**
+     * 执行外部命令并读取其标准输出的第一行。
+     *
+     * 读取操作本身受 [PROCESS_TIMEOUT_SECONDS] 限制，避免子进程卡住或不输出换行时
+     * [BufferedReader.readLine] 无限阻塞。超时或异常时都会强制清理子进程与线程资源。
+     */
+    internal fun readProcessOutput(command: List<String>): String? {
         return try {
-            val process = ProcessBuilder("getprop", prop)
+            val process = ProcessBuilder(command)
                 .redirectErrorStream(true)
                 .start()
+            val executor = Executors.newSingleThreadExecutor { r ->
+                Thread(r, "process-reader").apply { isDaemon = true }
+            }
             try {
-                BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8)).use { reader ->
-                    val value = reader.readLine()
-                    val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                    if (!finished) null else value
+                val future = executor.submit(Callable<String?> {
+                    BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8)).use { reader ->
+                        reader.readLine()
+                    }
+                })
+
+                val value = try {
+                    future.get(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                } catch (e: TimeoutException) {
+                    future.cancel(true)
+                    return null
+                } catch (e: ExecutionException) {
+                    null
                 }
+
+                // 读取成功后等待子进程结束，避免产生僵尸进程
+                process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                value
             } finally {
+                executor.shutdownNow()
                 process.destroyForcibly()
             }
         } catch (e: Exception) {

@@ -56,6 +56,10 @@ cover_*
 pr_reviews_*.json
 pr_review_*.md
 coderabbit_*.md
+pr*_comments.json
+pr*_issue_comments.json
+bot_*_summary.txt
+summarize_bot_comments.py
 
 # Kotlin
 .kotlin/
