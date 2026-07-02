@@ -1601,13 +1601,19 @@
 - **风险**: **高**。工程师可通过域名访问公网资源，完全绕过私有网络访问策略
 - **修复方式**: 对域名目标返回 `false`，拒绝所有域名连接，确保安全策略一致。更新注释说明拒绝原因
 
-### REV31: server/api `markSessionExpired` 并发过期标记回退语义错误 [未修复]
-- **修复状态**: 未修复
+### REV31: server/api `markSessionExpired` 并发过期标记回退语义错误 [已修复]
+- **修复状态**: 已修复
+- **修复日期**: 2026-07-02
+- **修复模型**: Kimi-K2.7-Code
 - **修复难度**: 中
-- **位置**: `server/api/main.go` (`markSessionExpired` 附近)
+- **位置**: `server/api/main.go` (`getPairingSession`, L891-L905)
 - **问题描述**: `markSessionExpired` 触发 `ErrConcurrentModification` 后，重新查询会话失败时返回 410 Gone，掩盖真实的数据库错误；查询成功但会话仍过期时返回 200 OK，与正常过期行为不一致。回退路径的 HTTP 语义和错误处理需要重新审视。
 - **风险**: **中**。错误状态码不一致会误导客户端重试逻辑，且 DB 错误被隐藏不利于运维排查
-- **修复方式**: 明确并发冲突回退路径的语义：DB 查询失败应返回 5xx 并记录真实错误；会话确实过期时应保持与原过期流程一致的状态码和响应体
+- **修复方式**:
+  - 并发冲突后重新查询失败：记录真实错误并返回 500 Internal Server Error（`ErrFailedToQueryDatabase`）。
+  - 重新查询成功但会话仍过期（或已被删除）：返回 410 Gone（`ErrSessionExpired`），与正常过期路径一致。
+  - 仅当并发请求将会话刷新为未过期状态时，才返回 200 OK 及当前会话数据。
+  - 新增 `Server.testHookGetPairingSessionDB` 测试钩子以注入 `getPairingSessionDB` 返回值，覆盖上述三种分支。
 
 ### REV32: server/tunnel 离线通知可能覆盖新建立的在线状态 [未修复]
 - **修复状态**: 未修复

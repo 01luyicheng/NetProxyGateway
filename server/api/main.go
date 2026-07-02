@@ -60,7 +60,7 @@ var (
 	ErrInternalAPIKeyNotConfigured        = errors.New("internal api key not configured")
 	ErrMissingInternalAPIKey              = errors.New("missing internal api key")
 	ErrInvalidInternalAPIKey              = errors.New("invalid internal api key")
-	ErrConcurrentModification            = errors.New("session was modified by another request, please retry")
+	ErrConcurrentModification             = errors.New("session was modified by another request, please retry")
 )
 
 var (
@@ -110,6 +110,10 @@ type Server struct {
 	cleanupStop             chan struct{}
 	cleanupWorkers          sync.WaitGroup
 	cleanupSessionsInterval time.Duration
+
+	// testHookGetPairingSessionDB is used by tests to inject controlled
+	// responses from getPairingSessionDB. When nil the real database is used.
+	testHookGetPairingSessionDB func(code string) (*PairingSession, error)
 }
 
 // handleBindError handles request binding errors uniformly.
@@ -432,6 +436,10 @@ func (s *Server) createPairingSessionDB(session *PairingSession) error {
 
 // getPairingSessionDB retrieves a pairing session from the database by code.
 func (s *Server) getPairingSessionDB(code string) (*PairingSession, error) {
+	if s.testHookGetPairingSessionDB != nil {
+		return s.testHookGetPairingSessionDB(code)
+	}
+
 	var session PairingSession
 	var createdAt, expiresAt int64
 	var used int
@@ -877,7 +885,12 @@ func (s *Server) getPairingSession(c *gin.Context) {
 			if errors.Is(err, ErrConcurrentModification) {
 				// Session was modified concurrently; re-fetch to return current state
 				refreshed, refreshErr := s.getPairingSessionDB(code)
-				if refreshErr != nil || refreshed == nil {
+				if refreshErr != nil {
+					log.Printf("Failed to refresh session %s after concurrent modification: %v", session.Code, refreshErr)
+					c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToQueryDatabase.Error()})
+					return
+				}
+				if refreshed == nil || time.Now().After(refreshed.ExpiresAt) {
 					c.JSON(http.StatusGone, gin.H{"error": ErrSessionExpired.Error()})
 					return
 				}
