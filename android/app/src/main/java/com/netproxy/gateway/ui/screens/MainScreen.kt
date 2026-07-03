@@ -346,6 +346,8 @@ private fun AuditLogsScreen(
 
         Spacer(modifier = Modifier.height(12.dp))
 
+        val listState = rememberLazyListState()
+
         if (visibleEntries.isEmpty()) {
             Text(
                 text = stringResource(R.string.audit_logs_empty),
@@ -353,7 +355,6 @@ private fun AuditLogsScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         } else {
-            val listState = rememberLazyListState()
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 state = listState,
@@ -532,6 +533,7 @@ fun PairingSection(
                 modifier = Modifier.fillMaxWidth(),
                 enabled = !uiState.isPairingInProgress,
                 singleLine = true,
+                placeholder = { Text(stringResource(R.string.pairing_hint)) },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done)
             )
 
