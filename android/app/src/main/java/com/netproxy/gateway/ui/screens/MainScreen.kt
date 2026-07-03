@@ -325,7 +325,6 @@ private fun AuditLogsScreen(
 ) {
     val entries by AppAuditLogStore.entries.collectAsState()
     val visibleEntries = remember(entries) { entries.asReversed() }
-    val listState = rememberLazyListState()
     val formatter = remember {
         DateTimeFormatter.ofPattern("HH:mm:ss", Locale.getDefault())
             .withZone(ZoneId.systemDefault())
@@ -346,6 +345,8 @@ private fun AuditLogsScreen(
         }
 
         Spacer(modifier = Modifier.height(12.dp))
+
+        val listState = rememberLazyListState()
 
         if (visibleEntries.isEmpty()) {
             Text(
