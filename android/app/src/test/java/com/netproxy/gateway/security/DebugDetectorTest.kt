@@ -5,7 +5,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
-import org.junit.Assert.fail
 import org.junit.Test
 import java.lang.reflect.Method
 
@@ -191,35 +190,46 @@ class DebugDetectorTest {
 
     @Test
     fun resolveDebugPropertiesState_returnsTrue_whenReflectionSucceedsAndRoDebuggableIsOne() {
-        // 路径1：反射成功读取调试属性
+        // 路径1：反射成功读取调试属性；REV47 后仍会并行调用 getprop 作为独立校验路径
         FakeSystemProperties.values = mapOf(
             "ro.debuggable" to "1",
             "ro.secure" to "1",
             "persist.sys.usb.config" to "mtp"
         )
+        val processCalls = mutableListOf<String>()
 
         val result = DebugDetector.resolveDebugPropertiesState(
             getMethodProvider = { fakeGetMethod() },
-            processPropertyReader = { fail("反射成功时不应回退到 getprop 子进程"); null }
+            processPropertyReader = { prop ->
+                processCalls.add(prop)
+                null
+            }
         )
 
         assertTrue(result)
+        // 反射已在 ro.debuggable 识别 debug，后续属性被短路，但 getprop 仍被调用一次
+        assertEquals(listOf("ro.debuggable"), processCalls)
     }
 
     @Test
-    fun resolveDebugPropertiesState_returnsFalse_whenReflectionSucceedsWithSecureValues() {
+    fun resolveDebugPropertiesState_returnsFalse_whenBothReflectionAndGetpropAreSecure() {
         FakeSystemProperties.values = mapOf(
             "ro.debuggable" to "0",
             "ro.secure" to "1",
             "persist.sys.usb.config" to "mtp"
         )
+        val processCalls = mutableListOf<String>()
 
         val result = DebugDetector.resolveDebugPropertiesState(
             getMethodProvider = { fakeGetMethod() },
-            processPropertyReader = { fail("反射成功时不应回退到 getprop 子进程"); null }
+            processPropertyReader = { prop ->
+                processCalls.add(prop)
+                null
+            }
         )
 
         assertFalse(result)
+        assertEquals(listOf("ro.debuggable", "ro.secure", "persist.sys.usb.config"), processCalls)
     }
 
     @Test
@@ -257,7 +267,7 @@ class DebugDetectorTest {
 
     @Test
     fun resolveDebugPropertiesState_continuesCheckingRemainingProperties_whenSinglePropertyReflectionThrows() {
-        // 路径3：单条属性反射异常不会中断后续属性检查
+        // 路径3：单条属性反射异常不会中断后续属性检查；REV47 后 getprop 会作为独立路径检查所有属性
         ThrowingSystemProperties.throwOnKeys = setOf("ro.debuggable")
         ThrowingSystemProperties.values = mapOf("persist.sys.usb.config" to "adb0")
         val fallbackCalls = mutableListOf<String>()
@@ -271,8 +281,8 @@ class DebugDetectorTest {
         )
 
         assertTrue(result)
-        // 仅对反射失败的属性触发 getprop 回退，其它属性仍通过反射成功检测
-        assertEquals(listOf("ro.debuggable"), fallbackCalls)
+        // REV47 后 union 检测：每条属性都会同时走反射与 getprop，因此三个属性都会触发 getprop
+        assertEquals(listOf("ro.debuggable", "ro.secure", "persist.sys.usb.config"), fallbackCalls)
     }
 
     @Test
