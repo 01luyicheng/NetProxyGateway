@@ -325,6 +325,7 @@ private fun AuditLogsScreen(
 ) {
     val entries by AppAuditLogStore.entries.collectAsState()
     val visibleEntries = remember(entries) { entries.asReversed() }
+    val listState = rememberLazyListState()
     val formatter = remember {
         DateTimeFormatter.ofPattern("HH:mm:ss", Locale.getDefault())
             .withZone(ZoneId.systemDefault())
@@ -353,7 +354,6 @@ private fun AuditLogsScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         } else {
-            val listState = rememberLazyListState()
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 state = listState,
