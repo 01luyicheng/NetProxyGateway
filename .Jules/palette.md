@@ -1,0 +1,3 @@
+## 2026-07-03 - [Conditionally Clearing Focus on Done]
+**Learning:** In Jetpack Compose, when wiring keyboard actions like `onDone`, unconditionally clearing focus can interrupt the user's flow, especially if validation fails. It is a much better UX pattern to clear focus only when validation passes. This simple change allows the user to immediately correct their input without re-selecting the text field if there's an error, while still properly dismissing the keyboard upon a successful submit.
+**Action:** Always wrap `focusManager.clearFocus()` inside conditional statements that check for input validity before firing submission events.
