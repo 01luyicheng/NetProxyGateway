@@ -536,8 +536,8 @@ fun PairingSection(
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(
                     onDone = {
-                        focusManager.clearFocus()
                         if (pairingCode.length >= 6 && !uiState.isPairingInProgress) {
+                            focusManager.clearFocus()
                             viewModel.pairWithCode(pairingCode)
                         }
                     }

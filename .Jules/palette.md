@@ -1,3 +1,6 @@
 ## 2025-07-02 - 为配对输入框添加带无障碍标签的清空按钮
 **学习 (Learning):** 在 Jetpack Compose 的 `OutlinedTextField` 中通过 `trailingIcon` 添加清空按钮可以改善用户体验，使用户无需连续点击退格键即可快速清除输入内容。然而，此类图标需要恰当的无障碍支持。对于可交互的图标，我们不能仅仅使用 `contentDescription = null` (这仅适用于纯装饰性图标)，而是需要添加本地化的“清空输入框”描述，以确保屏幕阅读器能正确播报按钮的用途。此外，键盘的 `onDone` 操作可结合输入长度校验，收起键盘并自动触发配对流程，让交互更加顺畅。
 **行动 (Action):** 对于 Jetpack Compose 中所有具备交互功能的图标，无论其作为多么微小的 UX 改善，都必须提供准确且已翻译的 `contentDescription`，以确保辅助功能的完备。
+## 2025-07-02 - Ensure keyboard action behaviors respect component states
+**Learning:** Automatically clearing focus on keyboard interactions (like `onDone`) must be conditionally gated. Unconditionally clearing focus interrupts the user's flow if they accidentally trigger the action before meeting validation constraints (e.g., inputting all 6 required digits).
+**Action:** When wiring keyboard actions such as `onDone`, only dismiss the keyboard/clear focus if the input is valid and the intended resulting action (like submitting or pairing) is actually going to be fired.
