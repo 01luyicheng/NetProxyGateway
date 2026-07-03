@@ -1129,6 +1129,7 @@ func TestUpdatePairingSession_ConcurrentModificationReturns409(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	server := newPairingTestServer(t)
+	insertPendingPairingSession(t, server, "race-001", "device-race")
 
 	router := gin.New()
 	router.PUT("/pair/:code", func(c *gin.Context) {
@@ -1136,51 +1137,53 @@ func TestUpdatePairingSession_ConcurrentModificationReturns409(t *testing.T) {
 		server.updatePairingSession(c)
 	})
 
-	sendConnectRequest := func(code, engineerID string) int {
-		req := httptest.NewRequest(http.MethodPut, "/pair/"+code, strings.NewReader(`{"status":"connected"}`))
+	// Two-party barrier: both requests must reach compareAndUpdatePairingSessionDB
+	// before either proceeds, guaranteeing both read pending state and one UPDATE
+	// wins while the other gets ErrConcurrentModification.
+	arrived := make(chan struct{}, 2)
+	proceed := make(chan struct{})
+	server.testHookCompareAndUpdatePairingSessionDB = func() {
+		arrived <- struct{}{}
+		<-proceed
+	}
+
+	sendConnectRequest := func(engineerID string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPut, "/pair/race-001", strings.NewReader(`{"status":"connected"}`))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Engineer-ID", engineerID)
 		recorder := httptest.NewRecorder()
 		router.ServeHTTP(recorder, req)
-		return recorder.Code
+		return recorder
 	}
 
-	const trials = 30
-	sawConflict := false
+	var wg sync.WaitGroup
+	recorders := make([]*httptest.ResponseRecorder, 2)
+	wg.Add(2)
+	go func() { defer wg.Done(); recorders[0] = sendConnectRequest("engineer-A") }()
+	go func() { defer wg.Done(); recorders[1] = sendConnectRequest("engineer-B") }()
 
-	for i := 0; i < trials; i++ {
-		pairingCode := fmt.Sprintf("race-%03d", i)
-		insertPendingPairingSession(t, server, pairingCode, "device-race")
-
-		var wg sync.WaitGroup
-		statusCodes := make([]int, 2)
-		wg.Add(2)
-		go func() { defer wg.Done(); statusCodes[0] = sendConnectRequest(pairingCode, "engineer-A") }()
-		go func() { defer wg.Done(); statusCodes[1] = sendConnectRequest(pairingCode, "engineer-B") }()
-		wg.Wait()
-
-		successCount := 0
-		for _, statusCode := range statusCodes {
-			switch statusCode {
-			case http.StatusOK:
-				successCount++
-			case http.StatusConflict:
-				sawConflict = true
-			case http.StatusForbidden:
-				// Acceptable: this request only read the session after the
-				// other had already committed its update.
-			default:
-				t.Fatalf("trial %d: unexpected status code %d (codes=%v)", i, statusCode, statusCodes)
-			}
-		}
-		if successCount != 1 {
-			t.Fatalf("trial %d: expected exactly one concurrent request to succeed, got %d (codes=%v)", i, successCount, statusCodes)
+	for i := 0; i < 2; i++ {
+		select {
+		case <-arrived:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for goroutines to reach barrier")
 		}
 	}
+	close(proceed)
+	wg.Wait()
 
-	if !sawConflict {
-		t.Fatalf("expected at least one of %d trials to trigger a 409 Conflict from concurrent modification", trials)
+	var codes [2]int
+	for i, rec := range recorders {
+		codes[i] = rec.Code
 	}
+
+	if codes[0] == http.StatusOK && codes[1] == http.StatusConflict {
+		return
+	}
+	if codes[1] == http.StatusOK && codes[0] == http.StatusConflict {
+		return
+	}
+	t.Fatalf("expected one 200 and one 409, got %v", codes)
 }
 
 // TestUpdatePairingSession_ExpiredReturns410Gone verifies that updating an

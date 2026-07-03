@@ -114,6 +114,10 @@ type Server struct {
 	// testHookGetPairingSessionDB is used by tests to inject controlled
 	// responses from getPairingSessionDB. When nil the real database is used.
 	testHookGetPairingSessionDB func(code string) (*PairingSession, error)
+
+	// testHookCompareAndUpdatePairingSessionDB is used by tests to synchronize
+	// concurrent updates. When nil the real database update is executed.
+	testHookCompareAndUpdatePairingSessionDB func()
 }
 
 // handleBindError handles request binding errors uniformly.
@@ -496,6 +500,10 @@ func (s *Server) updatePairingSessionDB(session *PairingSession) error {
 // return ErrConcurrentModification, leaving the expired status unwritten and
 // causing updatePairingSession to regress from 410 Gone to 409 Conflict.
 func (s *Server) compareAndUpdatePairingSessionDB(session *PairingSession, expectedStatus, expectedEngineerID string) error {
+	if s.testHookCompareAndUpdatePairingSessionDB != nil {
+		s.testHookCompareAndUpdatePairingSessionDB()
+	}
+
 	result, err := s.db.Exec(
 		`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ? AND status = ? AND engineer_id = ?`,
 		session.Status,
