@@ -217,7 +217,17 @@ func isPairingCodeUniqueConstraintError(err error) bool {
 		return false
 	}
 
-	return sqliteErr.Code == sqlite3.ErrConstraint
+	if sqliteErr.Code != sqlite3.ErrConstraint {
+		return false
+	}
+
+	// Only treat PRIMARY KEY / UNIQUE violations as a pairing-code collision so
+	// that the createPairingSession retry loop regenerates a code. Other
+	// constraint classes (NOT NULL, CHECK, FOREIGN KEY, trigger) indicate a
+	// real integrity problem and must surface as a 500 instead of being
+	// silently retried as a code conflict.
+	return sqliteErr.ExtendedCode == sqlite3.ErrConstraintPrimaryKey ||
+		sqliteErr.ExtendedCode == sqlite3.ErrConstraintUnique
 }
 
 // initSchema initializes the database schema.
