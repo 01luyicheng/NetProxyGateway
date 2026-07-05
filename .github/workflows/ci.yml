@@ -33,10 +33,16 @@ jobs:
         with:
           gradle-version: wrapper
 
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses >/dev/null 2>&1 || true
+        env:
+          ANDROID_HOME: /home/runner/.android/sdk
+
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
           packages: tools platforms-android-34 build-tools-34.0.0
+          accept-android-sdk-licenses: true
 
       - name: Cache Gradle packages
         uses: actions/cache@v4
@@ -130,7 +136,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.25'
 
       - name: Cache Go modules
         uses: actions/cache@v4
