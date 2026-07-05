@@ -15,7 +15,7 @@ env:
 jobs:
   android-build:
     name: Android Build & Test
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, do-sfo3]
 
     steps:
       - name: Checkout code
@@ -31,6 +31,11 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: wrapper
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: tools platforms-android-34 build-tools-34.0.0
 
       - name: Cache Gradle packages
         uses: actions/cache@v4
@@ -112,7 +117,7 @@ jobs:
 
   go-build:
     name: Go Server Build
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, do-sfo3]
     strategy:
       matrix:
         component: [api, socks5-proxy, tunnel]
