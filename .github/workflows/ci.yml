@@ -4,6 +4,7 @@ on:
   pull_request:
     branches: [main, dev]
     types: [opened, synchronize, reopened]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -15,7 +16,7 @@ env:
 jobs:
   android-build:
     name: Android Build & Test
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, do-sfo3]
 
     steps:
       - name: Checkout code
@@ -112,7 +113,7 @@ jobs:
 
   go-build:
     name: Go Server Build
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, do-sfo3]
     strategy:
       matrix:
         component: [api, socks5-proxy, tunnel]
