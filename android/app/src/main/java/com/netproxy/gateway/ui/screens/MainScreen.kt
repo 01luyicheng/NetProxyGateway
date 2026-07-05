@@ -22,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Settings
@@ -525,12 +526,22 @@ fun PairingSection(
                     }
                 },
                 label = { Text(stringResource(R.string.pairing_code_input_label)) },
-                placeholder = { Text(stringResource(R.string.pairing_hint)) },
+
                 modifier = Modifier.fillMaxWidth(),
                 enabled = !uiState.isPairingInProgress,
                 singleLine = true,
                 placeholder = { Text(stringResource(R.string.pairing_hint)) },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done)
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+                trailingIcon = {
+                    if (pairingCode.isNotEmpty()) {
+                        IconButton(onClick = { pairingCode = "" }) {
+                            Icon(
+                                imageVector = Icons.Default.Clear,
+                                contentDescription = stringResource(R.string.clear_code)
+                            )
+                        }
+                    }
+                }
             )
 
             Spacer(modifier = Modifier.height(16.dp))

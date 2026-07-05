@@ -9,6 +9,7 @@
     <string name="generate_code">生成识别码</string>
     <string name="pair">配对</string>
     <string name="pairing_in_progress">配对中...</string>
+    <string name="clear_code">清除识别码</string>
     <string name="disconnect">断开连接</string>
 
     <string name="remote_control">远程控制</string>

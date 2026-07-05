@@ -10,6 +10,7 @@
     <string name="generate_code">Generate pairing code</string>
     <string name="pair">Pair</string>
     <string name="pairing_in_progress">Pairing...</string>
+    <string name="clear_code">Clear code</string>
     <string name="disconnect">Disconnect</string>
 
     <string name="remote_control">Remote control</string>
