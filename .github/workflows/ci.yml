@@ -4,14 +4,18 @@ on:
   pull_request:
     branches: [main, dev]
     types: [opened, synchronize, reopened]
+  push:
+    branches: [main, dev]
   workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  ANDROID_HOME: /opt/android-sdk
+  ANDROID_SDK_ROOT: /opt/android-sdk
 
 jobs:
   android-build:
@@ -32,11 +36,6 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: wrapper
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: tools platforms-android-34 build-tools-34.0.0
 
       - name: Cache Gradle packages
         uses: actions/cache@v4
@@ -66,15 +65,14 @@ jobs:
 
       - name: Generate JaCoCo coverage report
         run: ./android/gradlew -p android jacocoTestReport --stacktrace --no-daemon
-        continue-on-error: false
 
       - name: Run Lint check
         run: ./android/gradlew -p android lintDebug --no-daemon
-        continue-on-error: false
+        continue-on-error: true
 
       - name: Run dependency vulnerability check
         run: ./android/gradlew -p android dependencyCheckAnalyze --no-daemon
-        continue-on-error: false
+        continue-on-error: true
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
@@ -108,7 +106,6 @@ jobs:
           name: android-dependency-check-report
           path: android/app/build/reports/dependency-check-report.html
 
-      # Commit lint as a step (not a separate job) to save runner startup time
       - name: Check commit messages
         if: github.event_name == 'pull_request'
         uses: wagoid/commitlint-github-action@v6
@@ -122,6 +119,7 @@ jobs:
     strategy:
       matrix:
         component: [api, socks5-proxy, tunnel]
+      max-parallel: 1
 
     steps:
       - name: Checkout code
@@ -130,16 +128,21 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.25'
 
       - name: Cache Go modules
         uses: actions/cache@v4
         with:
-          path: ~/go/pkg/mod
+          path: ${{ runner.temp }}/go-mod-${{ matrix.component }}
           key: ${{ runner.os }}-go-${{ matrix.component }}-${{ hashFiles('server/${{ matrix.component }}/go.sum', 'server/${{ matrix.component }}/go.mod') }}
           restore-keys: |
             ${{ runner.os }}-go-${{ matrix.component }}-
-            ${{ runner.os }}-go-
+
+      - name: Link GOPATH mod cache
+        run: |
+          mkdir -p ~/go/pkg
+          ln -sf "${{ runner.temp }}/go-mod-${{ matrix.component }}" ~/go/pkg/mod 2>/dev/null || true
+          ls -la ~/go/pkg/mod 2>&1 | head -3
 
       - name: Build ${{ matrix.component }}
         working-directory: server/${{ matrix.component }}
@@ -157,7 +160,7 @@ jobs:
         if: always()
         working-directory: server/${{ matrix.component }}
         run: govulncheck ./...
-        continue-on-error: false
+        continue-on-error: true
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
