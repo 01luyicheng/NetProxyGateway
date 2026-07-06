@@ -119,7 +119,6 @@ jobs:
     strategy:
       matrix:
         component: [api, socks5-proxy, tunnel]
-      max-parallel: 1
 
     steps:
       - name: Checkout code
