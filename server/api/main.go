@@ -217,11 +217,13 @@ func isPairingCodeUniqueConstraintError(err error) bool {
 		return false
 	}
 
-	if sqliteErr.Code != sqlite3.ErrConstraint {
+	// SQLITE_CONSTRAINT = 19
+	if sqliteErr.Code != 19 {
 		return false
 	}
 
-	return sqliteErr.ExtendedCode == sqlite3.ErrConstraintPrimaryKey || sqliteErr.ExtendedCode == sqlite3.ErrConstraintUnique
+	// SQLITE_CONSTRAINT_PRIMARYKEY = 2301, SQLITE_CONSTRAINT_UNIQUE = 2067
+	return sqliteErr.ExtendedCode == 2301 || sqliteErr.ExtendedCode == 2067
 }
 
 // initSchema initializes the database schema.
