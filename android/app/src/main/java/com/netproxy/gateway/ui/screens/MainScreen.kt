@@ -525,7 +525,6 @@ fun PairingSection(
                     }
                 },
                 label = { Text(stringResource(R.string.pairing_code_input_label)) },
-                placeholder = { Text(stringResource(R.string.pairing_hint)) },
                 modifier = Modifier.fillMaxWidth(),
                 enabled = !uiState.isPairingInProgress,
                 singleLine = true,

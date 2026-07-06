@@ -17,7 +17,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
-	sqlite3 "github.com/mattn/go-sqlite3"
+	_ "github.com/mattn/go-sqlite3"
 	"github.com/netproxy/shared/ratelimit"
 )
 
@@ -212,16 +212,10 @@ func NewServer() (*Server, error) {
 }
 
 func isPairingCodeUniqueConstraintError(err error) bool {
-	var sqliteErr sqlite3.Error
-	if !errors.As(err, &sqliteErr) {
+	if err == nil {
 		return false
 	}
-
-	if sqliteErr.Code != sqlite3.ErrConstraint {
-		return false
-	}
-
-	return sqliteErr.ExtendedCode == sqlite3.ErrConstraintPrimaryKey || sqliteErr.ExtendedCode == sqlite3.ErrConstraintUnique
+	return strings.Contains(err.Error(), "UNIQUE constraint")
 }
 
 // initSchema initializes the database schema.
