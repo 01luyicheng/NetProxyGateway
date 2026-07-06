@@ -1505,4 +1505,25 @@
 - **回归测试**: 新增 `scripts/check_ci_permissions.py`（纯 stdlib）+ `make ci-perms-check`。脚本解析两个 workflow，断言每个使用 `dorny/paths-filter` 的 job 在其 **job 级** `permissions:` 中包含 `pull-requests: read`，缺失即失败。已验证：修复后通过；在 `dev` 基线与 PR #76 版本（仅顶层）上均失败。
 - **关联**: 与 `palette-ux-keyboard-focus-17858698244994354345` 分支（PR #74）中已存在的等价 job 级修复一致；本 PR 为该问题的独立、定向修复，可取代 PR #76。
 
+## 提交后正确性检查发现（2026-07-07，审查过去 24h 提交 + Dockerfile 部署链路）
+
+> 审查范围：过去 24 小时内的提交（`aec1e89`、`935331e`、`7c38044`、`81e8624`、`0beecd6`、`8a9234e`、`507f2d3`，以及 PR #65 的 CI 修复 `e211cbd`/`399dcbd`/`a2dc331`/`976fea4`）和最近更新的 PR（#62、#63、#64、#65）。经多个独立子代理并行分析 + 两个子代理独立复现复审确认。
+
+### DEPLOY1: `server/api/Dockerfile` 以 `CGO_ENABLED=0` 构建导致 API 容器启动即崩溃 [已修复]
+- **状态**: 已修复（本审查提交的定向修复分支 `fix/api-dockerfile-cgo-sqlite-crash`）
+- **位置**: `server/api/Dockerfile` (L1, L8)；触发点 `server/api/main.go` (`NewServer` → `db.Ping()`, L188-L196；`main` 的 `log.Fatalf`, L1152-L1154)
+- **问题描述**: API 服务依赖 CGo-only 的 `github.com/mattn/go-sqlite3` 驱动（`main.go:20` 的 blank import，`main.go:188` 的 `sql.Open("sqlite3", ...)`），但 `server/api/Dockerfile` 使用 `RUN CGO_ENABLED=0 GOOS=linux go build -o api .`。`CGO_ENABLED=0` 时 go-sqlite3 编译为 stub 驱动，运行时 `sql.Open` 返回的 DB 在首次 `db.Ping()` 时报错：`"Binary was compiled with 'CGO_ENABLED=0', go-sqlite3 requires cgo to work. This is a stub"`。`NewServer` 把该错误向上返回，`main()` 以 `log.Fatalf("Failed to create server: %v", err)` 退出，容器启动即崩溃（exit 1）。`docker build` 能成功（stub 可编译），失败被推迟到运行时，因此只做构建校验的 CI 难以发现。此外构建基镜像 `golang:1.22-alpine` 与 `go.mod` 的 `go 1.25.0` 不匹配（依赖 `GOTOOLCHAIN=auto` 联网下载 1.25）。该缺陷虽早于本次 24h 窗口（Dockerfile 上次改动为 `55a1ba8`，2026-03-26），但它是过去 24h 大量 sqlite3/CGo 改动（含误判 "CGo incompatibility with Go 1.25" 而把严格类型检查退化为字符串匹配的 `81e8624`）一直绕开的真实根因，属代码审查遗漏的高影响缺陷。
+- **触发场景**: (1) `docker compose up` 或 `docker build -f server/api/Dockerfile`； (2) 容器启动执行 `./api`； (3) `NewServer()` 调用 `db.Ping()` 返回 stub 错误； (4) `log.Fatalf` 退出，容器进入 `restart: unless-stopped` 的无限重启循环，`/health` 永不就绪； (5) 由于 `socks5-proxy`/`tunnel` 均 `depends_on: api` 并调用其 `/api/session/validate`、`/api/device/status`，整个 compose 栈不可用。100% 可复现。
+- **风险**: **高**。部署即崩溃，API 服务（承载配对、JWT、认证、设备状态）完全不可用；非数据损坏或安全漏洞，而是确定性的全栈服务中断。
+- **修复难度**: 低
+- **修复方式**: `server/api/Dockerfile` 改为 `FROM golang:1.25-alpine AS builder`、新增 `RUN apk add --no-cache gcc musl-dev`（go-sqlite3 内嵌 SQLite amalgamation，只需 C 工具链，无需 `sqlite-dev`/`sqlite-libs`）、构建命令改为 `RUN CGO_ENABLED=1 GOOS=linux go build -o api .`。最终 `alpine:latest` 运行阶段已含 musl，CGo 二进制可直接运行。`socks5-proxy`/`tunnel` 不使用 sqlite 且 `go.mod` 为 `go 1.22`，保持 `CGO_ENABLED=0` 不变。
+- **验证**: 独立复现——`CGO_ENABLED=0` 构建的二进制启动即 `Failed to create server: failed to ping database: ... go-sqlite3 requires cgo to work. This is a stub`（exit 1）；`CGO_ENABLED=1` 构建的二进制正常启动并返回 `{"db_status":"ok",...}`。新增 `make api-smoke` 目标以 Dockerfile 等价标志（`CGO_ENABLED=1`）构建并校验 `/health` 返回 `db_status:"ok"`，作为回归守卫。`go build ./...`、`go vet ./...`、`go test ./...` 全部通过。
+- **后续建议**: 现有 CI `go-build` 作业只对源码执行 `go build`/`go test`（runner 上 CGO 默认开启，故一直通过），从不构建 Docker 镜像——这正是本缺陷长期未被 CI 捕获的原因。建议后续在 self-hosted runner（具备 docker）上增加 `docker build` + `docker run` + `/health` 冒烟作业（可先 `continue-on-error: true`，确认稳定后改为阻塞），作为镜像层的回归守卫。
+
+### 24h 窗口内提交的其余审查结论
+- `7c38044` 曾用错误的 SQLite 扩展码 `2301`（正确值 `sqlite3.ErrConstraintPrimaryKey` = `1555`）替换符号常量，会导致 `code TEXT PRIMARY KEY` 冲突（实际 ExtendedCode=1555）不被识别为配对码冲突而直接返回 500；该缺陷为**瞬态**，同日被 `81e8624` 改为 `strings.Contains(err.Error(), "UNIQUE constraint")` 取代（对当前 schema 行为正确，真实冲突消息为 `"UNIQUE constraint failed: pairing_sessions.code"`），故在 dev HEAD 上不存在现存可触发缺陷。
+- `81e8624`/`8a9234e` 将 `isPairingCodeUniqueConstraintError` 从 `errors.As` + 严格类型码检查退化为字符串匹配，并移除了 `733c883`（PR #64，未合入 dev）新增的回归测试 `TestIsPairingCodeUniqueConstraintError`。当前行为对现有 schema 等价、无即时可触发缺陷，但失去类型安全与回归保护；建议后续重新采用 `733c883` 的类型化严格检查并恢复测试（已验证该写法在 Go 1.25 + CGo 下可正常编译运行，所谓 "CGo incompatibility with Go 1.25" 前提不成立）。
+- PR #65 的 CI 修复（runner 标签大小写、`fail-fast` YAML 层级、`Thread.yield()`→`Thread.sleep(20)`）均为正确且必要，未掩盖生产并发缺陷；`go test` 仍为阻塞作业。
+- PR #62/#63 的 Palette 清除按钮 UI 改动未发现崩溃/安全/功能退化类缺陷（输入仍强制 6 位数字过滤；测试未削弱）。
+
 
