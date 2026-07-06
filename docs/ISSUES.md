@@ -1181,13 +1181,15 @@
 - **风险**: **中**。安全行为缺乏回归保护，未来重构可能意外移除 zeroing 逻辑。
 - **修复方式**: 为上述三种场景补充直接测试，通过反射读取 `inMemoryToken` 或捕获返回的 `session.authToken` 引用进行验证。
 
-### T6: `Socks5ConnectionPoolTest` 并发测试存在 flaky 风险
-- **状态**: 待修复
-- **提交哈希**: `4c0cea6`
-- **位置**: `android/app/src/test/java/com/netproxy/gateway/proxy/Socks5ConnectionPoolTest.kt` (borrowConnection_cleanupInvalidConnections_doesNotCloseValidConnectionWhenInUseFlips, L24-L103)
-- **问题描述**: 测试使用真实 `Thread` 和 `ReentrantReadWriteLock`，依赖 `Thread.yield()` 和固定 2 秒超时做同步。在 CPU 负载高的 CI 环境或 Windows 系统上，线程调度顺序无法保证，可能因超时而失败。
-- **风险**: **中**。flaky test 会降低团队对 CI 的信任度，增加调试成本。
-- **修复方式**: 使用 `CountDownLatch` 或 `Semaphore` 替代 `Thread.yield()` 和固定超时，实现确定性同步。
+### T6: `Socks5ConnectionPoolTest` 并发测试存在 flaky 风险 [已修复]
+- **状态**: 已修复
+- **提交哈希**: `4c0cea6`（原登记）
+- **修复提交**: `e211cbd`（分支 `fix/ci-android-deadlock`，PR #65，2026-07-06）
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/proxy/Socks5ConnectionPoolTest.kt` (borrowConnection_cleanupInvalidConnections_doesNotCloseValidConnectionWhenInUseFlips, L24-L113)
+- **问题描述**: 测试使用真实 `Thread` 和 `ReentrantReadWriteLock`，依赖 `Thread.yield()` 和固定 2 秒超时做同步。在 CPU 负载高的 CI 环境或 Windows 系统上，线程调度顺序无法保证，可能因超时而失败。更严重的是：主线程持 read lock，borrowThread 在 cleanup 阶段需要 write lock 但拿不到——双方互相等待，`Thread.yield()` 在 CI 高负载下永远拿不到 CPU 切片，主线程空转 2 秒后 deadline 到，borrowThread 仍卡在 write lock 等待——测试挂死，且 workflow 无 `timeout-minutes` 导致 runner 被无限期占用（实测卡死 25 分钟靠手动取消才停）。
+- **风险**: **中**。flaky test 会降低团队对 CI 的信任度，增加调试成本；卡死时无限期占用 runner 消耗 Actions 额度。
+- **修复方式**: 用 `Thread.sleep(20)` 短间隔轮询替代 `Thread.yield()`（sleep 让出调度器时间片，yield 不保证），deadline 延长到 5 秒；同时给 CI workflow 加 `timeout-minutes: 30` 防止类似挂死无限期占用 runner。本地验证：T6 单跑通过、`Socks5ConnectionPoolTest` 全类通过、全量 473 测试仅 1 失败（`RootDetectorTest.checkBusyBox`，既存问题与本次修改无关）。
+- **交叉审查**: subagent `code_review` 审查通过（0 issues），审查中发现的 P3（注释与代码不一致）和 P2（queue lookup 在 try 外导致 read lock 泄漏）已修复。
 
 ### T7: `MainViewModelTest` 两个测试方法高度重复
 - **状态**: 待修复
@@ -1424,5 +1426,31 @@
 - **风险**: **中高**。root 设备或调试器可读取堆内存中的明文 token。与 REV22 修复的原始问题相同类别，但触发路径不同。
 - **修复难度**: 低
 - **修复方式**: 将 TLS 配置（`socketFactory`、`sslHostnameVerifier` 赋值）从 `apply` 块中移出，在 `connectOptions = options` 赋值之后再进行 TLS 配置。这样即使 TLS 配置抛出异常，`connectOptions` 已赋值，`finally` 块能正确清除 Paho 内部密码副本。
+
+---
+
+## 2026-07-06 CI 诊断新发现
+
+本次会话在修复 T6（PR #65）后触发 CI run `28787711600`，发现以下新问题。诊断提交哈希锚点：`a2dc331`（分支 `fix/ci-android-deadlock`）。
+
+### N63: Android `testDebugUnitTest` 在 CI 上挂住 27min 被 timeout 取消（另一既存 flaky 测试，非 T6）
+- **状态**: 待修复
+- **发现提交哈希**: `a2dc331`(worktree)（分支 `fix/ci-android-deadlock`，PR #65 触发的 CI run `28787711600`）
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/` 下未知测试类（疑似 connection 或 vpn 包）
+- **问题描述**: PR #65 修复 T6 后再次触发 CI，Android job 在 `11:22:28` 启动 `> Task :app:testDebugUnitTest`，到 `11:49:57` 被 `timeout-minutes: 30` 取消——**27 分钟内 Gradle 未输出任何 `PASS:`/`FAIL`/`=== RUN` 行**，说明测试刚启动就挂住了（可能在加载某个测试类的初始化阶段）。这不是 T6——T6 本地单跑通过（1m30s）且全类通过；这是**另一个既存 flaky 测试**，之前被 T6 的死锁掩盖（T6 卡死时 unit test 步骤根本跑不到这个测试）。
+- **风险**: **高**。Android job 永远无法在 CI 上通过，阻塞所有 PR 的 required check。`timeout-minutes: 30` 防止了 runner 无限期占用，但失败结论不变。
+- **修复难度**: 中高。需在 CI 上启用 Gradle 实时输出（`--tests` 配合 `testOptions.reportPool` 或 `-Dorg.gradle.parallel.in-process=true`）多次单跑定位挂住的测试类；本地无法复现（本地 473 测试 9 分钟内完成）。
+- **修复方式**: (1) 在 CI workflow 的 `Run unit tests` 步骤追加 `--tests` 参数分段执行，或启用 `testDebugUnitTest` 的实时日志输出；(2) 在 `app/build.gradle.kts` 的 `testOptions` 加 `execution` 配置减少 fork 并发；(3) 定位后用确定性同步（`CountDownLatch`/`Semaphore`）替代挂住的 `Thread.yield()`/固定超时。
+- **关联**: 本条目与 T6 同类别（flaky 并发测试），但根因不同。T6 已修复，本条目是新暴露的下一层 flaky。
+
+### N64: `server/api/main.go` 在 git 中存储为 CRLF 但 `.gitattributes` 声明 `*.go text eol=lf`，导致每次 checkout 出现伪 diff
+- **状态**: 待修复
+- **发现提交哈希**: `a2dc331`(worktree)（分支 `fix/ci-android-deadlock`）
+- **位置**: `server/api/main.go`（git blob 内容为 CRLF）、`.gitattributes`（`*.go text eol=lf`）
+- **问题描述**: `git show HEAD:server/api/main.go | file -` 输出 `Unicode text, UTF-8 text, with CRLF line terminators`——该文件在 git 仓库 blob 中存储为 CRLF。但 `.gitattributes` 声明 `*.go text eol=lf`，要求 checkout 时强制转换为 LF。结果每次 `git checkout`/`git restore` 后，工作区文件被转为 LF，与 blob 的 CRLF 比对出现"全文修改"的伪 diff（实测显示 `2216 insertions / 2216 deletions`，即整个文件每一行都被"改了"）。本次会话中多次因 cherry-pick / stash / reset 触发该伪 diff，干扰变更审查。
+- **风险**: **低**。不影响构建或测试，但污染 `git status`/`git diff`，干扰 Agent 和开发者判断真实变更范围；可能让不该提交的"全文修改"被误 commit。
+- **修复难度**: 低。
+- **修复方式**: 一次性 normalize 该文件的行尾——`git rm --cached server/api/main.go && renormalize` 或 `dos2unix server/api/main.go && git add`，然后提交"normalize line endings"单提交。提交后 `.gitattributes` 的规则会对该文件生效，伪 diff 消失。
+- **关联**: 与 docs/CI_REFACTOR_PLAN.md 中"artifact 路径"等 bug 同源（都是 dev 分支历史遗留的配置不一致）。
 
 
