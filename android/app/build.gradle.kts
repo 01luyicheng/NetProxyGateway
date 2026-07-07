@@ -265,7 +265,7 @@ android.applicationVariants.configureEach {
 
 // Task to run all JaCoCo reports
 tasks.register("jacocoTestReport") {
-    dependsOn("jacocoTestDebugUnitTestReport")
+    dependsOn("jacocotestDebugUnitTestReport")
     group = "verification"
     description = "Generate JaCoCo coverage reports for all variants"
 }
