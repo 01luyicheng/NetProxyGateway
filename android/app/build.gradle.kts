@@ -119,16 +119,15 @@ android {
         unitTests {
             isIncludeAndroidResources = true
             all {
-                // N87: serialize test forks and add hard timeout.
-                // maxParallelForks=1 alone did NOT fix the hang (confirmed 8h+ single-fork deadlock).
-                // Hard timeout ensures the task fails fast instead of hanging the runner indefinitely.
+                // N87: serialize test forks to prevent deadlock under CI CPU contention.
                 it.maxParallelForks = 1
-                it.timeoutMinutes = 10
                 it.jvmArgs(
                     "-Xmx2g",
                     "-XX:MaxMetaspaceSize=512m",
                     "-XX:+HeapDumpOnOutOfMemoryError"
                 )
+                // Set per-test timeout via JUnit system properties (5 min per test method)
+                it.systemProperty("junit.jupiter.execution.timeout.default", "5m")
             }
         }
     }
