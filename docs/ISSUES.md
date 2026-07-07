@@ -815,6 +815,25 @@
 
 ---
 
+### N87: Android `testDebugUnitTest` 静默挂死
+- **状态**: 待调查
+- **首次发现**: CI run 28787711600（2026-07-06）
+- **位置**: `android/app/build.gradle.kts` — `testDebugUnitTest` 任务
+- **问题描述**: "Run unit tests" 步骤在 11:20:33 启动后**无任何 `=== RUN`/`PASS`/`FAIL` 输出**，持续 29 分 24 秒后被 `timeout-minutes: 30` 取消。T6 死锁（`Socks5ConnectionPoolTest`）已在 PR #65 修复，但 N87 是**另一个**独立的挂死源——T6 修复后该挂死仍然复现。可能原因包括：Robolectric 并发初始化竞争、JVM OOM 后静默退出、或某个测试用例死锁。
+- **风险**: **高**。阻塞 Android CI 通过，是 dev 分支保护启用的唯一阻塞项。
+- **调查策略**: 按子包分段执行 `--tests` 定位挂死包；检查 JVM `-Xmx`/`Metaspace` 配置；临时 `maxParallelForks=1` 串行化验证。
+- **降级方案**: 若短期无法定位根因，临时 `continue-on-error: true` 让 CI 先跑通，在 ISSUES.md 显式标注。
+
+### N88: CRLF 伪 diff（`server/api/main.go` + `MainScreen.kt` + `ci.yml`）
+- **状态**: 已修复
+- **提交哈希**: PR #67（squash merge 到 dev）
+- **位置**: `server/api/main.go`、`android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt`、`.github/workflows/ci.yml`
+- **问题描述**: `.gitattributes` 声明 `*.go text eol=lf`、`*.kt text eol=lf` 等规则，但上述文件的 git blob 实际存储为 CRLF。每次 checkout 都产生全文件伪 diff（`main.go` 2450 行、`MainScreen.kt` 1982 行、`ci.yml` 344 行），污染 `git diff` 输出且增加不必要的 merge 冲突风险。同时 `.gitattributes` 缺少 `*.yml`、`*.yaml`、`*.json`、`*.md`、`*.toml` 的规则。
+- **风险**: **低**。不影响运行时行为，仅影响开发体验。
+- **修复方案**: 补全 `.gitattributes` 缺失规则（`*.yml`/`*.yaml`/`*.json`/`*.md`/`*.toml`），执行 `git add --renormalize .` 将 blob 从 CRLF 转为 LF。
+
+---
+
 ## Panic Recovery 重构审查发现（2026-06-10，审查范围：server/shared/recovery + server/socks5-proxy/main.go）
 
 > 以下问题由 subagent 多维度代码审查发现；**待验证修复**。
