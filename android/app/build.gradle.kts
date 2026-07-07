@@ -119,10 +119,11 @@ android {
         unitTests {
             isIncludeAndroidResources = true
             all {
-                // N87: serialize test forks to prevent Robolectric/socket deadlock under CI CPU contention.
-                // High-risk tests (Socks5ConnectionPoolConcurrentTest, VpnServiceTest concurrent) use real
-                // sockets + multi-threading; parallel forks compete for loopback ports and Robolectric SDK init.
+                // N87: serialize test forks and add hard timeout.
+                // maxParallelForks=1 alone did NOT fix the hang (confirmed 8h+ single-fork deadlock).
+                // Hard timeout ensures the task fails fast instead of hanging the runner indefinitely.
                 it.maxParallelForks = 1
+                it.timeoutMinutes = 10
                 it.jvmArgs(
                     "-Xmx2g",
                     "-XX:MaxMetaspaceSize=512m",
