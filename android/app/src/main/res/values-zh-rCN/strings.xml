@@ -79,4 +79,5 @@
     <string name="diagnostics_reconnect_count">重连次数</string>
     <string name="diagnostics_vpn_state">VPN 状态</string>
     <string name="diagnostics_network_validated">网络已验证</string>
+    <string name="clear_input">清空输入</string>
 </resources>

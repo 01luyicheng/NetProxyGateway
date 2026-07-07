@@ -80,4 +80,5 @@
     <string name="diagnostics_reconnect_count">Reconnect count</string>
     <string name="diagnostics_vpn_state">VPN state</string>
     <string name="diagnostics_network_validated">Network validated</string>
+    <string name="clear_input">Clear input</string>
 </resources>

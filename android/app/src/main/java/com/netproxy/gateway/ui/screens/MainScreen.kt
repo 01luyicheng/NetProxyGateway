@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SignalCellularAlt
 import androidx.compose.material.icons.filled.SignalCellularOff
 import androidx.compose.material.icons.filled.VpnKey
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.*
@@ -529,7 +530,17 @@ fun PairingSection(
                 enabled = !uiState.isPairingInProgress,
                 singleLine = true,
                 placeholder = { Text(stringResource(R.string.pairing_hint)) },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done)
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+                trailingIcon = {
+                    if (pairingCode.isNotEmpty() && !uiState.isPairingInProgress) {
+                        IconButton(onClick = { pairingCode = "" }) {
+                            Icon(
+                                imageVector = Icons.Default.Clear,
+                                contentDescription = stringResource(R.string.clear_input)
+                            )
+                        }
+                    }
+                }
             )
 
             Spacer(modifier = Modifier.height(16.dp))
