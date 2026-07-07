@@ -20,7 +20,8 @@ env:
 jobs:
   android-build:
     name: Android Build & Test
-    runs-on: [self-hosted, linux, x64, do-sfo3]
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    timeout-minutes: 30
 
     steps:
       - name: Checkout code
@@ -58,7 +59,7 @@ jobs:
         if: always()
         with:
           name: debug-apk
-          path: android/app/build/outputs/apk/debug/*.apk
+          path: android/b/app/build/outputs/apk/debug/*.apk
 
       - name: Run unit tests
         run: ./android/gradlew -p android :app:testDebugUnitTest --stacktrace --no-daemon
@@ -80,15 +81,15 @@ jobs:
         with:
           name: android-test-results
           path: |
-            android/app/build/reports/tests/
-            android/app/build/test-results/
+            android/b/app/build/reports/tests/
+            android/b/app/build/test-results/
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: android-coverage-report
-          path: android/app/build/reports/jacoco/
+          path: android/b/app/build/reports/jacoco/
 
       - name: Upload Lint report
         uses: actions/upload-artifact@v4
@@ -96,15 +97,15 @@ jobs:
         with:
           name: android-lint-report
           path: |
-            android/app/build/reports/lint-results-debug.html
-            android/app/build/reports/lint-results-debug.xml
+            android/b/app/build/reports/lint-results-debug.html
+            android/b/app/build/reports/lint-results-debug.xml
 
       - name: Upload dependency check report
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: android-dependency-check-report
-          path: android/app/build/reports/dependency-check-report.html
+          path: android/b/app/build/reports/dependency-check-report.html
 
       - name: Check commit messages
         if: github.event_name == 'pull_request'
@@ -115,8 +116,10 @@ jobs:
 
   go-build:
     name: Go Server Build
-    runs-on: [self-hosted, linux, x64, do-sfo3]
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
         component: [api, socks5-proxy, tunnel]
 

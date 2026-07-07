@@ -69,21 +69,37 @@ class Socks5ConnectionPoolTest {
 
             // Hold a read lock so the borrow path can complete its read phase but is forced
             // to wait before acquiring the write lock for cleanup.
+            // Poll the queue with short sleeps until the borrow thread has polled the connection
+            // out, or the 5s deadline elapses. Read locks are shared so the borrow thread's read
+            // phase runs concurrently with ours. Thread.sleep(20) yields the CPU slice that
+            // Thread.yield() does not guarantee under CI CPU contention.
+            //
+            // Test setup: connection.inUse=true, so borrowConnection's read phase polls it out of
+            // the queue (collects it as "invalid" because inUse=true) and then tries to acquire the
+            // write lock for cleanup — which blocks on our read lock. We deterministically wait for
+            // the queue to be emptied (poll done), flip inUse=false, release the read lock, and let
+            // the borrow thread finish cleanup. Under cleanup's write lock, the connection is
+            // re-checked: inUse=false but socket is valid (mock), so it is NOT closed — which is
+            // the assertion.
             poolLock.readLock().lock()
             val borrowThread = Thread {
                 pool.borrowConnection(destinationIp, destinationPort)
             }
             try {
                 borrowThread.start()
-
                 val queue = availableConnections[destKey]
                     ?: throw AssertionError("Expected destination queue to exist")
 
-                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+                // Deterministically wait for the borrow thread to poll the connection out of the queue.
+                // The poll happens inside borrowConnection's read-lock phase, which can run concurrently
+                // with our read lock (read locks are shared). Use Thread.sleep(20) short-interval
+                // polling against a 5s deadline — sleep yields the CPU slice that Thread.yield()
+                // does not guarantee under CI CPU contention.
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
                 while (queue.isNotEmpty() && System.nanoTime() < deadline) {
-                    Thread.yield()
+                    Thread.sleep(20)
                 }
-                assertTrue("Expected borrow thread to poll the connection", queue.isEmpty())
+                assertTrue("Expected borrow thread to poll the connection within 5s", queue.isEmpty())
 
                 // Simulate the connection becoming available again before cleanup runs.
                 connection.inUse.set(false)
@@ -91,7 +107,9 @@ class Socks5ConnectionPoolTest {
                 poolLock.readLock().unlock()
             }
 
-            borrowThread.join(2_000)
+            // After releasing the read lock, the borrow thread can acquire the write lock for cleanup.
+            // Cleanup re-checks inUse=false && !isValid() — socket is a valid mock, so it is NOT closed.
+            borrowThread.join(5_000)
             if (borrowThread.isAlive) {
                 borrowThread.interrupt()
             }
