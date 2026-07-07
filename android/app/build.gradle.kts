@@ -118,6 +118,17 @@ android {
     testOptions {
         unitTests {
             isIncludeAndroidResources = true
+            all {
+                // N87: serialize test forks to prevent Robolectric/socket deadlock under CI CPU contention.
+                // High-risk tests (Socks5ConnectionPoolConcurrentTest, VpnServiceTest concurrent) use real
+                // sockets + multi-threading; parallel forks compete for loopback ports and Robolectric SDK init.
+                it.maxParallelForks = 1
+                it.jvmArgs(
+                    "-Xmx2g",
+                    "-XX:MaxMetaspaceSize=512m",
+                    "-XX:+HeapDumpOnOutOfMemoryError"
+                )
+            }
         }
     }
 
