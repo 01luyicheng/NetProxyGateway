@@ -838,6 +838,15 @@
 - **风险**: **低**。不影响运行时行为，仅影响开发体验。
 - **修复方案**: 补全 `.gitattributes` 缺失规则（`*.yml`/`*.yaml`/`*.json`/`*.md`/`*.toml`），执行 `git add --renormalize .` 将 blob 从 CRLF 转为 LF。
 
+### N89: GitHub Actions job-level env 不支持 `runner` context
+- **状态**: 已规避
+- **首次发现**: CI run 28858972894（2026-07-07，Step 1 实施过程中）
+- **位置**: `.github/workflows/ci.yml` — `go-build` job `env` 块
+- **问题描述**: GitHub Actions 不允许在 job-level `env` 块中使用 `${{ runner.* }}` context。设置 `GOMODCACHE: ${{ runner.temp }}/go-mod` 会导致 workflow 0 秒验证失败（无 jobs、无日志）。但 `${{ matrix.* }}` 在 job-level env 中可用，`/tmp` 等字面路径也可用。`runner.temp` 仅在 step-level `env`、`with`、`run` 中可用。
+- **风险**: **低**。不影响运行时行为，仅影响 CI workflow 编写方式。
+- **规避方案**: 使用 `/tmp/go-mod-${{ matrix.component }}` 代替 `${{ runner.temp }}/go-mod-${{ matrix.component }}`。`/tmp` 在 self-hosted runner 上跨 job 共享，但 `matrix.component` 后缀提供了 component 级隔离。
+- **待处理**: 确认 runner 上 gcc 可用性后启用 `CGO_ENABLED=1`（server/api sqlite3 依赖）
+
 ---
 
 ## Panic Recovery 重构审查发现（2026-06-10，审查范围：server/shared/recovery + server/socks5-proxy/main.go）
