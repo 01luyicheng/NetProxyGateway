@@ -816,13 +816,17 @@
 ---
 
 ### N87: Android `testDebugUnitTest` 静默挂死
-- **状态**: 待调查
+- **状态**: 已降级（根因待查）
 - **首次发现**: CI run 28787711600（2026-07-06）
 - **位置**: `android/app/build.gradle.kts` — `testDebugUnitTest` 任务
-- **问题描述**: "Run unit tests" 步骤在 11:20:33 启动后**无任何 `=== RUN`/`PASS`/`FAIL` 输出**，持续 29 分 24 秒后被 `timeout-minutes: 30` 取消。T6 死锁（`Socks5ConnectionPoolTest`）已在 PR #65 修复，但 N87 是**另一个**独立的挂死源——T6 修复后该挂死仍然复现。可能原因包括：Robolectric 并发初始化竞争、JVM OOM 后静默退出、或某个测试用例死锁。
+- **问题描述**: "Run unit tests" 步骤启动后无任何测试输出，持续挂死。T6 死锁已在 PR #65 修复，但 N87 是独立的挂死源。PR #68 尝试 `maxParallelForks=1` 串行化，**未能修复**（CI run 28844154645 确认单 fork 挂死 8h+ 无输出）。根因是某个测试在单 JVM fork 下死锁，而非 fork 间竞争。
 - **风险**: **高**。阻塞 Android CI 通过，是 dev 分支保护启用的唯一阻塞项。
-- **调查策略**: 按子包分段执行 `--tests` 定位挂死包；检查 JVM `-Xmx`/`Metaspace` 配置；临时 `maxParallelForks=1` 串行化验证。
-- **降级方案**: 若短期无法定位根因，临时 `continue-on-error: true` 让 CI 先跑通，在 ISSUES.md 显式标注。
+- **已采取措施**:
+  - `maxParallelForks=1` + JVM args（`-Xmx2g`, `-XX:MaxMetaspaceSize=512m`）— 排除 fork 竞争，未修复
+  - `timeoutMinutes=10`（Gradle 任务级硬超时）— 确保 10 分钟内 fail-fast
+  - `continue-on-error: true`（ci.yml 步骤级）— CI 流水线继续执行后续步骤
+  - Job `timeout-minutes: 20` — 安全网兜底
+- **待调查**: 按 `--tests` 子包分段定位具体挂死的测试类；检查 Robolectric 初始化、Socket/Netty 阻塞、CountDownLatch 永不归零等场景
 
 ### N88: CRLF 伪 diff（`server/api/main.go` + `MainScreen.kt` + `ci.yml`）
 - **状态**: 已修复
