@@ -805,8 +805,8 @@ func TestNotifyDeviceStatusNoRaceWithStop(t *testing.T) {
 
 	// Use a channel to ensure goroutine has started before calling Stop.
 	started := make(chan struct{})
+	manager.wg.Add(1)
 	go func() {
-		manager.wg.Add(1)
 		close(started)
 		manager.notifyDeviceStatus("device-123", "online", "")
 	}()

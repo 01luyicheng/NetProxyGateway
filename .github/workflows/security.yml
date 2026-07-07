@@ -89,3 +89,26 @@ jobs:
 
       - name: Run dependency vulnerability check
         run: ./android/gradlew -p android dependencyCheckAnalyze --no-daemon
+
+  docker-build:
+    name: Docker Build Verification
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [api, socks5-proxy, tunnel]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Build Docker image for ${{ matrix.service }}
+        run: |
+          docker build -t netproxy/${{ matrix.service }}:ci-test \
+            -f server/${{ matrix.service }}/Dockerfile \
+            server/${{ matrix.service }}
+        continue-on-error: true  # Step 4.5: collect baseline before enforcing
+
+      - name: Cleanup Docker test image
+        if: always()
+        run: docker rmi netproxy/${{ matrix.service }}:ci-test 2>/dev/null || true

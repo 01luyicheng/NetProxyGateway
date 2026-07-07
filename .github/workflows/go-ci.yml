@@ -118,6 +118,33 @@ jobs:
           CGO_ENABLED: ${{ steps.gcc.outputs.available == 'true' && '1' || '0' }}
         run: go test -v -coverprofile=coverage.out ./...
 
+      # Step 4: Quality checks (initially continue-on-error to collect baseline)
+      - name: Check gofmt
+        if: steps.filter.outputs.component == 'true'
+        working-directory: ${{ matrix.path }}
+        run: |
+          out=$(find . -name '*.go' -not -path '*/vendor/*' -exec gofmt -l {} + 2>/dev/null)
+          if [ -n "$out" ]; then
+            echo "::warning::gofmt found unformatted files:"
+            echo "$out"
+            exit 1
+          fi
+        continue-on-error: true
+
+      - name: Run go vet
+        if: steps.filter.outputs.component == 'true'
+        working-directory: ${{ matrix.path }}
+        run: go vet ./...
+        continue-on-error: true
+
+      - name: Check go mod tidy
+        if: steps.filter.outputs.component == 'true'
+        working-directory: ${{ matrix.path }}
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+        continue-on-error: true
+
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         if: always() && steps.filter.outputs.component == 'true'
