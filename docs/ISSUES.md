@@ -823,9 +823,11 @@
 - **风险**: **高**。阻塞 Android CI 通过，是 dev 分支保护启用的唯一阻塞项。
 - **已采取措施**:
   - `maxParallelForks=1` + JVM args（`-Xmx2g`, `-XX:MaxMetaspaceSize=512m`）— 排除 fork 竞争，未修复
-  - `timeoutMinutes=10`（Gradle 任务级硬超时）— 确保 10 分钟内 fail-fast
-  - `continue-on-error: true`（ci.yml 步骤级）— CI 流水线继续执行后续步骤
-  - Job `timeout-minutes: 20` — 安全网兜底
+  - `bash timeout 15m`（ci.yml 步骤级命令包装）— 15 分钟后 SIGTERM 终止 Gradle 进程，exit code 124
+  - `continue-on-error: true`（ci.yml 步骤级）— 超时后 CI 流水线继续执行后续步骤
+  - JUnit `junit.jupiter.execution.timeout.default=5m` 系统属性 — 对 JUnit 4 测试无效（项目使用 JUnit 4）
+  - Job `timeout-minutes: 30` — 安全网兜底
+- **验证结果**: CI run 28847329722 确认降级生效 — 测试在 14m08s 后被 timeout kill（exit 124），步骤标记成功（continue-on-error），JaCoCo/Lint/Upload 步骤继续执行
 - **待调查**: 按 `--tests` 子包分段定位具体挂死的测试类；检查 Robolectric 初始化、Socket/Netty 阻塞、CountDownLatch 永不归零等场景
 
 ### N88: CRLF 伪 diff（`server/api/main.go` + `MainScreen.kt` + `ci.yml`）
