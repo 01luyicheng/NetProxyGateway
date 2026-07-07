@@ -1,16 +1,27 @@
-name: CI
+# Android CI — required check: "Android Build & Test"
+# Uses paths-ignore to ensure the workflow always triggers on PRs (required check needs a conclusion).
+# Inside the job, dorny/paths-filter detects Android-specific changes and skips build if none.
+name: Android CI
 
 on:
   pull_request:
     branches: [main, dev]
     types: [opened, synchronize, reopened]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.gitattributes'
+      - '.commitlintrc.json'
+      - '.editorconfig'
   push:
     branches: [main, dev]
   workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true  # Step 1.3
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -21,7 +32,7 @@ env:
   ANDROID_SDK_ROOT: /opt/android-sdk
 
 jobs:
-  android-build:
+  android:
     name: Android Build & Test
     runs-on: [self-hosted, Linux, X64, do-sfo3]
     timeout-minutes: 45
@@ -33,7 +44,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
 
+      - name: Detect changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            android:
+              - 'android/**'
+              - 'Makefile'
+              - '.github/workflows/android-ci.yml'
+
       - name: Validate Android SDK
+        if: steps.filter.outputs.android == 'true'
         run: |
           if [ ! -d "$ANDROID_HOME/platforms" ]; then
             echo "::error::Android SDK missing at $ANDROID_HOME"
@@ -41,48 +63,56 @@ jobs:
           fi
 
       - name: Set up JDK 17
+        if: steps.filter.outputs.android == 'true'
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
 
       - name: Setup Gradle
+        if: steps.filter.outputs.android == 'true'
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: wrapper
 
       - name: Grant execute permission for gradlew
+        if: steps.filter.outputs.android == 'true'
         run: chmod +x android/gradlew
 
       - name: Build with Gradle
+        if: steps.filter.outputs.android == 'true'
         run: ./android/gradlew -p android assembleDebug --stacktrace --no-daemon
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && steps.filter.outputs.android == 'true'
         with:
           name: debug-apk
           path: android/app/build/outputs/apk/debug/*.apk
 
       - name: Run unit tests
+        if: steps.filter.outputs.android == 'true'
         run: timeout 15m ./android/gradlew -p android :app:testDebugUnitTest --stacktrace --no-daemon
         continue-on-error: true  # N87: tests hang indefinitely; degrade until root cause identified
 
       - name: Generate JaCoCo coverage report
+        if: steps.filter.outputs.android == 'true'
         run: ./android/gradlew -p android jacocoTestReport --stacktrace --no-daemon
         continue-on-error: true
 
       - name: Run Lint check
+        if: steps.filter.outputs.android == 'true'
         run: ./android/gradlew -p android lintDebug --no-daemon
         continue-on-error: true
 
       - name: Run dependency vulnerability check
+        if: steps.filter.outputs.android == 'true'
         run: ./android/gradlew -p android dependencyCheckAnalyze --no-daemon
         continue-on-error: true
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && steps.filter.outputs.android == 'true'
         with:
           name: android-test-results
           path: |
@@ -91,14 +121,14 @@ jobs:
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && steps.filter.outputs.android == 'true'
         with:
           name: android-coverage-report
           path: android/app/build/reports/jacoco/
 
       - name: Upload Lint report
         uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && steps.filter.outputs.android == 'true'
         with:
           name: android-lint-report
           path: |
@@ -107,76 +137,16 @@ jobs:
 
       - name: Upload dependency check report
         uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && steps.filter.outputs.android == 'true'
         with:
           name: android-dependency-check-report
           path: android/app/build/reports/dependency-check-report.html
 
-      - name: Check commit messages
-        if: github.event_name == 'pull_request'
-        uses: wagoid/commitlint-github-action@v6
-        with:
-          configFile: .commitlintrc.json
-        continue-on-error: false
+      - name: No Android changes — skip
+        if: steps.filter.outputs.android == 'false'
+        run: echo "No Android-related changes detected, skipping build & test."
 
-  go-build:
-    name: Go Server Build
-    runs-on: [self-hosted, Linux, X64, do-sfo3]
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      actions: write
-    strategy:
-      fail-fast: false
-      matrix:
-        component: [api, socks5-proxy, tunnel]
-    env:
-      # Step 1.1: /tmp paths with component suffix for cache isolation
-      GOMODCACHE: /tmp/go-mod-${{ matrix.component }}
-      GOCACHE: /tmp/go-build-${{ matrix.component }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
-          cache: false  # Step 1.5: disable built-in cache; use explicit actions/cache below
-
-      # Step 1.1: cache both GOMODCACHE and GOCACHE per component
-      - name: Cache Go modules and build cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            /tmp/go-mod-${{ matrix.component }}
-            /tmp/go-build-${{ matrix.component }}
-          key: ${{ runner.os }}-go-${{ matrix.component }}-${{ hashFiles('server/${{ matrix.component }}/go.sum', 'server/${{ matrix.component }}/go.mod') }}
-          restore-keys: |
-            ${{ runner.os }}-go-${{ matrix.component }}-
-
-      - name: Build ${{ matrix.component }}
-        working-directory: server/${{ matrix.component }}
-        run: go build -v ./...
-
-      - name: Test ${{ matrix.component }}
-        working-directory: server/${{ matrix.component }}
-        run: go test -v -coverprofile=coverage.out ./...
-
-      - name: Install govulncheck
+      # Per-job cleanup: remove Android build output (2-5 GB)
+      - name: Cleanup build artifacts
         if: always()
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
-
-      - name: Run vulnerability check
-        if: always()
-        working-directory: server/${{ matrix.component }}
-        run: govulncheck ./...
-        continue-on-error: true
-
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: go-coverage-${{ matrix.component }}
-          path: server/${{ matrix.component }}/coverage.out
+        run: rm -rf android/b/ android/app/build/ 2>/dev/null || true
