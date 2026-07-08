@@ -9,7 +9,7 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read  # dependency-review needs this
+  pull-requests: write  # dependency-review needs this
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
@@ -36,8 +36,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
 
+      # SECURITY GATE: do NOT add `continue-on-error: true` here.
+      # dependency-review-action with `fail-on-severity: high` must hard-fail
+      # the PR check when a high/critical CVE dependency is introduced.
+      # Adding continue-on-error would silently turn that red signal green.
+      # See docs/ISSUES.md N90.
       - name: Dependency review
-        continue-on-error: true
         uses: actions/dependency-review-action@v4
         with:
           fail-on-severity: high
