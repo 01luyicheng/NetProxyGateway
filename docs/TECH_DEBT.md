@@ -606,3 +606,33 @@
 - **问题描述**: ~~详见 ISSUES.md N57。`processReturnTraffic` 使用单协程串行遍历所有活跃连接，单个连接 I/O 阻塞会导致所有后续连接回包处理停滞。~~ 已改为 `coroutineScope { async(Dispatchers.IO) }` 并行模型，每个连接独立协程处理回包。
 - **修复方式**: 串行 `snapshot.forEach` 改为并行 `coroutineScope { snapshot.map { async(Dispatchers.IO) { ... } }.awaitAll() }`
 - **关联问题**: ISSUES.md N57, TECH_DEBT.md C78
+
+### C81: AuthSessionStore 持久化路径 String(authToken) 残留
+- **提交哈希**: f433b6d
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/AuthSessionStore.kt` (L68, L85)
+- **问题描述**: `update()` 和 `updateWithResult()` 通过 `encryptedPrefs.edit().putString(KEY_AUTH_TOKEN, String(authToken))` 持久化 auth token。`String(authToken)` 调用 `java.lang.String(char[])` 构造函数，会创建不可变 String 对象，无法被 `fill('\u0000')` 零化，会一直残留在堆内存中直到 GC 回收。`loadSession()` 反向路径用 `getString` + `toCharArray()` 同样存在 String 中间对象。这是 Java/Kotlin 语言的硬约束（String 不可变），不是单纯 API 限制；EncryptedSharedPreferences 的 `Editor` 接口仅暴露 `putString/putStringSet/putInt/...`，无 `putByteArray`/`putCharArray`。代码注释已承认此限制。
+- **风险**: 中。auth token 明文 String 在堆内存中短期残留，理论上可被内存转储/堆 dump 提取。在 token 频繁更新的场景下窗口期累积。
+- **修复难度**: 高。需要迁移到 Jetpack Security Crypto 之外的方案（如 Tink 直接加密 ByteArray 并写入文件），属于架构变更。
+- **修复状态**: 待修复
+- **关联问题**: TECH_DEBT.md C4（C4 描述 `loadSession()` 中的 String 转换，C81 补充 `update` 路径的 `putString` 残留，两者共同构成完整限制）
+
+### C82: 敏感凭证零化路径测试覆盖严重不足
+- **提交哈希**: f433b6d
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/` 下 5 个文件的 22 处 `securelyClear()` 调用点
+- **问题描述**: 22 处 `securelyClear()` 调用点中，仅 5 处有直接断言"零化确实发生"（全部集中在 `MainViewModel.kt:251,268,340,355,426`）。其余 17 处完全没有零化断言，包括 CR14-1 关键修复点 `MqttConnectionManager.kt:502`（`connectOptions?.password?.securelyClear()`，清除 Paho 内部 `Arrays.copyOf` 拷贝）。
+  **特别危险项**: `Socks5ConnectionPoolTest.kt:359` 的测试名 `n37b10_createNewConnection_zerosCredentialPasswordAfterUse` 暗示有零化验证，但实际只验证原密码未被破坏，**未**断言拷贝被零化——这是"假覆盖"，比无测试更危险。
+  完全无测试覆盖的关键路径：
+  - `AuthSessionStore.kt:59,75,96,110,151,167`（6 处，inMemoryToken 与 session.authToken）
+  - `MqttConnectionManager.kt:287,497,502,545,696`（5 处，含 CR14-1 关键修复点）
+  - `Socks5ConnectionPool.kt:303,404`（2 处）
+  - `Socks5ProxyService.kt:111`（1 处，嵌在 Netty ChannelInitializer lambda 中）
+  - `MainViewModel.kt:335,347,436`（3 处，含 pairWithCode 成功路径与 onCleared）
+- **风险**: 中-高。若未来重构误删某个 `securelyClear()` 调用，仅 5 处能被测试发现，其余 17 处会静默通过，敏感数据可能残留在内存中。
+- **修复难度**: 中-高。
+  - `AuthSessionStore.kt`：需反射读取 `inMemoryToken` 私有字段
+  - `MqttConnectionManager.kt:502`：需反射访问 `MqttConnectOptions.password` 内部字段，且要在协程 finally 执行后断言，时序复杂
+  - `Socks5ProxyService.kt:111`：嵌在 Netty `ChannelInitializer` lambda 中，需 Robolectric + EmbeddedChannel
+  - `Socks5ConnectionPoolTest.kt:359`：需修正误导性测试名（假覆盖）
+- **修复状态**: 待修复
+- **修复优先级建议**: 1) 修正 `Socks5ConnectionPoolTest.kt:359` 误导性测试名（假覆盖最危险）；2) 补 `MqttConnectionManager.kt:502` CR14-1 防回归；3) 其余分批补测
+- **关联问题**: ISSUES.md N8（N8 是核心业务逻辑测试缺口泛指，C82 聚焦安全敏感的凭证零化路径）
