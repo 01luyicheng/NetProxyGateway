@@ -48,6 +48,7 @@ import com.netproxy.gateway.debug.AppAuditLogStore
 import com.netproxy.gateway.debug.DebugSettingsStore
 import com.netproxy.gateway.di.ApplicationScope
 import com.netproxy.gateway.result.AppResult
+import com.netproxy.gateway.utils.securelyClear
 
 sealed class MqttConnectionState {
     object Disconnected : MqttConnectionState()
@@ -283,7 +284,7 @@ class MqttConnectionManager @Inject constructor(
         var generation = 0L
         lateinit var jobToStart: Job
         synchronized(this@MqttConnectionManager) {
-            activeTokenSnapshot?.fill('\u0000')
+            activeTokenSnapshot.securelyClear()
             activeTokenSnapshot = authToken.copyOf()
             shouldStayConnected = true
             reconnectJob?.cancel()
@@ -493,12 +494,12 @@ class MqttConnectionManager @Inject constructor(
                         }
                     }
                 } finally {
-                    tokenSnapshot.fill('\u0000')
+                    tokenSnapshot.securelyClear()
                     // CR14-1: Paho MqttConnectOptions.setPassword() internally copies the
                     // CharArray via Arrays.copyOf(), so options.password and tokenSnapshot
                     // are independent.  Clear the copy held by MqttConnectOptions so that
                     // the password does not linger in heap memory after the client is closed.
-                    connectOptions?.password?.fill('\u0000')
+                    connectOptions?.password?.securelyClear()
                 }
             }
 
@@ -541,7 +542,7 @@ class MqttConnectionManager @Inject constructor(
                     }
                     connect(deviceId, tokenCopy)
                 } finally {
-                    tokenCopy.fill('\u0000')
+                    tokenCopy.securelyClear()
                 }
             }
             reconnectJob = jobToStart
@@ -692,7 +693,7 @@ class MqttConnectionManager @Inject constructor(
             connectJob = null
             reconnectDelay = INITIAL_RECONNECT_DELAY
 
-            activeTokenSnapshot?.fill('\u0000')
+            activeTokenSnapshot.securelyClear()
             activeTokenSnapshot = null
 
             val c = mqttClient

@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.netproxy.gateway.result.AppResult
+import com.netproxy.gateway.utils.securelyClear
 import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
@@ -869,7 +870,7 @@ class AuthSessionStoreTest {
         assertTrue(session1!!.authToken.contentEquals(session2!!.authToken))
         // The returned CharArray should be a copy, not the same reference as inMemoryToken
         // (Modifying one should not affect the other)
-        session1.authToken.fill('\u0000')
+        session1.authToken.securelyClear()
         assertFalse(session2.authToken.contentEquals(CharArray("secret-token".length)))
         assertTrue(session2.authToken.contentEquals("secret-token".toCharArray()))
     }

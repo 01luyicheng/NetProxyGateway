@@ -14,6 +14,7 @@ import com.netproxy.gateway.R
 import com.netproxy.gateway.connection.AuthSessionStore
 import com.netproxy.gateway.i18n.AppLocale
 import com.netproxy.gateway.ui.MainActivity
+import com.netproxy.gateway.utils.securelyClear
 import dagger.hilt.android.AndroidEntryPoint
 import io.netty.bootstrap.ServerBootstrap
 import io.netty.channel.Channel
@@ -107,7 +108,7 @@ class Socks5ProxyService : Service() {
                                         try {
                                             authSessionStore.isValid(username, passwordArray)
                                         } finally {
-                                            passwordArray.fill('\u0000')
+                                            passwordArray.securelyClear()
                                         }
                                     }
                                 )
