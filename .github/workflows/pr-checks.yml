@@ -9,7 +9,7 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write  # dependency-review needs this
+  pull-requests: read  # dependency-review needs this
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'

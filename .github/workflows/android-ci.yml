@@ -39,6 +39,7 @@ jobs:
     permissions:
       contents: read
       actions: write
+      pull-requests: read
 
     steps:
       - name: Checkout code
