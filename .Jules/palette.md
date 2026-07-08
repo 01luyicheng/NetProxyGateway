@@ -1,0 +1,3 @@
+## 2026-07-08 - [Keyboard Done Action in Jetpack Compose]
+**Learning:** In Jetpack Compose forms (like pairing inputs), unconditionally calling `focusManager.clearFocus()` on the Done keyboard action breaks user flow when the input validation fails or is incomplete. Users expect to stay focused in the input until a valid entry is provided. Additionally, placing a clear icon (`TrailingIcon`) greatly helps users to correct long numerical inputs quickly.
+**Action:** When wiring `keyboardActions = KeyboardActions(onDone = { ... })`, ensure `focusManager.clearFocus()` is wrapped in the validation condition. Always provide an `IconButton` with a valid `contentDescription` for clear actions to maintain accessibility.
