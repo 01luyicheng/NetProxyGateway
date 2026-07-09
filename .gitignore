@@ -47,6 +47,7 @@ unstaged.txt
 *.tmp
 test_output.txt
 *.out
+*.orig
 cover_*
 
 # Kotlin
