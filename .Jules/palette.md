@@ -1,0 +1,3 @@
+## 2024-05-24 - Conditional Focus Clearing on Keyboard Actions in Jetpack Compose
+**Learning:** When wiring keyboard actions like `onDone` in Jetpack Compose text fields, unconditionally calling `focusManager.clearFocus()` can interrupt the user's flow if the input is invalid or incomplete. Users have to tap the field again to resume typing.
+**Action:** Focus should only be cleared conditionally (e.g., if input validation passes) rather than unconditionally. This allows the user to continue typing or correcting their input without breaking focus if validation fails. Apply this pattern to all form fields that trigger actions on keyboard submission.
