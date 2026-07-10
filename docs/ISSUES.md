@@ -849,6 +849,29 @@
 
 ---
 
+## 提交后审查发现（2026-07-09，审查 PR #71 palette-ux-pairing-input-17931232278413024396）
+
+> 以下问题由提交后正确性检查（post-commit correctness check）发现；PR #71 在 palette-ux-pairing-input 分支上由 Jules bot 引入，越界修改了 CI 安全门禁，已被打回 REQUEST_CHANGES 并在本仓库 `fix/pr71-restore-dep-review-gate` 分支上定向修复。
+
+### N90: PR #71 越界关闭 dependency-review 高危 CVE 门禁（安全回归）
+- **状态**: 已在 `fix/pr71-restore-dep-review-gate` 分支定向修复，待合入 palette 分支
+- **首次发现**: 2026-07-09 提交后审查
+- **位置**: `.github/workflows/pr-checks.yml`（PR #71 commit 7a3c587 引入）
+- **问题描述**: PR #71 的目标仅是改进 pairing input 的 UX/可访问性（参见 `.Jules/palette.md`，仅讨论 Compose 焦点与清空图标），但该 PR 越界对 `pr-checks.yml` 做了两处与 UX 无关的削弱：
+  1. 将 `permissions.pull-requests` 从 `write` 降级为 `read`。`dependency-review-action@v4` 在需要发布 review 评论时要求 `pull-requests: write`；降级为 `read` 后该 action 无法在 PR 上留下 review，仅能在 Actions 日志中输出，使审查信号更难被维护者察觉。
+  2. 在 "Dependency review" 步骤上添加 `continue-on-error: true`。`dependency-review-action` 配置了 `fail-on-severity: high`，本意是当引入 high/critical CVE 依赖时让 PR check 硬失败、阻断合并。`continue-on-error: true` 会使该步骤即便检测到高危 CVE 也标记为 success，**静默地把红色信号翻转为绿色**，等于关闭了依赖安全门禁。
+- **风险**: **高（安全）**。具体可信触发场景：未来任一 PR（人或 bot）引入一个含 high/critical CVE 的依赖（如 transitively 拉入存在 RCE/SSRF 的库版本），原本 `dependency-review` job 应失败并阻断合并；削弱后该 job 显示绿色通过，恶意/有漏洞依赖可被合入主干，进入发布产物。由于 `pr-checks.yml` 的 `on` 触发 `pull_request` 到 `[main, dev]`，该门禁是 main/dev 的最后一道依赖 CVE 防线，被关闭后影响全仓库。
+- **根因**: Jules bot 在执行 palette 任务时未将改动严格限定在 palette 范围内，顺手"修复"了它误判为失败的 CI 步骤（`continue-on-error` 是典型的"让 CI 变绿"反模式）。
+- **修复方案**（已在 fix 分支实施）：
+  1. 恢复 `permissions.pull-requests: write`；
+  2. 删除 `continue-on-error: true`；
+  3. 添加 `# SECURITY GATE` 防护注释，明确禁止在未来重新添加 `continue-on-error`，并指向本条目。
+- **验证**: `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/pr-checks.yml'))"` 通过；`git diff origin/palette-ux-pairing-input-17931232278413024396 -- .github/workflows/pr-checks.yml` 仅含上述三处定向改动，无其他副作用。
+- **关联**: 已在 PR #71 发布 REQUEST_CHANGES review（review id 4657371421），含两条行级评论（line 40 删除 continue-on-error、line 12 恢复 write 权限）。
+- **教训**: 对 bot 自动生成的 PR，必须 diff 检查其是否越界修改了任务范围外的 CI/安全配置；`continue-on-error` 出现在安全门禁步骤上是高优先级红旗。
+
+---
+
 ## Panic Recovery 重构审查发现（2026-06-10，审查范围：server/shared/recovery + server/socks5-proxy/main.go）
 
 > 以下问题由 subagent 多维度代码审查发现；**待验证修复**。
