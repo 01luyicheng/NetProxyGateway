@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/netproxy/shared/ratelimit"
+	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
 func issueAuthToken(t *testing.T, secret []byte, claims jwt.MapClaims) string {
@@ -815,6 +816,80 @@ func TestCreatePairingSessionDatabaseErrorReturns500(t *testing.T) {
 	}
 	if attempts != 1 {
 		t.Fatalf("expected 1 generation attempt before database error, got %d", attempts)
+	}
+}
+
+// TestIsPairingCodeUniqueConstraintError guards the specificity of the
+// pairing-code conflict predicate. Only PRIMARY KEY / UNIQUE violations may be
+// treated as a retryable code collision; other constraint classes (NOT NULL,
+// CHECK, FOREIGN KEY, trigger, or a generic ErrConstraint with no extended
+// code) must NOT be classified as a pairing-code conflict, otherwise a real
+// integrity error would be silently retried up to MaxPairingCodeConflictRetries
+// times and surface as a misleading 503 instead of a 500.
+//
+// Regression history: a prior change broadened the check to
+// `Code == ErrConstraint`, which would have misclassified every constraint
+// error as a code collision. This test pins the strict behavior.
+func TestIsPairingCodeUniqueConstraintError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "primary key violation is a pairing-code conflict",
+			err:  sqlite3.Error{Code: sqlite3.ErrConstraint, ExtendedCode: sqlite3.ErrConstraintPrimaryKey},
+			want: true,
+		},
+		{
+			name: "unique violation is a pairing-code conflict",
+			err:  sqlite3.Error{Code: sqlite3.ErrConstraint, ExtendedCode: sqlite3.ErrConstraintUnique},
+			want: true,
+		},
+		{
+			name: "NOT NULL violation is NOT a pairing-code conflict (must surface as 500)",
+			err:  sqlite3.Error{Code: sqlite3.ErrConstraint, ExtendedCode: sqlite3.ErrConstraintNotNull},
+			want: false,
+		},
+		{
+			name: "CHECK constraint violation is NOT a pairing-code conflict",
+			err:  sqlite3.Error{Code: sqlite3.ErrConstraint, ExtendedCode: sqlite3.ErrConstraintCheck},
+			want: false,
+		},
+		{
+			name: "foreign key violation is NOT a pairing-code conflict",
+			err:  sqlite3.Error{Code: sqlite3.ErrConstraint, ExtendedCode: sqlite3.ErrConstraintForeignKey},
+			want: false,
+		},
+		{
+			name: "generic constraint without extended code is NOT a pairing-code conflict",
+			err:  sqlite3.Error{Code: sqlite3.ErrConstraint, ExtendedCode: sqlite3.ErrNoExtended(sqlite3.ErrConstraint)},
+			want: false,
+		},
+		{
+			name: "non-constraint sqlite error is NOT a pairing-code conflict",
+			err:  sqlite3.Error{Code: sqlite3.ErrBusy, ExtendedCode: sqlite3.ErrNoExtended(sqlite3.ErrBusy)},
+			want: false,
+		},
+		{
+			name: "non-sqlite error is NOT a pairing-code conflict",
+			err:  errors.New("some other error"),
+			want: false,
+		},
+		{
+			name: "wrapped sqlite primary key violation is still detected via errors.As",
+			err:  fmt.Errorf("insert failed: %w", sqlite3.Error{Code: sqlite3.ErrConstraint, ExtendedCode: sqlite3.ErrConstraintPrimaryKey}),
+			want: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isPairingCodeUniqueConstraintError(tc.err)
+			if got != tc.want {
+				t.Fatalf("isPairingCodeUniqueConstraintError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }
 

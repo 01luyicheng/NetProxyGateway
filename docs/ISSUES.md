@@ -1425,4 +1425,31 @@
 - **修复难度**: 低
 - **修复方式**: 将 TLS 配置（`socketFactory`、`sslHostnameVerifier` 赋值）从 `apply` 块中移出，在 `connectOptions = options` 赋值之后再进行 TLS 配置。这样即使 TLS 配置抛出异常，`connectOptions` 已赋值，`finally` 块能正确清除 Paho 内部密码副本。
 
+## 提交后正确性检查发现（2026-07-06，审查 PR #63 提交 f2ecfc3 / d8473c7）
+
+> 审查范围：过去 24 小时内更新的 PR（#62、#63）及其分支提交。经三个独立子代理复审确认：本次审查窗口内**未发现**会导致数据丢失、应用崩溃或可即时利用安全漏洞的"关键"缺陷。下列两条为确认的**中危**缺陷（安全时效性回退 + 潜在正确性陷阱），均源自同一错误前提（"旧版 go-sqlite3 未定义 `sqlite3.ErrConstraintUnique`"，经核实为假——该常量在 v1.14.22/37/47 中均存在），故一并定向修复。
+
+### REV48: `go-sqlite3` 依赖被误降级 v1.14.37 → v1.14.22（安全时效性回退） [已修复]
+- **状态**: 已修复（本审查提交的定向修复分支）
+- **提交哈希**: `d8473c7`（PR #63 分支 `palette-add-clear-button-7337319147418150840`）
+- **位置**: `server/api/go.mod` (L8)、`server/api/go.sum`
+- **问题描述**: PR #63 提交 `f2ecfc3` 先将 `github.com/mattn/go-sqlite3` 从 `v1.14.37` 升级到 `v1.14.47`，随后提交 `d8473c7`（标题 "fix(api): fix sqlite3 constraint check compatibility with older versions"）将其改为 `v1.14.22`。`v1.14.22` 早于 `v1.14.37`（约两年），构成**降级**而非提交信息声称的兼容性修复。`go.sum` 中同时残留 `v1.14.22` 与 `v1.14.47` 条目（未执行 `go mod tidy`）。go-sqlite3 内嵌 SQLite amalgamation，降级会丢失约两年的上游 SQLite 安全修复；本服务处理配对码、JWT、认证等敏感数据，依赖时效性回退属于安全卫生缺陷。
+- **触发场景**: 不存在即时可利用的触发场景（无已知被利用 CVE 链）。风险为安全时效性回退：服务以旧版内嵌 SQLite 运行，缺失上游修复；且实际编译失败的真实根因（疑为 Go 1.25 与 CGO 兼容性）被错误归因掩盖，未真正解决。
+- **风险**: **中**。安全敏感服务的依赖时效性回退；提交信息与实际变更不符；`go.sum` 残留 stale 条目。
+- **修复难度**: 低
+- **修复方式**: 将 `go.mod` 中 `go-sqlite3` 恢复为 `v1.14.37`（PR 前的已知良好基线），执行 `go mod tidy` 清理 `go.sum`（移除 `v1.14.22`/`v1.14.47` 残留条目）。真正的 CI 编译失败需另行排查（不应以错误前提改动业务代码）。
+- **验证**: `go build ./...`、`go vet ./...`、`go test ./...` 全部通过。
+
+### REV49: `isPairingCodeUniqueConstraintError` 被泛化为匹配任意约束错误（潜在正确性陷阱） [已修复]
+- **状态**: 已修复（本审查提交的定向修复分支）
+- **提交哈希**: `d8473c7`（PR #63 分支 `palette-add-clear-button-7337319147418150840`）
+- **位置**: `server/api/main.go` (`isPairingCodeUniqueConstraintError`, L214-L231)
+- **问题描述**: 函数由 `sqliteErr.ExtendedCode == ErrConstraintPrimaryKey || ErrConstraintUnique`（仅匹配主键/唯一冲突）改为 `sqliteErr.Code == sqlite3.ErrConstraint`（匹配任意约束错误，含 NOT NULL / CHECK / FOREIGN KEY / 触发器）。唯一调用方 `createPairingSession`（L783）在返回 `true` 时 `continue` 重试循环且**不记录日志**。改动的理由（"旧版未定义 `ErrConstraintUnique`"）经核实为假。经三个子代理确认：在当前 schema（仅 `code PRIMARY KEY` 与若干 `NOT NULL`）与当前输入下，唯一可触发的约束是主键冲突，因此两版本**当前行为等价**，无即时可触发缺陷。但函数名 `isPairingCodeUniqueConstraintError` 与新行为不符，构成潜在陷阱：未来 schema 增加 CHECK/FK/触发器，或某 NOT NULL 列收到 NULL 时，真实完整性错误会被错误归类为"配对码冲突"，静默重试 10 次后返回误导性的 HTTP 503，且原始错误从不记录日志。该函数此前**无任何直接单元测试**。
+- **触发场景**: 当前不可触发（无 CHECK/FK/触发器，所有 NOT NULL 列均由调用方提供非空值）。潜在场景：未来迁移为 `pairing_sessions` 增加 CHECK 或外键约束后，违反该约束的 INSERT 会被误当作配对码冲突重试 10 次并以 503 返回，掩盖真实 DB 错误。
+- **风险**: **中**（潜在正确性 + 可诊断性陷阱；当前不可触发）。
+- **修复难度**: 低
+- **修复方式**: 恢复严格匹配 `Code == ErrConstraint && ExtendedCode ∈ {ErrConstraintPrimaryKey, ErrConstraintUnique}`，并新增单元测试 `TestIsPairingCodeUniqueConstraintError` 覆盖 PK/Unique（true）、NOT NULL/CHECK/FK/通用约束/非约束错误/非 sqlite 错误/被 wrap 的错误（false/true）。注：`createPairingSession` 重试分支不记录日志的"静默吞错"行为为 **dev 既有**问题（非本 PR 引入），不在本次修复范围，建议后续单独补充日志。
+- **验证**: `TestIsPairingCodeUniqueConstraintError` 在严格版本下全部通过；临时还原为泛化版本后 4 个子测试（NOT NULL/CHECK/FK/通用约束）按预期失败，证明测试具有回归保护力。`go test ./...` 全部通过。
+
+
 
