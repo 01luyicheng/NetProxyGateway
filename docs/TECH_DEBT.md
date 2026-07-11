@@ -616,23 +616,20 @@
 - **修复状态**: 待修复
 - **关联问题**: TECH_DEBT.md C4（C4 描述 `loadSession()` 中的 String 转换，C81 补充 `update` 路径的 `putString` 残留，两者共同构成完整限制）
 
-### C82: 敏感凭证零化路径测试覆盖严重不足
-- **提交哈希**: f433b6d
+### C82: 敏感凭证零化路径测试覆盖严重不足 [已修复]
+- **状态**: 已修复
+- **提交哈希**: f433b6d（记录问题）；fix/c82-zeroing-test-coverage 分支（修复）
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/` 下 5 个文件的 22 处 `securelyClear()` 调用点
 - **问题描述**: 22 处 `securelyClear()` 调用点中，仅 5 处有直接断言"零化确实发生"（全部集中在 `MainViewModel.kt:251,268,340,355,426`）。其余 17 处完全没有零化断言，包括 CR14-1 关键修复点 `MqttConnectionManager.kt:502`（`connectOptions?.password?.securelyClear()`，清除 Paho 内部 `Arrays.copyOf` 拷贝）。
   **特别危险项**: `Socks5ConnectionPoolTest.kt:359` 的测试名 `n37b10_createNewConnection_zerosCredentialPasswordAfterUse` 暗示有零化验证，但实际只验证原密码未被破坏，**未**断言拷贝被零化——这是"假覆盖"，比无测试更危险。
-  完全无测试覆盖的关键路径：
-  - `AuthSessionStore.kt:59,75,96,110,151,167`（6 处，inMemoryToken 与 session.authToken）
-  - `MqttConnectionManager.kt:287,497,502,545,696`（5 处，含 CR14-1 关键修复点）
-  - `Socks5ConnectionPool.kt:303,404`（2 处）
-  - `Socks5ProxyService.kt:111`（1 处，嵌在 Netty ChannelInitializer lambda 中）
-  - `MainViewModel.kt:335,347,436`（3 处，含 pairWithCode 成功路径与 onCleared）
 - **风险**: 中-高。若未来重构误删某个 `securelyClear()` 调用，仅 5 处能被测试发现，其余 17 处会静默通过，敏感数据可能残留在内存中。
-- **修复难度**: 中-高。
-  - `AuthSessionStore.kt`：需反射读取 `inMemoryToken` 私有字段
-  - `MqttConnectionManager.kt:502`：需反射访问 `MqttConnectOptions.password` 内部字段，且要在协程 finally 执行后断言，时序复杂
-  - `Socks5ProxyService.kt:111`：嵌在 Netty `ChannelInitializer` lambda 中，需 Robolectric + EmbeddedChannel
-  - `Socks5ConnectionPoolTest.kt:359`：需修正误导性测试名（假覆盖）
-- **修复状态**: 待修复
-- **修复优先级建议**: 1) 修正 `Socks5ConnectionPoolTest.kt:359` 误导性测试名（假覆盖最危险）；2) 补 `MqttConnectionManager.kt:502` CR14-1 防回归；3) 其余分批补测
+- **修复方式**:
+  - 修正 `Socks5ConnectionPoolTest.kt:359` 假覆盖：捕获 `credentialProvider` 返回的拷贝引用，断言在 `createNewConnection` finally 后被零化（批 1）
+  - 新增 `AuthSessionStoreTest.kt` 6 个测试：反射读取 `inMemoryToken` 字段 + spyk 拦截 `loadSession` 私有方法（批 1）
+  - 新增 `MqttConnectionManagerZeroingTest.kt` 5 个测试：含 CR14-1 关键防回归测试，反射读取 `MqttConnectOptions.password` 字段验证 Paho 内部 `Arrays.copyOf` 拷贝被零化（批 2）
+  - 新增 `Socks5ConnectionPoolTest.kt:performSocks5Handshake_finally_zerosPassBytes`：通过自定义 `OutputStream` 捕获 `passBytes` 引用（批 3）
+  - 新增 `Socks5ProxyServiceTest.kt:credentialValidator_finally_zerosPasswordArray`：反射调用 Kotlin 编译器生成的合成方法 `initChannel$lambda$0` 触发 lambda finally 块（批 3，**脆弱，见下**）
+  - 新增 `MainViewModelTest.kt` 3 个测试：捕获 `_uiState.getAndUpdate` 返回的旧 authToken 引用（批 3）
+- **修复状态**: 已修复（22/22 处覆盖，含 1 处假覆盖修正）
+- **已知脆弱测试**: `Socks5ProxyServiceTest.kt:credentialValidator_finally_zerosPasswordArray` 依赖 Kotlin 2.1.x 编译器将 lambda 体编译为匿名内部类 `Socks5ProxyService$startProxyServer$1$bootstrap$1` 上的静态合成方法 `initChannel$lambda$0`。这是编译器实现细节，非语言规范保证。**触发条件**：升级 Kotlin 大版本、修改 `startProxyServer` 结构、将 lambda 提取为命名方法、或 lambda 被内联优化时，合成方法名或所在类会改变，导致测试断裂且不易诊断。**缓解**：若该测试失败，优先检查合成方法名是否变化；彻底解决需重构生产代码暴露 lambda 为可测试方法（违反"精准修改"原则，暂不实施）。
 - **关联问题**: ISSUES.md N8（N8 是核心业务逻辑测试缺口泛指，C82 聚焦安全敏感的凭证零化路径）

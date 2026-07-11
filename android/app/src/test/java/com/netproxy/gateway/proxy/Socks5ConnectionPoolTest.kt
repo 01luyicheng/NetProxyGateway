@@ -5,6 +5,7 @@ import io.mockk.mockk
 import io.mockk.verify
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.InputStream
@@ -366,19 +367,32 @@ class Socks5ConnectionPoolTest {
                 cleanupIntervalMs = 60_000
             ),
             credentialProvider = {
-                Pair("user", secretPassword.copyOf())
+                // Return a fresh copy and capture the same reference so we can later
+                // assert that createNewConnection's finally block zeroed THIS copy
+                // (not the original secretPassword held by the test).
+                val copy = secretPassword.copyOf()
+                capturedPassword = copy
+                Pair("user", copy)
             }
         )
 
         try {
             // borrowConnection will fail because there's no real SOCKS5 proxy,
-            // but the credentialProvider will be called and the password should be zeroed
+            // but the credentialProvider will be called and the password copy should be zeroed
             pool.borrowConnection("10.0.0.1", 443)
 
-            // The secretPassword copy provided by credentialProvider should have been zeroed
+            // The copy returned by credentialProvider should have been zeroed
             // in createNewConnection's finally block after the socket connection failed.
-            // We verify by checking that the original secretPassword is still intact
-            // (proving we zero the copy, not the original).
+            assertNotNull(
+                "credentialProvider should have been invoked",
+                capturedPassword
+            )
+            assertTrue(
+                "Credential password copy should be zeroed after createNewConnection's finally block",
+                capturedPassword!!.all { it == '\u0000' }
+            )
+
+            // The original secretPassword should remain intact (proving we zero the copy, not the original)
             assertTrue(
                 "Original secretPassword should remain intact",
                 secretPassword.contentEquals("super-secret-token".toCharArray()),
@@ -414,5 +428,71 @@ class Socks5ConnectionPoolTest {
 
         assertFalse(connection.inUse.get())
         verify(atLeast = 1) { socket.close() }
+    }
+
+    // C82 批 3: Socks5ConnectionPool.kt:404 - performSocks5Handshake finally 中 passBytes.securelyClear()
+    //
+    // passBytes 是 performSocks5Handshake 内部从 password CharArray 转换出的 UTF-8 字节数组，
+    // 通过 output.write(passBytes) 写入 Socket。在自定义 OutputStream 中按内容匹配捕获该引用
+    // （写入时刻 passBytes 尚未被零化），握手结束后 finally 块执行 passBytes.securelyClear()，
+    // 捕获的引用应被填零。
+    @Test
+    fun performSocks5Handshake_finally_zerosPassBytes() {
+        val pool = Socks5ConnectionPool(
+            config = Socks5ConnectionPoolConfig(
+                socketSoTimeoutMs = 5_000,
+                cleanupIntervalMs = 60_000
+            ),
+            credentialProvider = { null }
+        )
+
+        try {
+            // 构造合法的 SOCKS5 响应序列：方法协商、认证成功、CONNECT 成功（IPv4 绑定地址）
+            val methodResponse = byteArrayOf(0x05, 0x02)          // SOCKS5, 选择密码认证
+            val authResponse = byteArrayOf(0x01, 0x00)            // 认证版本, 成功
+            val connectResponse = byteArrayOf(0x05, 0x00, 0x00, 0x01) // SOCKS5, 成功, 保留, ATYP=IPv4
+            val boundAddressAndPort = ByteArray(4 + 2)            // 4 字节 IPv4 + 2 字节端口
+            val inputBytes = methodResponse + authResponse + connectResponse + boundAddressAndPort
+            val input = java.io.ByteArrayInputStream(inputBytes)
+
+            // 在 output.write(passBytes) 调用时按内容匹配捕获引用
+            val password = "secret123"                            // 9 字节 UTF-8
+            val expectedPassBytes = password.toByteArray(Charsets.UTF_8)
+            var capturedPassBytes: ByteArray? = null
+            val output = object : java.io.OutputStream() {
+                override fun write(b: Int) {}
+                override fun write(b: ByteArray, off: Int, len: Int) {
+                    if (off == 0 && len == b.size &&
+                        b.size == expectedPassBytes.size &&
+                        b.contentEquals(expectedPassBytes)
+                    ) {
+                        capturedPassBytes = b
+                    }
+                }
+            }
+
+            val method = Socks5ConnectionPool::class.java.getDeclaredMethod(
+                "performSocks5Handshake",
+                java.io.InputStream::class.java,
+                java.io.OutputStream::class.java,
+                String::class.java,
+                CharArray::class.java,
+                String::class.java,
+                Int::class.javaPrimitiveType
+            )
+            method.isAccessible = true
+            method.invoke(pool, input, output, "user", password.toCharArray(), "127.0.0.1", 443)
+
+            assertNotNull(
+                "passBytes should have been captured during handshake",
+                capturedPassBytes
+            )
+            assertTrue(
+                "passBytes should be zeroed after performSocks5Handshake's finally block",
+                capturedPassBytes!!.all { it == 0.toByte() }
+            )
+        } finally {
+            pool.shutdown()
+        }
     }
 }
