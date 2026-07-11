@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write  # dependency-review needs this
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
@@ -28,15 +27,3 @@ jobs:
         uses: wagoid/commitlint-github-action@v6
         with:
           configFile: .commitlintrc.json
-
-  dependency-review:
-    runs-on: [self-hosted, Linux, X64, do-sfo3]
-    timeout-minutes: 5
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-
-      - name: Dependency review
-        uses: actions/dependency-review-action@v4
-        with:
-          fail-on-severity: high
