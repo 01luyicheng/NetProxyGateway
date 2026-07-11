@@ -1164,13 +1164,16 @@
 - **风险**: **高**。与 N37-B3 同类问题，心跳协程可能复制已清零的 token。
 - **修复方式**: 将 `startHeartbeat(deviceId, authToken, generation)` 改为 `startHeartbeat(deviceId, tokenSnapshot, generation)`。
 
-### C82: `pairWithCode()` 成功路径未清零局部 `authTokenArray`
-- **状态**: 待修复
-- **提交哈希**: `4c0cea6`
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (pairWithCode, L305-326)
-- **问题描述**: `pairWithCode()` 成功路径（蜂窝网络可用分支）中，`authTokenArray` 被传递给 `authSessionStore.update()` 和 `mqttConnectionManager.connect()`（两者内部会 copy），但 `authTokenArray` 本身在方法结束前从未被清零。只有 `else` 分支（失败路径）中执行了 `authTokenArray.fill('\u0000')`。
+### C82: `pairWithCode()` 成功路径未清零局部 `authTokenArray` [已修复]
+- **状态**: 已修复
+- **提交哈希**: `a629ba5`（原登记 `4c0cea6` 误记，该 commit 仅修改测试文件；实际回归由 `a629ba5` 引入）
+- **修复提交**: `c7875a1`（REV12 修复，重新引入 `finally { authTokenArray.fill('\u0000') }` 块）；`f433b6d`（重构：`fill('\u0000')` → `securelyClear()`，行为等价）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (pairWithCode, L314-358)
+- **问题描述**: `pairWithCode()` 成功路径（蜂窝网络可用分支）中，`authTokenArray` 被传递给 `authSessionStore.update()` 和 `mqttConnectionManager.connect()`（两者内部会 copy），但 `authTokenArray` 本身在方法结束前从未被清零。只有 `else` 分支（失败路径）中执行了 `authTokenArray.fill('\u0000')`。该回归由 `a629ba5` 重构时移除 `finally` 块引入。
 - **风险**: **中**。配对成功后局部变量仍持有原始 token 引用，直到方法栈帧销毁。
-- **修复方式**: 在成功路径末尾（`mqttConnectionManager.connect()` 调用后）添加 `authTokenArray.fill('\u0000')`。
+- **修复难度**: 低
+- **修复方式**: `c7875a1` 将整个成功/失败路径包裹在 `try/catch/finally` 中，`finally` 块执行 `authTokenArray.fill('\u0000')`，确保成功、失败、异常路径均清零。`f433b6d` 将 `fill('\u0000')` 统一替换为 `securelyClear()` 扩展函数（`SecurityExt.kt`，对非 null 接收者行为等价）。
+- **验证**: `MainViewModelTest.pairWithCode_cellularConnected_zerosAuthTokenArrayInFinally` (L600-617) 通过 `slot<CharArray>` 捕获传给 `connect()` 的引用，断言 `tokenSlot.captured.all { it == '\u0000' }`，实测通过。
 
 ### T1: `Socks5ConnectionPoolTest` N37-B10 测试虚假通过
 - **状态**: 待修复
