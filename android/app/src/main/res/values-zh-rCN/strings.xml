@@ -10,6 +10,7 @@
     <string name="pair">配对</string>
     <string name="pairing_in_progress">配对中...</string>
     <string name="disconnect">断开连接</string>
+    <string name="clear_input">清空输入框</string>
 
     <string name="remote_control">远程控制</string>
     <string name="vpn_tunnel">VPN隧道</string>
