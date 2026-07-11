@@ -1164,13 +1164,16 @@
 - **风险**: **高**。与 N37-B3 同类问题，心跳协程可能复制已清零的 token。
 - **修复方式**: 将 `startHeartbeat(deviceId, authToken, generation)` 改为 `startHeartbeat(deviceId, tokenSnapshot, generation)`。
 
-### C82: `pairWithCode()` 成功路径未清零局部 `authTokenArray`
-- **状态**: 待修复
-- **提交哈希**: `4c0cea6`
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (pairWithCode, L305-326)
-- **问题描述**: `pairWithCode()` 成功路径（蜂窝网络可用分支）中，`authTokenArray` 被传递给 `authSessionStore.update()` 和 `mqttConnectionManager.connect()`（两者内部会 copy），但 `authTokenArray` 本身在方法结束前从未被清零。只有 `else` 分支（失败路径）中执行了 `authTokenArray.fill('\u0000')`。
+### C82: `pairWithCode()` 成功路径未清零局部 `authTokenArray` [已修复]
+- **状态**: 已修复
+- **提交哈希**: `a629ba5`（原登记 `4c0cea6` 误记，该 commit 仅修改测试文件；实际回归由 `a629ba5` 引入）
+- **修复提交**: `c7875a1`（REV12 修复，重新引入 `finally { authTokenArray.fill('\u0000') }` 块）；`f433b6d`（重构：`fill('\u0000')` → `securelyClear()`，行为等价）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (pairWithCode, L314-358)
+- **问题描述**: `pairWithCode()` 成功路径（蜂窝网络可用分支）中，`authTokenArray` 被传递给 `authSessionStore.update()` 和 `mqttConnectionManager.connect()`（两者内部会 copy），但 `authTokenArray` 本身在方法结束前从未被清零。只有 `else` 分支（失败路径）中执行了 `authTokenArray.fill('\u0000')`。该回归由 `a629ba5` 重构时移除 `finally` 块引入。
 - **风险**: **中**。配对成功后局部变量仍持有原始 token 引用，直到方法栈帧销毁。
-- **修复方式**: 在成功路径末尾（`mqttConnectionManager.connect()` 调用后）添加 `authTokenArray.fill('\u0000')`。
+- **修复难度**: 低
+- **修复方式**: `c7875a1` 将整个成功/失败路径包裹在 `try/catch/finally` 中，`finally` 块执行 `authTokenArray.fill('\u0000')`，确保成功、失败、异常路径均清零。`f433b6d` 将 `fill('\u0000')` 统一替换为 `securelyClear()` 扩展函数（`SecurityExt.kt`，对非 null 接收者行为等价）。
+- **验证**: `MainViewModelTest.pairWithCode_cellularConnected_zerosAuthTokenArrayInFinally` (L600-617) 通过 `slot<CharArray>` 捕获传给 `connect()` 的引用，断言 `tokenSlot.captured.all { it == '\u0000' }`，实测通过。
 
 ### T1: `Socks5ConnectionPoolTest` N37-B10 测试虚假通过
 - **状态**: 待修复
@@ -1486,5 +1489,20 @@
 - **修复难度**: 低。
 - **修复方式**: 一次性 normalize 该文件的行尾——`git rm --cached server/api/main.go && renormalize` 或 `dos2unix server/api/main.go && git add`，然后提交"normalize line endings"单提交。提交后 `.gitattributes` 的规则会对该文件生效，伪 diff 消失。
 - **关联**: 与 docs/CI_REFACTOR_PLAN.md 中"artifact 路径"等 bug 同源（都是 dev 分支历史遗留的配置不一致）。
+
+## 2026-07-10 提交后正确性检查发现（过去 24h 提交/PR 审查）
+
+### CI-PERM-1: PR #76 仅在 workflow 顶层加 `pull-requests: read` 被 job 级 `permissions:` 覆盖，paths-filter 仍 403（必需 CI 检查在所有 PR 事件上失败）[已修复]
+- **状态**: 已修复（本 PR `fix/pr76-paths-filter-job-perms`）
+- **发现位置**: PR #76 `fix/ci-paths-filter-permissions`（base: `dev`），提交 `8de3dfc`
+- **影响文件**: `.github/workflows/android-ci.yml`、`.github/workflows/go-ci.yml`
+- **问题描述**: PR #76 旨在修复 `dorny/paths-filter@v3` 在 `pull_request` 事件下的 "Resource not accessible by integration"（HTTP 403）错误，但仅在 workflow **顶层** `permissions:` 块加入 `pull-requests: read`。而 `android` 与 `go` 两个 job 各自声明了 **job 级** `permissions:` 块（`contents: read` + `actions: write`）。按 GitHub Actions 语义，job 级 `permissions:` 块会**完全替换**（而非合并）workflow 顶层块，未列出的 scope 一律降为 `none`。因此顶层新加的 `pull-requests: read` 对这两个 job 完全无效，paths-filter 仍在 `pull-requests: none` 下调用 GitHub REST API 拉取 PR 变更文件列表，触发 403。该步骤无 `continue-on-error`，导致 job 失败 → 两个被标为 "required check" 的检查（`Android Build & Test`、`Go Server Build (...)`）在**所有** PR 事件上持续红灯，PR 处于 `mergeable_state: blocked` 无法合并；若维护者为解阻塞而关闭必需检查，则 PR 事件 CI 形同虚设，缺陷将绕过审查流入主干。PR #76 对其声称目标而言是 no-op。
+- **触发场景**: 任意针对 `main`/`dev` 的 `pull_request`（opened/synchronize/reopened，未被 `paths-ignore` 排除）→ `Detect changes` 步骤调用 paths-filter → REST API 403 → 步骤失败 → 必需检查失败 → PR 无法合并。
+- **风险**: **高**（dev 工作流严重退化）。阻塞所有 PR 合并；或迫使维护者关闭必需检查，使 CI 失去对 PR 的把关能力。`push` 事件不受影响（paths-filter 在 push 时用 git diff，不调 PR API）。
+- **根因**: 对 GitHub Actions 权限 "job 级替换顶层级、不合并"（scope zeroing）语义的误解。
+- **验证**: 官方文档 [Assigning permissions to jobs](https://docs.github.com/en/actions/using-jobs/assigning-permissions-to-jobs) + [dorny/paths-filter README](https://github.com/dorny/paths-filter)（"Requires pull-requests: read permission"）。PR #76 的 `mergeable_state: blocked` 与该判断一致。
+- **修复方式**: 在两个 workflow 的 `android`/`go` job 的 **job 级** `permissions:` 块中加入 `pull-requests: read`（保留 `contents: read` 与 `actions: write`，维持最小权限；`actions: write` 仍为 `actions/cache@v4` 所需）。同时顶层也补 `pull-requests: read`（与已验证可用的 `palette-ux-keyboard-focus` 分支一致，并对未来未声明 job 级权限的 job 生效）。
+- **回归测试**: 新增 `scripts/check_ci_permissions.py`（纯 stdlib）+ `make ci-perms-check`。脚本解析两个 workflow，断言每个使用 `dorny/paths-filter` 的 job 在其 **job 级** `permissions:` 中包含 `pull-requests: read`，缺失即失败。已验证：修复后通过；在 `dev` 基线与 PR #76 版本（仅顶层）上均失败。
+- **关联**: 与 `palette-ux-keyboard-focus-17858698244994354345` 分支（PR #74）中已存在的等价 job 级修复一致；本 PR 为该问题的独立、定向修复，可取代 PR #76。
 
 

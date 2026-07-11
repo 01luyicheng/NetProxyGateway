@@ -28,6 +28,9 @@ help:
 	@echo "  docker-down            Stop all services"
 	@echo "  docker-build           Build all Docker images"
 	@echo ""
+	@echo "CI Config Guards:"
+	@echo "  ci-perms-check         Verify paths-filter jobs have pull-requests:read"
+	@echo ""
 	@echo "Combined Targets:"
 	@echo "  all                    Run Android and Go full build & test"
 	@echo "  test                   Run Android and Go tests"
@@ -194,6 +197,18 @@ go-ci-component:
 	echo "=== $$dir CI checks passed ==="
 
 # ---------------------------------------------------------------------------
+# CI workflow configuration guards
+# ---------------------------------------------------------------------------
+
+# Regression guard for the dorny/paths-filter `pull-requests: read` permission
+# bug: a job-level `permissions:` block REPLACES (not merges with) the
+# workflow-level block, so the grant must be present at the job level for every
+# job that runs dorny/paths-filter, otherwise the required CI check fails on
+# every PR with "Resource not accessible by integration" (HTTP 403).
+ci-perms-check:
+	@python3 scripts/check_ci_permissions.py
+
+# ---------------------------------------------------------------------------
 # Docker
 # ---------------------------------------------------------------------------
 
@@ -228,4 +243,5 @@ clean:
 .PHONY: android-build android-test android-lint android-coverage android-dep-check android-all
 .PHONY: go-build go-test go-fmt go-vet go-mod-tidy-check go-test-race go-coverage-check go-vuln go-ci go-ci-component go-all
 .PHONY: docker-up docker-down docker-build
+.PHONY: ci-perms-check
 .PHONY: all test clean help
