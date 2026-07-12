@@ -106,13 +106,32 @@ jobs:
             echo "available=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Step 7.1: Unified Makefile call — build + test + gofmt + vet + mod-tidy-check
-      - name: CI checks for ${{ matrix.component }}
+      # Step 7.1: go build — HARD GATE (no continue-on-error).
+      # Was previously masked along with test+quality in a single
+      # `make go-ci-component` step; see docs/ISSUES.md CI-MASK-1.
+      - name: Build ${{ matrix.component }}
         if: steps.filter.outputs.component == 'true'
         env:
           CGO_ENABLED: ${{ steps.gcc.outputs.available == 'true' && '1' || '0' }}
-        run: make go-ci-component COMPONENT=${{ matrix.component }}
-        continue-on-error: true  # quality checks (fmt/vet/tidy) still collecting baseline
+        run: make go-build-component COMPONENT=${{ matrix.component }}
+
+      # Step 7.2: go test — HARD GATE (no continue-on-error). Generates
+      # coverage.out for the artifact upload below.
+      - name: Test ${{ matrix.component }}
+        if: steps.filter.outputs.component == 'true' && success()
+        env:
+          CGO_ENABLED: ${{ steps.gcc.outputs.available == 'true' && '1' || '0' }}
+        run: make go-test-component COMPONENT=${{ matrix.component }}
+
+      # Step 7.3: quality checks (gofmt + vet + mod-tidy) — masked per ADR-006
+      # baseline collection. Runs even if test failed (always()) so the
+      # baseline is still collected for triage.
+      - name: Quality checks for ${{ matrix.component }}
+        if: always() && steps.filter.outputs.component == 'true'
+        env:
+          CGO_ENABLED: ${{ steps.gcc.outputs.available == 'true' && '1' || '0' }}
+        run: make go-quality-component COMPONENT=${{ matrix.component }}
+        continue-on-error: true  # ADR-006: fmt/vet/tidy baseline collection
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
@@ -120,6 +139,7 @@ jobs:
         with:
           name: go-coverage-${{ matrix.component }}
           path: ${{ matrix.path }}/coverage.out
+          if-no-files-found: ignore  # build/test may not have produced coverage.out
 
       - name: Install govulncheck
         if: always() && steps.filter.outputs.component == 'true'

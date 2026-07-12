@@ -100,17 +100,22 @@ jobs:
       - name: Generate JaCoCo coverage report
         if: steps.filter.outputs.android == 'true'
         run: ./android/gradlew -p android jacocoTestReport --stacktrace --no-daemon
-        continue-on-error: true
+        continue-on-error: true  # N87 downstream: test timeout may leave incomplete .exec data; coverage report generation is cosmetic, not a merge blocker
 
       - name: Run Lint check
         if: steps.filter.outputs.android == 'true'
         run: ./android/gradlew -p android lintDebug --no-daemon
-        continue-on-error: true
+        # No continue-on-error: lintDebug exits 0 because build.gradle.kts sets
+        # abortOnError=false; unmasking restores defense-in-depth if that flag
+        # is later flipped. See docs/ISSUES.md CI-MASK-2.
 
       - name: Run dependency vulnerability check
         if: steps.filter.outputs.android == 'true'
         run: ./android/gradlew -p android dependencyCheckAnalyze --no-daemon
-        continue-on-error: true
+        # No continue-on-error: failBuildOnCVSS=9.0f in build.gradle.kts means
+        # only CRITICAL vulnerabilities (CVSS >= 9.0) fail the build. This is
+        # the only hard gate for vulnerable Android dependencies. See
+        # docs/ISSUES.md CI-MASK-2.
 
       - name: Upload test results
         uses: actions/upload-artifact@v4

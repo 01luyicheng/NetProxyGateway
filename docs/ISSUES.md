@@ -1877,3 +1877,51 @@
 - **风险**: **高**。安全关键功能被绕过，攻击者可在不被检测的情况下进行调试
 - **修复方式**: 重构 `resolveDebugPropertiesState` 为始终同时调用反射和 getprop，取两者的"并集"结果——任一来源检测到 debug 特征即报告。新增 `isDebugPropertyValue` 和 `readPropertyValueViaReflection` 方法替代原有的 `readDebugPropertyValue`
 
+## 2026-07-13 提交后正确性检查发现（过去 24h 提交/PR 审查）
+
+### CI-MASK-1: `go-ci.yml` 单步 `continue-on-error: true` 静默吞没 `go build` + `go test` 失败，破坏 Go 侧合并门禁 [已修复]
+- **状态**: 已修复（分支 `fix/pr80-ci-masking-regression`）
+- **发现位置**: PR #80 `palette/diagnostics-card-ux-improvement-9614842658949896577`（base: `main`）；CI 重构提交 `19b8434`/`dbf2f9d`（亦存在于 PR #79 `palette/auto-submit-pairing-code-11146188363273715457`）
+- **影响文件**: `.github/workflows/go-ci.yml`（步骤 "CI checks for ${{ matrix.component }}"，原 L110-115）、`Makefile`（`go-ci-component` 目标，原 L182-197）
+- **问题描述**: PR #80 将原 `ci.yml` 中**分步且无 `continue-on-error`** 的 `go build` 与 `go test` 步骤合并为单个 `make go-ci-component` 调用，并在该步骤上加 `continue-on-error: true`。Makefile 中 `go-ci-component` 目标在**同一 recipe** 内用 `&&` 链接 `go build -v ./... && go test -v ... && gofmt && go vet && go mod tidy`。因此 `continue-on-error: true` 不仅掩盖 fmt/vet/tidy（ADR-006 L294 声明的基线收集意图），**也掩盖 `go build` 与 `go test` 的失败**。结果：任何破坏 Go 编译或单元测试的 PR 仍能绿灯合并，`Go Server Build (<component>)` 这个 required check 形同虚设。步骤内联注释 `# quality checks (fmt/vet/tidy) still collecting baseline` 与 ADR-006 L294 都明确将掩盖范围限定为 fmt/vet/tidy，实现与文档/意图不一致。
+- **触发场景**: 贡献者提交一个破坏 `server/api` 编译的 PR（如引入语法错误、删除被引用的符号）→ `make go-ci-component COMPONENT=api` 中的 `go build` 失败 → recipe 退出非零 → 步骤因 `continue-on-error: true` 被标记为 success → job 结论为 success → required check `Go Server Build (api)` 绿灯 → PR 合并 → 主干构建损坏。
+- **风险**: **严重**。Go 侧合并门禁完全失效；编译错误、单元测试回归、数据完整性问题、并发缺陷等均可绕过审查流入主干。与 `main` 基线相比是明确退化（`main` 的 `ci.yml` 中 `go build`/`go test` 为独立硬门禁步骤，无 `continue-on-error`）。
+- **根因**: Makefile recipe 的 `&&` 链式语义与 workflow 步骤级 `continue-on-error` 的作用域混淆——前者使整个 recipe 成为一个退出码，后者将该退出码映射为步骤成功。
+- **验证**: `git show origin/main:.github/workflows/ci.yml | grep -B2 -A2 continue-on-error` 确认 `main` 上 Go build/test 步骤无 `continue-on-error`。`git show origin/palette/...:Makefile | sed -n '182,198p'` 确认 `go-ci-component` 在单一 recipe 内 `&&` 链接 build+test+quality。`git show origin/palette/...:.github/workflows/go-ci.yml | sed -n '110,115p'` 确认 `continue-on-error: true` 覆盖整个 `make go-ci-component` 调用。
+- **修复方式**:
+  1. `Makefile`: 将 `go-ci-component` 拆分为三个独立目标——`go-build-component`（仅 `go build`，硬门禁）、`go-test-component`（仅 `go test`，硬门禁，生成 `coverage.out`）、`go-quality-component`（gofmt+vet+tidy，按 ADR-006 保留 `continue-on-error`）。保留原 `go-ci-component` 用于本地聚合。
+  2. `go-ci.yml`: 将单个 "CI checks" 步骤拆为三步——"Build" 与 "Test" 无 `continue-on-error`（硬门禁），"Quality checks" 保留 `continue-on-error: true`（ADR-006 基线）。Test 步骤加 `if: success()` 避免 build 失败后无意义执行；Quality 步骤用 `if: always()` 以便即使 test 失败仍收集基线。coverage 上传加 `if-no-files-found: ignore`（build/test 失败时不产生 coverage.out）。
+- **回归测试**: 扩展 `scripts/check_ci_permissions.py` 新增 `check_masking()` 函数，断言 `go-ci.yml` 中运行 `go-build-component`/`go-test-component` 的步骤、以及 `android-ci.yml` 中运行 `lintDebug`/`dependencyCheckAnalyze` 的步骤**不得**有 `continue-on-error: true`。已在 `pr-checks.yml` 新增 `ci-config-guard` job 运行 `make ci-perms-check`，使该回归 guard 在每个 PR 上强制执行。已验证：修复后通过；临时恢复 masking 后 guard 报错。
+- **关联**: ADR-006 L294（声明 fmt/vet/tidy 基线掩盖意图）、CI-PERM-1（同一 guard 脚本的权限检查）。
+
+### CI-MASK-2: `android-ci.yml` 对 `lintDebug` 与 `dependencyCheckAnalyze` 误加 `continue-on-error: true`，关闭 Lint 与 CVSS≥9.0 漏洞的硬门禁 [已修复]
+- **状态**: 已修复（分支 `fix/pr80-ci-masking-regression`）
+- **发现位置**: PR #80 `palette/diagnostics-card-ux-improvement-9614842658949896577`（base: `main`）；CI 重构提交（亦存在于 PR #79）
+- **影响文件**: `.github/workflows/android-ci.yml`（L100-113，四个连续 Gradle 步骤）
+- **问题描述**: `android-ci.yml` 在四个连续 Gradle 步骤上加 `continue-on-error: true`：
+  - L98 `testDebugUnitTest` —— **有 N87 注释**，文档授权降级（测试挂死根因待查）。✓
+  - L103 `jacocoTestReport` —— 无注释、无授权。
+  - L108 `lintDebug` —— 无注释、无授权。
+  - L113 `dependencyCheckAnalyze` —— 无注释、无授权。这是 OWASP Dependency-Check，`build.gradle.kts` 配置 `failBuildOnCVSS = 9.0f`，即仅 CVSS≥9.0 的严重漏洞才失败。
+  N87（`docs/ISSUES.md` L818-832）与 ADR-006（`docs/DECISIONS.md` L292）**仅授权** `testDebugUnitTest` 步骤的降级。JaCoCo/Lint/dep-check 的 masking 完全未文档化。与 `main` 基线相比是退化——`main` 的 `ci.yml` 中这三步均为 `continue-on-error: false`（硬门禁）。`security.yml` 的 `android-dep-check` job 文件头明确标注 "NOT a required check" 且按 `paths:` 触发，故 `dependencyCheckAnalyze` 是 Android 侧**唯一**的 CVSS≥9.0 漏洞硬门禁；masking 后无任何硬门禁拦截严重漏洞依赖。
+- **触发场景**: 贡献者提交一个 PR，将 Android 依赖升级到含已知 CVE（CVSS≥9.0）的版本（如 Paho MQTT、Netty、Bouncy Castle）→ `dependencyCheckAnalyze` 失败 → 步骤因 `continue-on-error: true` 被标记 success → `Android Build & Test` required check 绿灯 → PR 合并 → 含严重漏洞的依赖流入 release 构建。
+- **风险**: **高**（安全）。严重漏洞依赖（CVSS≥9.0）可绕过 CI 合并；同时 `security.yml` 不作为 required check，故无任何地方硬门禁。Lint masking 风险较低（`build.gradle.kts` 设 `abortOnError = false`，`lintDebug` 始终退出 0），但移除 masking 可作为 defense-in-depth：若未来有人将 `abortOnError` 改为 `true`，masking 会静默吞没 Lint 错误。
+- **根因**: CI 重构时将 `ci.yml` 拆分为 `android-ci.yml`，复制了 N87 的 `continue-on-error: true` 到相邻步骤但未加注释或文档说明。
+- **验证**: `git show origin/main:.github/workflows/ci.yml | grep -B1 -A1 continue-on-error` 确认 `main` 上 JaCoCo/Lint/dep-check 为 `continue-on-error: false`。`git show origin/palette/...:.github/workflows/android-ci.yml | grep -n continue-on-error` 确认 PR #80 上四处 `continue-on-error: true`，仅 L98 有 N87 注释。`git show origin/palette/...:.github/workflows/security.yml | head -1` 确认 "NOT a required check"。`git show origin/palette/...:android/app/build.gradle.kts | grep -E "abortOnError|failBuildOnCVSS"` 确认 `abortOnError = false` 与 `failBuildOnCVSS = 9.0f`。
+- **修复方式**:
+  1. `lintDebug`（L108）：移除 `continue-on-error: true`。`abortOnError = false` 保证 `lintDebug` 退出 0，不会阻塞 PR；移除 masking 仅作为 defense-in-depth。
+  2. `dependencyCheckAnalyze`（L113）：移除 `continue-on-error: true`。`failBuildOnCVSS = 9.0f` 仅在 CVSS≥9.0 时失败，是合理的保守阈值；self-hosted runner 缓存 NVD 数据库后首次运行慢的问题可由 `timeout-minutes: 45` 兜底。
+  3. `jacocoTestReport`（L103）：**保留** `continue-on-error: true`，添加注释说明为 N87 下游影响（test 被 timeout kill 后 `.exec` 数据可能不完整，coverage 报告生成是装饰性而非合并门禁）。
+- **回归测试**: 同 CI-MASK-1，`scripts/check_ci_permissions.py` 的 `check_masking()` 同时断言 `android-ci.yml` 中 `lintDebug` 与 `dependencyCheckAnalyze` 步骤不得有 `continue-on-error: true`。
+- **关联**: N87（testDebugUnitTest 降级授权）、ADR-006 L292（Android 测试降级）、CI-MASK-1（同一修复 PR 的 Go 侧对应问题）。
+
+### CI-MASK-3: `go-ci.yml` 的 `govulncheck` 步骤 `continue-on-error: true`，Go 侧无任何严重漏洞硬门禁 [待评估]
+- **状态**: 待评估（本 PR 暂未修复——需先收集 Go 漏洞基线，避免一次性阻塞所有 PR）
+- **发现位置**: PR #80 `palette/diagnostics-card-ux-improvement-9614842658949896577`（base: `main`）
+- **影响文件**: `.github/workflows/go-ci.yml`（L128-132，"Run vulnerability check" 步骤）
+- **问题描述**: `go-ci.yml` 的 `govulncheck ./...` 步骤带 `continue-on-error: true`，无注释说明。`security.yml`（"NOT a required check"）的 Go 侧 `govulncheck` 同样非硬门禁。结合 CI-MASK-2，整个项目（Android + Go）无任何地方对依赖漏洞做硬门禁。`govulncheck` 报告所有已知漏洞（非仅 CVSS≥9.0），直接移除 masking 可能因既有漏洞一次性阻塞所有 Go PR。
+- **风险**: **中-高**（安全）。Go 依赖的已知漏洞可绕过 CI 合并。
+- **建议修复**: 先在 CI 上收集 `govulncheck` 基线（保留 `continue-on-error` 但记录输出），清零后收紧为硬门禁。或对 `govulncheck` 添加 `fail-on-severity` 类过滤（仅 CVSS≥9.0 失败），与 Android 侧 `failBuildOnCVSS = 9.0f` 对齐。ADR-006 L294 的 "质量检查渐进收紧" 策略应明确包含 `govulncheck`。
+- **关联**: CI-MASK-1、CI-MASK-2、ADR-006 L294。
+
+
