@@ -130,6 +130,133 @@ def check_file(path: Path) -> list[str]:
     return failures
 
 
+# ---------------------------------------------------------------------------
+# CI-DEP-1 regression guard
+# ---------------------------------------------------------------------------
+# Asserts that `.github/workflows/pr-checks.yml` retains a `dependency-review`
+# job using `actions/dependency-review-action` with `fail-on-severity` of at
+# most `high` (i.e. `low`, `moderate`, or `high`). This job is the ONLY
+# universally-triggered, non-masked, CVSS>=7.0 dependency-CVE gate covering
+# both the Go and Android ecosystems on every PR.
+#
+# Other gates are insufficient on their own:
+#   - go-ci.yml `govulncheck` step is masked (`continue-on-error: true`) per
+#     CI-MASK-3 (see docs/ISSUES.md).
+#   - android-ci.yml `dependencyCheckAnalyze` only fails at CVSS>=9.0
+#     (`failBuildOnCVSS = 9.0f` in android/app/build.gradle.kts) and was
+#     previously masked per CI-MASK-2.
+#   - security.yml is path-filtered and explicitly "NOT a required check".
+#
+# Removing this job (as PR #71 did in N90, and as PRs #79 / #82 did again)
+# eliminates the only failing-check signal for CVSS 7.0-8.9 dependency CVEs
+# in either ecosystem. See docs/ISSUES.md CI-DEP-1.
+DEPENDENCY_REVIEW_ACTION = "actions/dependency-review-action"
+# Severity thresholds ordered from strictest to most permissive. The guard
+# accepts any value at least as strict as `high`.
+_ACCEPTABLE_SEVERITIES = {"low", "moderate", "high"}
+
+
+def check_dependency_review(path: Path) -> list[str]:
+    """Assert pr-checks.yml keeps a non-masked dependency-review job.
+
+    Verifies:
+      1. A job named `dependency-review` exists.
+      2. It uses `actions/dependency-review-action@<any-version>`.
+      3. It sets `fail-on-severity` to `low`, `moderate`, or `high`.
+      4. The `Dependency review` step is NOT masked by `continue-on-error: true`
+         (would silently flip a red CVE signal to green — see N90).
+    """
+    failures: list[str] = []
+    text = path.read_text()
+    lines = text.splitlines()
+
+    # Locate the `dependency-review:` job block.
+    job_start: int | None = None
+    for i, raw in enumerate(lines):
+        if raw.startswith("  dependency-review:"):
+            job_start = i
+            break
+    if job_start is None:
+        failures.append(
+            f"{path.name}: `dependency-review` job missing — restores a "
+            f"CVSS>=7.0 dependency-CVE gate (CI-DEP-1). Re-add the job "
+            f"using {DEPENDENCY_REVIEW_ACTION} with `fail-on-severity: high`."
+        )
+        return failures
+
+    # Collect the job body (until the next 2-space-indented key or EOF).
+    job_body: list[str] = []
+    for raw in lines[job_start + 1:]:
+        if raw.startswith("  ") and not raw.startswith("    ") and raw.strip() and not raw.lstrip().startswith("#"):
+            # Next top-level job key (2-space indent, non-blank, non-comment).
+            if raw.endswith(":"):
+                break
+        job_body.append(raw)
+
+    body_text = "\n".join(job_body)
+
+    if DEPENDENCY_REVIEW_ACTION not in body_text:
+        failures.append(
+            f"{path.name}: `dependency-review` job does not use "
+            f"{DEPENDENCY_REVIEW_ACTION} (CI-DEP-1). Restore the action."
+        )
+
+    # Verify fail-on-severity is present and at most `high`.
+    fail_sev = None
+    for raw in job_body:
+        s = raw.strip()
+        if s.startswith("fail-on-severity:"):
+            _, _, val = s.partition(":")
+            fail_sev = val.strip().strip("\"'").lower()
+            break
+    if fail_sev is None:
+        failures.append(
+            f"{path.name}: `dependency-review` job is missing "
+            f"`fail-on-severity:` (CI-DEP-1). Set it to `high` or stricter."
+        )
+    elif fail_sev not in _ACCEPTABLE_SEVERITIES:
+        failures.append(
+            f"{path.name}: `dependency-review` job has "
+            f"`fail-on-severity: {fail_sev}`; must be one of "
+            f"{sorted(_ACCEPTABLE_SEVERITIES)} (CI-DEP-1)."
+        )
+
+    # Detect `continue-on-error: true` on the dependency-review step. Walk the
+    # body line-by-line, tracking step boundaries (list items starting with
+    # `- `). A step's properties (uses:, continue-on-error:, etc.) may span
+    # multiple lines until the next `- ` or end of the job body.
+    cur_step_lines: list[str] = []
+    steps: list[list[str]] = []
+    for raw in job_body:
+        s = raw.strip()
+        if s.startswith("- "):
+            if cur_step_lines:
+                steps.append(cur_step_lines)
+            cur_step_lines = [s]
+        elif cur_step_lines:
+            # Only accumulate while we're inside a steps: list (indent-based).
+            cur_step_lines.append(s)
+    if cur_step_lines:
+        steps.append(cur_step_lines)
+
+    for step_lines in steps:
+        joined = "\n".join(step_lines)
+        if DEPENDENCY_REVIEW_ACTION in joined:
+            for line in step_lines:
+                if line.startswith("continue-on-error:"):
+                    _, _, val = line.partition(":")
+                    if val.strip().lower() == "true":
+                        failures.append(
+                            f"{path.name}: `dependency-review` step is masked "
+                            f"by `continue-on-error: true` (N90/CI-DEP-1). "
+                            f"This silently flips a red CVE signal to green. "
+                            f"Remove the directive."
+                        )
+                        break
+
+    return failures
+
+
 def main() -> int:
     targets = ["android-ci.yml", "go-ci.yml"]
     all_failures: list[str] = []
@@ -140,13 +267,21 @@ def main() -> int:
             continue
         all_failures.extend(check_file(path))
 
+    # CI-DEP-1 guard: dependency-review job must remain in pr-checks.yml.
+    pr_checks = WORKFLOWS_DIR / "pr-checks.yml"
+    if not pr_checks.exists():
+        all_failures.append("pr-checks.yml: workflow file missing")
+    else:
+        all_failures.extend(check_dependency_review(pr_checks))
+
     if all_failures:
-        print("FAIL: paths-filter permission regression detected:")
+        print("FAIL: CI configuration regression detected:")
         for f in all_failures:
             print("  - " + f)
         return 1
 
     print("OK: every dorny/paths-filter job has job-level 'pull-requests: read'.")
+    print("OK: pr-checks.yml retains a non-masked dependency-review job (CI-DEP-1).")
     for name in targets:
         jobs = _parse_jobs((WORKFLOWS_DIR / name).read_text())
         for jname, info in jobs.items():
