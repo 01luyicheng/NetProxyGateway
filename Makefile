@@ -22,6 +22,7 @@ help:
 	@echo "  go-ci                  CI target: build+test+fmt+vet+mod-tidy-check"
 	@echo "  go-ci-component        CI matrix target (COMPONENT=xxx)"
 	@echo "  go-all                 All Go checks (build+test+fmt+vet+vuln)"
+	@echo "  api-smoke              Build API (CGO=1) and verify /health returns db_status:ok"
 	@echo ""
 	@echo "Docker Targets:"
 	@echo "  docker-up              Start all services (docker-compose)"
@@ -221,6 +222,32 @@ docker-down:
 docker-build:
 	docker-compose -f server/docker-compose.yml build
 
+# Smoke test: build the API with the same CGO flag as server/api/Dockerfile
+# (CGO_ENABLED=1) and assert /health returns db_status:"ok", which proves the
+# go-sqlite3 driver is functional (not the CGO_ENABLED=0 stub that crashes on
+# startup). Guards against re-introducing the Dockerfile CGO regression.
+api-smoke:
+	@set -e; \
+	tmpdir=$$(mktemp -d); \
+	trap 'rm -rf "$$tmpdir"; if [ -n "$$PID" ]; then kill "$$PID" 2>/dev/null || true; fi' EXIT; \
+	cd server/api; \
+	echo "==> Building api with CGO_ENABLED=1 (mirrors server/api/Dockerfile)"; \
+	CGO_ENABLED=1 GOOS=linux go build -o "$$tmpdir/api" .; \
+	echo "==> Starting api on :18090"; \
+	DB_PATH="$$tmpdir/api.db" JWT_SECRET=0123456789abcdef0123456789abcdef \
+		INTERNAL_API_KEY=smoke-key ADMIN_USER=admin ADMIN_PASS=password123 \
+		PORT=18090 "$$tmpdir/api" & \
+	PID=$$!; \
+	for i in $$(seq 1 30); do \
+		if curl -sf --noproxy '*' http://127.0.0.1:18090/health >/dev/null 2>&1; then break; fi; \
+		if ! kill -0 "$$PID" 2>/dev/null; then echo "FAIL: api exited before becoming healthy"; exit 1; fi; \
+		sleep 0.5; \
+	done; \
+	resp=$$(curl -sf --noproxy '*' http://127.0.0.1:18090/health); \
+	echo "==> /health: $$resp"; \
+	echo "$$resp" | grep -q '"db_status":"ok"' || { echo "FAIL: db_status is not ok (sqlite driver not functional)"; exit 1; }; \
+	echo "PASS: api starts with CGO build and sqlite driver is functional (db_status:ok)."
+
 # ---------------------------------------------------------------------------
 # Combined
 # ---------------------------------------------------------------------------
@@ -243,5 +270,6 @@ clean:
 .PHONY: android-build android-test android-lint android-coverage android-dep-check android-all
 .PHONY: go-build go-test go-fmt go-vet go-mod-tidy-check go-test-race go-coverage-check go-vuln go-ci go-ci-component go-all
 .PHONY: docker-up docker-down docker-build
+.PHONY: api-smoke
 .PHONY: ci-perms-check
 .PHONY: all test clean help
