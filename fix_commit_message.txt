@@ -1,0 +1,11 @@
+fix(a11y): 改善展开折叠图标的无障碍支持及修复CI路径
+
+💡 **What**:
+1. 将 DiagnosticsCard 组件中作为展开/折叠状态指示器的文本字符替换为标准 Material Icons。
+2. 修复 Android CI 构件上传路径和依赖审核 CI。
+
+🎯 **Why**:
+1. 文本字符会被屏幕阅读器字面朗读出来，给视觉障碍用户造成噪音和困惑。使用标准矢量图标可以解决这个问题。
+2. Android 的构建输出路径配置已更新，GitHub Actions 上的相应路径也许同步，且 GitHub 仓库未开启 dependency review，会引起失败。
+
+♿ **Accessibility**: 提高了使用屏幕阅读器的用户的体验，移除了不必要的杂音朗读。
