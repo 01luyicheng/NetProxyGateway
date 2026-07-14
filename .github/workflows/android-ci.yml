@@ -151,4 +151,4 @@ jobs:
       # Per-job cleanup: remove Android build output (2-5 GB)
       - name: Cleanup build artifacts
         if: always()
-        run: rm -rf android/b/ android/b/app/ 2>/dev/null || true
+        run: rm -rf android/b/ android/app/build/ 2>/dev/null || true
