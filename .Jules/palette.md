@@ -1,3 +1,7 @@
 ## 2024-05-24 - Conditional Focus Clearing on Keyboard Actions in Jetpack Compose
 **Learning:** When wiring keyboard actions like `onDone` in Jetpack Compose text fields, unconditionally calling `focusManager.clearFocus()` can interrupt the user's flow if the input is invalid or incomplete. Users have to tap the field again to resume typing.
 **Action:** Focus should only be cleared conditionally (e.g., if input validation passes) rather than unconditionally. This allows the user to continue typing or correcting their input without breaking focus if validation fails. Apply this pattern to all form fields that trigger actions on keyboard submission.
+
+## 2024-07-15 - Accessible State Indicators in Jetpack Compose
+**Learning:** Avoid using text characters (like '▲' or '▼') as UI state indicators (such as expand/collapse toggles) because screen readers read them literally ("black up-pointing triangle"). Use standard Material Icons (e.g., `KeyboardArrowUp`, `KeyboardArrowDown`) instead for better semantics and visual consistency. For interactive or toggleable rows (like an accordion header), if the parent container manages the interaction state and description, set `contentDescription = null` on the child icon to prevent redundant announcements by screen readers.
+**Action:** When building collapsible or stateful components in Compose, always use semantically appropriate Icons instead of text characters for visual cues.
