@@ -1634,7 +1634,7 @@
   - `server/tunnel/main.go`: `Unregister` 和 `cleanupDeadTunnelsOnce` 在关闭旧隧道后、发送 `offline` 前，重新检查 `m.tunnels[deviceID]` 是否存在活跃隧道；若存在则跳过 `offline` 通知。
   - 补充测试覆盖：替换隧道在 `Unregister`/`cleanupDeadTunnelsOnce` 的删除-通知窗口中注册时不发送 `offline`；无替换隧道时正常发送 `offline`。
   - `notifyDeviceStatus` 的重试延迟风险由 REV33 的毫秒级 `last_seen` 与 API upsert 的 `excluded.last_seen > device_status.last_seen` 保护覆盖，过期的 `offline` 不会覆盖较新的 `online`。
-- **剩余风险**: 检查与通知之间仍存在极小的时间窗口；在此窗口内新隧道注册且旧 `offline` 已决定发送，则仍会发出一次携带旧时间戳的 `offline`。该离线通知会被 API 的 `last_seen` 保护拒绝，不会覆盖在线状态，但会造成一次无效请求。
+- **剩余风险**: 检查与通知之间仍存在极小的时间窗口；在此窗口内新隧道注册且旧 `offline` 已决定发送，则仍会发出一次 `offline` 通知。**该残余竞态在 REV51 之前未完全闭合**：REV33 当时的实现在通知 goroutine 内部捕获 `time.Now().UnixMilli()`，受调度延迟影响，其时间戳可能晚于并发 `Register` 发出的 `online` 时间戳，从而绕过 API 的严格 `last_seen >` 保护并把设备错误地持久化为离线。REV51 将 `last_seen` 的捕获提前到 re-check 时刻（`m.mu` 锁下），保证 `offline` 的 `last_seen` 严格早于任何后续 `Register` 的 `online` `last_seen`，使 API 保护真正生效。
 
 ### REV33: server/api + server/tunnel 秒级 `last_seen` 导致同秒重连状态丢失 [已修复]
 - **修复状态**: 已修复
@@ -1644,7 +1644,7 @@
 - **风险**: **高**。高频重连场景下状态机不可靠，可能把在线设备判定为离线
 - **修复方式**:
   - `server/api/main.go`：`last_seen` 改用毫秒级 `UnixMilli()`；`upsertDeviceStatusDB` 的 `ON CONFLICT DO UPDATE` 增加 `WHERE excluded.last_seen > device_status.last_seen` 保护；`getDeviceStatusDB` 按毫秒解析；`updateDeviceStatus` 接受请求体中的可选 `last_seen`（毫秒 Unix 时间戳），未提供时回落为当前时间。
-  - `server/tunnel/main.go`：`notifyDeviceStatus` 在事件发生时捕获 `time.Now().UnixMilli()` 并通过 `last_seen` 字段发送给 API，使延迟到达的 `offline` 携带原始时间戳。
+  - `server/tunnel/main.go`：`notifyDeviceStatus` 通过 `last_seen` 字段将捕获的时间戳发送给 API，使延迟到达的 `offline` 携带原始时间戳。**注**：REV33 当时的实现仍在通知 goroutine 内部捕获 `time.Now().UnixMilli()`，并未真正做到"事件发生时"捕获；该缺陷由 REV51 修正（捕获点提前到 re-check 时刻的 `m.mu` 锁下，严格早于任何并发 `Register` 的 `online` 时间戳）。
   - 测试覆盖：毫秒时间戳写入、过期 `offline` 不覆盖较新的 `online`、同毫秒事件不覆盖、`updateDeviceStatus` 按请求时间戳处理、`notifyDeviceStatus` 携带 `last_seen`。
 - **迁移说明**: 数据库表结构不变（`last_seen INTEGER`）。`getDeviceStatusDB` 已添加向后兼容逻辑：读取到小于 `1e12` 的值时自动视为秒级并乘以 1000 转换为毫秒，因此无需停机即可兼容旧数据。若需要一次性统一存量数据的单位为毫秒，可执行：`UPDATE device_status SET last_seen = last_seen * 1000;`。
 
@@ -2139,4 +2139,25 @@
 - **风险**: **Low**。仅 CI 基础设施问题，不影响代码正确性；用 admin merge 绕过。
 - **修复方式**: (a) 切回 GitHub-hosted runners 后 Android CI 网络问题（b/c）自动解决；(b) dependency-review 即使切回 GitHub-hosted runners 也会失败——需启用 GHAS 或修改 CI 配置，但当前用 admin merge 绕过（同 DEP-REVIEW-1 的处理思路）；(c) 切回后 runner 容量自动解决。
 - **关联**: CGO-DETECT-1（同样是临时 runner 问题，已标记 no-fix needed）、DEP-REVIEW-1（dependency-review job 失败的根本原因相同：未启用 GHAS）、CI-DEP-1（required status checks 未启用让这些 CI 问题不阻塞合并）。
+
+### REV51: server/tunnel `offline` 通知 `last_seen` 在 goroutine 内捕获，可与并发 `online` 竞争导致设备被错误持久化为离线 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 中
+- **位置**: `server/tunnel/main.go` (`Register`、`Unregister`、`cleanupDeadTunnelsOnce`、`notifyDeviceStatus`)
+- **问题描述**: REV32 的替换 re-check 在"未发现 replacement"时会决定发送 `offline` 通知，但 `last_seen` 时间戳是在 `notifyDeviceStatus` goroutine 内部通过 `time.Now().UnixMilli()` 捕获的（而非在 re-check 决策时刻捕获）。当 `offline` goroutine 因调度延迟晚于一个并发的 `Register`（`online`）执行时，`offline` 的 `last_seen` 可能 **晚于** `online` 的 `last_seen`，从而绕过 REV33 在 API 端设置的严格 `excluded.last_seen > device_status.last_seen` 保护，把已经回到在线状态的设备错误地写回 `offline`。设备会保持错误的离线状态直到下一次完整重连触发新的 `online` 通知（无自纠正心跳）。该残余竞态是 PR #58 引入 `last_seen` 字段后特有的：main 分支的 `notifyDeviceStatus` 不发送 `last_seen`，API 回落为当前时间，问题不存在。
+- **风险**: **中**。窗口较小（需 re-check 后、goroutine 实际执行前恰好有并发 `Register`），不影响实际 SOCKS5 连通性，但会导致工程师端设备状态显示与实际不符，且无法自纠正。属于 REV32/REV33 修复后声称已闭合但实际未闭合的残余竞态——文档（REV32 剩余风险、REV33 修复方式）此前错误地断言该路径已被 `last_seen` 保护覆盖。
+- **触发场景**: 设备网络抖动导致旧隧道断开（触发 `Unregister`）的同时客户端立即重连（触发 `Register`）。`Unregister` 的 re-check 在 `Register` 之前完成（未观测到 replacement），于是决定发送 `offline`；但 `offline` goroutine 实际执行 `time.Now()` 的时刻晚于 `Register` 捕获 `online` 时间戳的时刻，导致 `offline.last_seen > online.last_seen`，API 接受该 `offline` 写入。
+- **修复方式**:
+  - 将 `last_seen` 的捕获从 `notifyDeviceStatus` goroutine 内部提前到事件决策时刻，并在 `m.mu` 锁下完成：
+    - `Register`：在 `m.mu.Lock()` 下捕获 `online` 的 `last_seen`，作为参数传入 `go m.notifyDeviceStatus(..., lastSeen)`。
+    - `Unregister`：在 re-check 的 `m.mu.RLock()` 下捕获 `offline` 的 `last_seen`（re-check 未发现 replacement 的瞬间），再 spawn goroutine 转发该值。
+    - `cleanupDeadTunnelsOnce`：同样在 re-check 的 `m.mu.RLock()` 下捕获 `last_seen`。
+  - `notifyDeviceStatus` 签名改为接收 `lastSeen int64` 参数，移除内部的 `time.Now().UnixMilli()` 重捕获，确保 caller 在锁下捕获的值被原样转发。
+  - 不变式：由于 `offline` 的 `last_seen` 在 re-check 时刻（`m.mu` 锁下）捕获，而任何后续 `Register` 必须先获取 `m.mu` 写锁才能捕获 `online` 的 `last_seen`，故 `offline.last_seen` 严格早于 `online.last_seen`，API 的严格 `>` 保护必然拒绝该 `offline`。
+  - 新增测试钩子 `testRecheckHook`（`reached` buffered(1) + `hold` 阻塞通道）与 `TunnelManager.testHookAfterUnregisterRecheck` / `testHookAfterDeadTunnelsRecheck` 字段，用于确定性复现 re-check 后、goroutine spawn 前的竞态窗口。生产代码中这些字段为 nil，零开销。
+- **测试覆盖**:
+  - `TestNotifyDeviceStatusIncludesLastSeenTimestamp`：重写为传入固定 `last_seen`，断言 payload 原样转发 caller 捕获的值（不再内部重捕获）。
+  - `TestUnregisterOfflineLastSeenStrictlyOlderThanConcurrentRegister`：新增确定性回归测试。利用 `testHookAfterUnregisterRecheck` 在 re-check 捕获 `offline` `last_seen` 后暂停 `Unregister`，在暂停窗口内 `Register` 替换隧道（其 `online` `last_seen` 严格更新），随后释放并断言 `offline.last_seen < online.last_seen`。已验证：模拟缺陷（在 hold 释放后重捕获 `last_seen`）时该测试确定性失败；修复后确定性通过。
+  - 其余 7 处 `notifyDeviceStatus` 调用点更新为 4 参数签名。
+- **关联**: 修正 REV32"剩余风险"与 REV33"修复方式"中关于 `last_seen` 保护已生效的不准确断言。本修复基于 `fix/rev31-36-post-commit-review` 分支（PR #58），因为该竞态是 PR #58 引入 `last_seen` 字段后特有的。
 
