@@ -1064,6 +1064,25 @@ func waitTimeout(t *testing.T, wg *sync.WaitGroup, timeout time.Duration) {
 	}
 }
 
+// TestCleanupDeadTunnelsOnceAfterStop verifies that cleanupDeadTunnelsOnce
+// does not panic with WaitGroup reuse when called after Stop(). (REV45)
+func TestCleanupDeadTunnelsOnceAfterStop(t *testing.T) {
+	manager := NewTunnelManager(&Config{
+		APIEndpoint:      "http://127.0.0.1:1",
+		HeartbeatTimeout: 1 * time.Nanosecond, // Make tunnels immediately "dead"
+	})
+
+	// Register a tunnel with nil conn (will be considered dead)
+	manager.Register("device-dead", nil)
+
+	// Stop the manager
+	manager.Stop()
+
+	// cleanupDeadTunnelsOnce after Stop should not panic
+	// (wg.Add must be guarded by stopMu check)
+	manager.cleanupDeadTunnelsOnce()
+}
+
 func TestSendReturnsErrorAfterClose(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

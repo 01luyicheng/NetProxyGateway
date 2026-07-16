@@ -551,7 +551,15 @@ func (m *TunnelManager) cleanupDeadTunnelsOnce() {
 		}
 		m.mu.RUnlock()
 
+		// Check stopped before wg.Add(1) to prevent WaitGroup reuse panic
+		// after Stop() has called wg.Wait(). Same pattern as Register/Unregister. (REV45)
+		m.stopMu.Lock()
+		if m.stopped {
+			m.stopMu.Unlock()
+			continue
+		}
 		m.wg.Add(1)
+		m.stopMu.Unlock()
 		go m.notifyDeviceStatus(deviceID, "offline", "")
 	}
 }

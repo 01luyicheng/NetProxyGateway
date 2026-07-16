@@ -1826,3 +1826,54 @@
   - `cleanupDeadTunnelsOnce` 同时包含 REV32 替换检查和 REV45 循环内 `stopMu` 保护。
   - 更新 DebugDetector 的 3 个测试以匹配 REV47 的新契约。
 
+---
+
+## 提交后正确性检查发现（2026-07-02，审查过去 24 小时提交）
+
+> 以下问题由多 subagent 对过去 24 小时内各分支的提交进行深度审查发现。
+
+### REV43: `createSessionToken` 缺少过期检查 + TOCTOU 竞态可致已失效会话颁发令牌 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 中
+- **位置**: `server/api/main.go` (`createSessionToken`, L1021-1100)
+- **问题描述**: `createSessionToken` 存在两个缺陷：(1) 完全缺少 `session.ExpiresAt` 过期检查，与 `getPairingSession` 和 `updatePairingSession` 的行为不一致。已过期但尚未被清理的 session（status 仍为 "connected"）可成功创建 token。(2) 读取-验证与 token 创建之间无乐观锁保护，session 状态可能在此窗口内被并发修改（如过期、断开）。`session_tokens` 表无外键约束关联 `pairing_sessions`，token 一旦创建即独立有效，不交叉验证 pairing session 状态。
+- **触发场景**: (1) Session 在时间 T 过期，清理 worker 每 5 分钟运行一次；(2) 在 T 到 T+5min 的窗口内，session 仍存在于数据库中，status 仍为 "connected"；(3) 工程师调用 POST `/api/session/token`，`createSessionToken` 不检查 `ExpiresAt`，成功创建 token；(4) 清理 worker 删除过期 session 后，token 仍然有效（session_tokens 表独立，无外键）
+- **风险**: **中高**。可为已失效的 pairing session 创建有效 token，token 在 15 分钟 TTL 内对 SOCKS5 代理服务有效，违背"session 无效则不应颁发 token"的安全不变量
+- **修复方式**: (1) 添加 `time.Now().After(session.ExpiresAt)` 过期检查，与其他 handler 保持一致；(2) 在创建 token 前使用 `compareAndUpdatePairingSessionDB` 乐观锁验证 session 状态未变，检测到并发修改返回 HTTP 409 Conflict
+
+### REV44: `getPairingSession` 并发修改路径为过期 session 返回 200 OK [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 低
+- **位置**: `server/api/main.go` (`getPairingSession`, L834-871)
+- **问题描述**: `getPairingSession` 在检测到 session 过期后调用 `markSessionExpired`，当 `markSessionExpired` 因乐观锁返回 `ErrConcurrentModification` 时（session 被并发修改，如另一个请求将 status 改为 "connected"），代码重新从 DB 获取 session 并返回 200 OK。但此时 session 的 `ExpiresAt` 已过，在业务语义上不应返回 200。客户端可能误认为 session 仍然有效。
+- **触发场景**: (1) Session 的 `expires_at` 已过去，状态为 "pending"；(2) GET `/api/pair/:code` 判断已过期，调用 `markSessionExpired`；(3) 并发的 PUT 请求将 session 更新为 `status=connected`；(4) `markSessionExpired` 因 WHERE 条件不匹配返回 `ErrConcurrentModification`；(5) 代码重新获取 session，得到 `status=connected, expires_at=已过期`；(6) 返回 200 OK，附带时间上已过期但状态为 connected 的 session
+- **风险**: **中**。客户端可能误用过期 session，尤其在 `internalOrUserAuthMiddleware` 保护下，认证用户获取到看似有效的过期 session 信息
+- **修复方式**: `ErrConcurrentModification` 分支中直接返回 410 Gone，因为已经确定 session 按 `ExpiresAt` 已过期，无论并发修改了什么字段
+
+### REV45: `cleanupDeadTunnelsOnce` 中 `wg.Add(1)` 无 `stopMu` 保护导致 WaitGroup 重用 panic [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 低
+- **位置**: `server/tunnel/main.go` (`cleanupDeadTunnelsOnce`, L476-517)
+- **问题描述**: `cleanupDeadTunnelsOnce` 在函数入口检查 `m.stopped` 后释放 `stopMu`，但在后续循环中调用 `m.wg.Add(1)` 时未重新检查 `m.stopped`。如果 `Stop()` 在 `stopMu.Unlock()` (L483) 和 `wg.Add(1)` (L506) 之间被调用，`Stop()` 设置 `stopped=true` 并调用 `wg.Wait()`。若 `wg.Wait()` 返回（计数器归零）后 `cleanupDeadTunnelsOnce` 才执行 `wg.Add(1)`，将触发 `panic: sync: WaitGroup is reused before previous Wait has returned`。与 `Register`/`Unregister` 中已修复的同类问题（REV26）模式一致，但 `cleanupDeadTunnelsOnce` 遗漏了修复。
+- **触发场景**: (1) 后台清理 goroutine 调用 `cleanupDeadTunnelsOnce`，通过 stopped 检查；(2) 在 `stopMu.Unlock()` 和 `wg.Add(1)` 之间，服务关闭调用 `Stop()`；(3) `Stop()` 设置 `stopped=true`，调用 `wg.Wait()` 并返回；(4) `cleanupDeadTunnelsOnce` 的 `wg.Add(1)` 在 `wg.Wait()` 返回后执行 → panic
+- **风险**: **高**。服务关闭时可能 panic，不可恢复
+- **修复方式**: 在 `wg.Add(1)` 前获取 `m.stopMu` 并检查 `m.stopped`，若已停止则 `continue` 跳过。与 `Register`/`Unregister` 模式一致
+
+### REV46: DebugDetector `readLine()` 阻塞导致超时机制失效 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 中
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt` (`readPropertyViaProcess`, L329-365)
+- **问题描述**: `readPropertyViaProcess` 中 `reader.readLine()` 在 `process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)` 之前执行。如果 `getprop` 子进程挂起且不产生任何输出（如系统属性服务 `init` 进程无响应），`readLine()` 将无限期阻塞，3 秒超时机制完全失效，调用线程被永久阻塞。
+- **触发场景**: (1) 系统异常（如属性服务 `init` 进程无响应），`getprop` 命令挂起；(2) `readLine()` 阻塞等待子进程输出；(3) `waitFor(3s)` 永远不被执行，超时机制失效；(4) 调用线程被永久阻塞，可能导致 ANR
+- **风险**: **中高**。实际触发概率较低（`getprop` 通常很快返回），但一旦触发，调用线程被永久阻塞且无恢复手段
+- **修复方式**: 将输出读取放在独立线程中执行，主线程先调用 `waitFor(timeout)` 实现真正的超时控制。超时后调用 `destroyForcibly()` 终止子进程并 `waitFor()` 回收僵尸进程
+
+### REV47: DebugDetector 反射返回非 null 值时跳过 getprop 交叉验证，Frida hook 可绕过 debug 检测 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 中
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt` (`resolveDebugPropertiesState`, L272-306; `readDebugPropertyValue`, 原 L301-319)
+- **问题描述**: 原 `readDebugPropertyValue` 在反射调用成功且返回非 null 值时，直接返回该值，永远不会调用 getprop 子进程做交叉验证。攻击者可通过 Frida hook `android.os.SystemProperties.get()` 对三个 debug 属性返回安全值（如 `ro.debuggable="0"`, `ro.secure="1"`, `persist.sys.usb.config="mtp"`），反射调用成功（不抛异常）且返回非 null 值，代码直接采用，getprop 回退路径不可达，完全绕过 debug 属性检测。
+- **触发场景**: (1) 攻击者在 root 设备上使用 Frida hook `android.os.SystemProperties.get()`；(2) 对三个 debug 属性返回安全值；(3) `readDebugPropertyValue` 中反射返回非 null → 直接返回，getprop 不被调用；(4) debug 检测被完全绕过
+- **风险**: **高**。安全关键功能被绕过，攻击者可在不被检测的情况下进行调试
+- **修复方式**: 重构 `resolveDebugPropertiesState` 为始终同时调用反射和 getprop，取两者的"并集"结果——任一来源检测到 debug 特征即报告。新增 `isDebugPropertyValue` 和 `readPropertyValueViaReflection` 方法替代原有的 `readDebugPropertyValue`
+

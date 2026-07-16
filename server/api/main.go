@@ -1126,6 +1126,17 @@ func (s *Server) createSessionToken(c *gin.Context) {
 		return
 	}
 
+	// Check if expired (consistent with getPairingSession and updatePairingSession)
+	if time.Now().After(session.ExpiresAt) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": ErrSessionExpired.Error()})
+		return
+	}
+
+	// Verify session is still valid using optimistic locking before creating token.
+	// This prevents TOCTOU: session could have been modified between the read above and token creation.
+	expectedStatus := session.Status
+	expectedEngineerID := session.EngineerID
+
 	// Create session token
 	token, err := generateSessionToken()
 	if err != nil {
@@ -1138,6 +1149,18 @@ func (s *Server) createSessionToken(c *gin.Context) {
 		EngineerID: engineerID,
 		CreatedAt:  time.Now(),
 		ExpiresAt:  time.Now().Add(SessionTokenTTL),
+	}
+
+	// Re-verify session hasn't been concurrently modified before creating the token.
+	// Uses optimistic locking: if the session status or engineer_id changed between
+	// our read and this write, the UPDATE will affect 0 rows and we abort.
+	if err := s.compareAndUpdatePairingSessionDB(session, expectedStatus, expectedEngineerID); err != nil {
+		if errors.Is(err, ErrConcurrentModification) {
+			c.JSON(http.StatusConflict, gin.H{"error": ErrConcurrentModification.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateSession.Error()})
+		return
 	}
 
 	if err := s.createSessionTokenDB(sessionToken); err != nil {
