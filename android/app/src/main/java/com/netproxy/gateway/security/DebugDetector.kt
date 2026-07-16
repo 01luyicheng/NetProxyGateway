@@ -6,7 +6,12 @@ import java.io.BufferedReader
 import java.io.File
 import java.io.FileReader
 import java.io.InputStreamReader
+import java.lang.reflect.Method
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 /**
  * 反调试检测器
@@ -256,41 +261,119 @@ object DebugDetector {
 
     /**
      * 检查调试属性
+     *
+     * 优先通过反射调用 android.os.SystemProperties.get 读取属性（快速路径）。
+     * 若反射整体不可用（如 hidden API 被阻断），或单条属性反射失败，
+     * 则回退到 getprop 子进程读取该属性，避免漏检。
      */
     fun checkDebugProperties(): Boolean {
+        return resolveDebugPropertiesState(
+            getMethodProvider = ::resolveSystemPropertiesGetMethod,
+            processPropertyReader = ::readPropertyViaProcess
+        )
+    }
+
+    internal fun resolveDebugPropertiesState(
+        getMethodProvider: () -> Method?,
+        processPropertyReader: (String) -> String?
+    ): Boolean {
         val debugProps = arrayOf(
             "ro.debuggable",
             "ro.secure",
             "persist.sys.usb.config"
         )
 
-        for (prop in debugProps) {
-            try {
-                val process = ProcessBuilder("getprop", prop)
-                    .redirectErrorStream(true)
-                    .start()
-                try {
-                    BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8)).use { reader ->
-                        val value = reader.readLine()
-                        val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                        if (!finished) {
-                            return@use
-                        }
+        val getMethod = try {
+            getMethodProvider()
+        } catch (e: Exception) {
+            null
+        }
 
-                        when (prop) {
-                            "ro.debuggable" -> if (value == "1") return true
-                            "ro.secure" -> if (value == "0") return true
-                            "persist.sys.usb.config" -> if (value?.contains("adb") == true) return true
-                        }
-                    }
-                } finally {
-                    process.destroyForcibly()
+        for (prop in debugProps) {
+            val value = readDebugPropertyValue(prop, getMethod, processPropertyReader)
+            if (value != null) {
+                when (prop) {
+                    "ro.debuggable" -> if (value == "1") return true
+                    "ro.secure" -> if (value == "0") return true
+                    "persist.sys.usb.config" -> if (value.contains("adb")) return true
                 }
-            } catch (e: Exception) {
-                // 忽略异常
             }
         }
+
         return false
+    }
+
+    internal fun readDebugPropertyValue(
+        prop: String,
+        getMethod: Method?,
+        processPropertyReader: (String) -> String?
+    ): String? {
+        if (getMethod != null) {
+            try {
+                val value = getMethod.invoke(null, prop) as? String
+                if (value != null) return value
+            } catch (e: Exception) {
+                // 反射失败，回退到 getprop 子进程
+            }
+        }
+        return try {
+            processPropertyReader(prop)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun resolveSystemPropertiesGetMethod(): Method? {
+        return try {
+            Class.forName("android.os.SystemProperties").getMethod("get", String::class.java)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun readPropertyViaProcess(prop: String): String? =
+        readProcessOutput(listOf("getprop", prop))
+
+    /**
+     * 执行外部命令并读取其标准输出的第一行。
+     *
+     * 读取操作本身受 [PROCESS_TIMEOUT_SECONDS] 限制，避免子进程卡住或不输出换行时
+     * [BufferedReader.readLine] 无限阻塞。超时或异常时都会强制清理子进程与线程资源。
+     */
+    internal fun readProcessOutput(command: List<String>): String? {
+        return try {
+            val process = ProcessBuilder(command)
+                .redirectErrorStream(true)
+                .start()
+            val executor = Executors.newSingleThreadExecutor { r ->
+                Thread(r, "process-reader").apply { isDaemon = true }
+            }
+            try {
+                val future = executor.submit(Callable<String?> {
+                    BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8)).use { reader ->
+                        reader.readLine()
+                    }
+                })
+
+                val value = try {
+                    future.get(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                } catch (e: TimeoutException) {
+                    future.cancel(true)
+                    return null
+                } catch (e: ExecutionException) {
+                    null
+                }
+
+                // 读取成功后等待子进程结束，避免产生僵尸进程
+                process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                value
+            } finally {
+                executor.shutdownNow()
+                process.destroyForcibly()
+            }
+        } catch (e: Exception) {
+            null
+        }
     }
 
     /**

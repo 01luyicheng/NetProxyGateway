@@ -126,12 +126,14 @@ class Socks5ProxyHandler(
             return IpAddressUtils.isPrivateIpv4Rfc1918(host)
         }
 
-        // Accept domain names (SOCKS5 ATYP=0x03). DNS resolution is deferred to
-        // the underlying connector (Netty Bootstrap.connect), which performs
-        // non-blocking resolution. This proxy connects to a local SOCKS5 server
-        // that handles the actual target connection, so IP validation is left
-        // to the downstream server.
-        return true
+        // Reject domain names (SOCKS5 ATYP=0x03). Domain names bypass IP
+        // validation because DNS resolution is deferred to the connector,
+        // which means we cannot enforce the private-network-only policy.
+        // Allowing domain names would let engineers access public internet
+        // resources, violating the security policy that restricts connections
+        // to RFC1918/ULA private addresses only.
+        // See H4 (DNS rebinding) and N30 (blocking DNS on EventLoop).
+        return false
     }
 
     private fun isPrivateIpv6Address(ip: String): Boolean {

@@ -1526,4 +1526,303 @@
 - PR #65 的 CI 修复（runner 标签大小写、`fail-fast` YAML 层级、`Thread.yield()`→`Thread.sleep(20)`）均为正确且必要，未掩盖生产并发缺陷；`go test` 仍为阻塞作业。
 - PR #62/#63 的 Palette 清除按钮 UI 改动未发现崩溃/安全/功能退化类缺陷（输入仍强制 6 位数字过滤；测试未削弱）。
 
+---
+
+## 提交后审查发现（2026-07-01，审查提交 97b4a3c 和 abd1603）
+
+> 以下问题由多 subagent 对过去 24 小时内各分支的提交进行深度审查发现。
+
+### REV42: `updatePairingSession` TOCTOU 竞态条件导致会话劫持 [已修复]
+- **修复状态**: 已修复
+- **提交哈希**: `97b4a3c`（审查时发现；问题为既有缺陷，非该提交引入）
+- **位置**: `server/api/main.go` (`updatePairingSession`, L888-L968; `updatePairingSessionDB`, L472-L481; `markSessionExpired`, L510-L519)
+- **编号说明**: 原编号为 REV25，因与 PR #35（OPEN，占用 REV25-REV41）冲突，重新编号为 REV42。
+- **关联/替代关系**: 本修复与 PR #35 的 REV29 针对同一个 `updatePairingSession` TOCTOU 竞态问题。本修复是更完整的超集（新增 `status` 条件、`markSessionExpired` 保护、独立的 `ErrConcurrentModification` 错误类型），**已替代/覆盖 REV29**；PR #35 合入时已移除 REV29 的重复实现。
+- **问题描述**: `updatePairingSession` 使用 Read-Validate-Modify-Write 模式，但在 Read 和 Write 之间没有乐观锁保护。`updatePairingSessionDB` 使用简单的 `UPDATE ... WHERE code = ?`，不检查 session 的 status 或 engineer_id 是否在读取后被修改。两个并发请求对同一 pairing code 执行时，可能都读到相同的过期数据（如 `status=pending, engineerID=""`），都通过验证检查，第二个写入覆盖第一个，导致会话被分配给错误的工程师。
+- **触发场景**: (1) 配对码显示在设备屏幕上；(2) 工程师 A 和工程师 B 同时看到并尝试配对；(3) 两个请求同时到达服务器，都读到 `status=pending, engineerID=""`；(4) 两个请求都通过 `engineerID != "" && engineerID != myID` 检查（因为 `engineerID == ""`）；(5) 请求 A 写入 `(status=connected, engineerID=A)`；(6) 请求 B 写入 `(status=connected, engineerID=B)`，**覆盖请求 A 的结果**；(7) 工程师 A 的后续操作（如 `createSessionToken`）因 `engineerID` 不匹配而返回 403。
+- **风险**: **高**。会话劫持：错误的工程师获得配对会话，原工程师的操作失败。安全漏洞：未经授权的工程师可能获得对设备的远程访问权限。
+- **修复难度**: 中
+- **修复方式**:
+  1. 新增 `compareAndUpdatePairingSessionDB` 函数，在 UPDATE 的 WHERE 子句中加入 `status = ? AND engineer_id = ?` 条件，实现乐观锁。
+  2. 新增 `ErrConcurrentModification` 错误，当 `RowsAffected() == 0` 时返回。
+  3. `updatePairingSession` 在读取 session 后立即捕获 `expectedStatus` 和 `expectedEngineerID`，写入时使用 `compareAndUpdatePairingSessionDB`。
+  4. `markSessionExpired` 同样使用乐观锁，防止过期标记覆盖并发修改。
+  5. 检测到并发修改时返回 HTTP 409 Conflict，客户端可重试。
+- **验证**: `TestCompareAndUpdatePairingSessionDB_ConcurrentModification`、`TestCompareAndUpdatePairingSessionDB_SuccessWhenNoConflict`、`TestCompareAndUpdatePairingSessionDB_StatusChangedConcurrently`、`TestIsValidSessionTransition`、`TestGetEngineerID`、`TestUpdatePairingSession_ConcurrentModificationReturns409` 全部通过。
+
+## 提交后正确性检查发现（2026-06-22）
+
+### REV25: MqttConnectionManager `_connectionState.value = Connecting` 竞态导致状态机永久卡死 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 低
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (connect LAZY 协程, L334)
+- **问题描述**: `connect()` 的 LAZY 协程在 synchronized 块外设置 `_connectionState.value = Connecting`。如果 `disconnect()` 在 LAZY 协程退出 synchronized 块后、设置状态前执行，`disconnect()` 将状态设为 `Disconnected`，随后 LAZY 协程覆盖为 `Connecting`。由于后续 generation 检查不匹配时不会修正状态，状态机永久卡死在 `Connecting`。
+- **触发场景**: 用户调用 `connect()` → LAZY 协程通过 generation 检查退出 synchronized → 另一线程调用 `disconnect()` 设置 `Disconnected` → LAZY 协程设置 `Connecting` 覆盖 `Disconnected` → 状态永久卡死
+- **风险**: **高**。UI 永久显示"连接中"，用户无法操作
+- **修复方式**: 将 `_connectionState.value = Connecting` 和 `_diagnostics.update` 移入 synchronized 块内，与 generation 校验和客户端交换在同一原子操作中完成
+
+### REV26: server/tunnel Register/Unregister 未检查 stopped 导致 WaitGroup 重用 panic [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 低
+- **位置**: `server/tunnel/main.go` (Register L284, Unregister L312)
+- **问题描述**: `Register` 和 `Unregister` 在调用 `m.wg.Add(1)` 前未检查 `m.stopped`。`Stop()` 调用 `wg.Wait()` 后计数器归零，如果 `handleTunnel` 的 defer 随后调用 `Unregister`，`m.wg.Add(1)` 会触发 `panic: sync: WaitGroup is reused before previous Wait has returned`。`notifyDeviceStatus` 入口已有 `m.stopped` 检查（N82 修复），但 `wg.Add(1)` 在 goroutine 启动之前调用，不受其保护。
+- **风险**: **高**。服务关闭时可能 panic
+- **修复方式**: 在 `Register` 和 `Unregister` 中，在 `m.wg.Add(1)` 前获取 `m.stopMu` 并检查 `m.stopped`，若已停止则跳过 `m.wg.Add(1)` 和 goroutine 启动
+
+### REV27: server/tunnel Register/Unregister 在 m.mu 锁内调用 tunnel.Close() 执行阻塞 I/O [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 中
+- **位置**: `server/tunnel/main.go` (Register L278, Unregister L300)
+- **问题描述**: `Register` 和 `Unregister` 在持有 `m.mu` 锁时调用 `tunnel.Close()`。`Close()` 需要获取 `connMu`，如果 `sendLoop` 正在持有 `connMu` 执行 `WriteMessage`（最多阻塞 10 秒），`m.mu` 会被间接阻塞，导致所有设备的 `Get`/`Register`/`Unregister`/`handleStats` 操作全部阻塞。与 N27（Socks5ConnectionPool 同类问题，已修复）和 `cleanupDeadTunnelsOnce`（已正确将 Close() 移到锁外）模式一致。
+- **风险**: **高**。单设备网络异常可导致全服务阻塞（DoS）
+- **修复方式**: 仿照 `cleanupDeadTunnelsOnce` 模式——锁内仅做 map 删除和收集待关闭 tunnel，锁外再调用 `Close()`
+
+### REV28: server/api GET /api/pair/:code 无认证可枚举配对码 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 低
+- **位置**: `server/api/main.go` (L1182 路由注册)
+- **问题描述**: `GET /api/pair/:code` 路由没有认证中间件，也无速率限制。攻击者无需任何凭据即可遍历 6 位配对码（100 万种可能），获取活跃配对会话的完整信息（engineer_id、device_id、status、expires_at 等）。对比同组 POST 和 PUT 路由均有 `authMiddleware` 保护，GET 路由是明显的授权遗漏。`internalOrUserAuthMiddleware` 已定义且经过测试，但未在生产路由中使用。
+- **风险**: **高**。配对码枚举 + 信息泄露，可配合 REV29 劫持会话
+- **修复方式**: 将 `GET /api/pair/:code` 路由的中间件从无改为 `internalOrUserAuthMiddleware()`，支持 Internal API Key 或 JWT Bearer Token 双模式认证
+
+### REV29: server/api updatePairingSession TOCTOU 竞态可致会话劫持 [已修复]
+- **修复状态**: 已修复（由 PR #49 / REV42 更完整的乐观锁覆盖；PR #35 中的原子 UPDATE 代码已移除）
+- **修复难度**: 高
+- **位置**: `server/api/main.go` (`updatePairingSession`, L888-L968)
+- **问题描述**: `updatePairingSession` 的 read-check-update 是非原子的两步操作。两个工程师可同时读取 `EngineerID == ""` 的 session，都通过授权检查，然后先后覆写，后者覆盖前者，导致设备配对到非预期工程师。SQLite WAL 模式不解决应用层 TOCTOU。
+- **风险**: **高**。设备被配对到错误工程师，远程协助场景下安全风险严重
+- **修复方式**: 由 PR #49 的 `compareAndUpdatePairingSessionDB` 乐观锁实现覆盖；PR #35 原先的原子条件 UPDATE 代码已移除，避免重复/冲突实现。
+
+### REV30: SOCKS5 代理域名连接绕过 IP 验证（安全漏洞） [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 低
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt` (L129-134)
+- **问题描述**: `validateTargetAddress` 对域名（ATYP=0x03）无条件返回 `true`，完全绕过 IP 验证。IPv4 地址仅允许 RFC1918 私有地址，但域名连接可解析到任何公网 IP，违反"仅允许访问客户内网"的安全策略。代码注释声称"连接到本地 SOCKS5 服务器"但实际 `NettyOutboundConnector` 直接连接目标地址，注释与架构不符。N30 描述的修复（拒绝域名）在当前代码中未体现。
+- **风险**: **高**。工程师可通过域名访问公网资源，完全绕过私有网络访问策略
+- **修复方式**: 对域名目标返回 `false`，拒绝所有域名连接，确保安全策略一致。更新注释说明拒绝原因
+
+### REV31: server/api `markSessionExpired` 并发过期标记回退语义错误 [已修复]
+- **修复状态**: 已修复
+- **修复日期**: 2026-07-02
+- **修复模型**: Kimi-K2.7-Code
+- **修复难度**: 中
+- **位置**: `server/api/main.go` (`getPairingSession`, L891-L905)
+- **问题描述**: `markSessionExpired` 触发 `ErrConcurrentModification` 后，重新查询会话失败时返回 410 Gone，掩盖真实的数据库错误；查询成功但会话仍过期时返回 200 OK，与正常过期行为不一致。回退路径的 HTTP 语义和错误处理需要重新审视。
+- **风险**: **中**。错误状态码不一致会误导客户端重试逻辑，且 DB 错误被隐藏不利于运维排查
+- **修复方式**:
+  - 并发冲突后重新查询失败：记录真实错误并返回 500 Internal Server Error（`ErrFailedToQueryDatabase`）。
+  - 重新查询成功但会话仍过期（或已被删除）：返回 410 Gone（`ErrSessionExpired`），与正常过期路径一致。
+  - 仅当并发请求将会话刷新为未过期状态时，才返回 200 OK 及当前会话数据。
+  - 新增 `Server.testHookGetPairingSessionDB` 测试钩子以注入 `getPairingSessionDB` 返回值，覆盖上述三种分支。
+
+### REV32: server/tunnel 离线通知可能覆盖新建立的在线状态 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 高
+- **位置**: `server/tunnel/main.go` (`Unregister`、`cleanupDeadTunnelsOnce`、`notifyDeviceStatus`)
+- **问题描述**: `Unregister` 和 `cleanupDeadTunnelsOnce` 在删除旧隧道后直接发送 `offline` 通知，未重新检查是否已有新的 replacement tunnel 注册。`notifyDeviceStatus` 的重试机制也可能在延迟期间把后来写入的 `online` 覆盖为 `offline`，造成设备状态与实际情况相反。
+- **风险**: **高**。工程师端可能看到设备已离线，但实际上隧道已重建，导致远程协助中断或误判
+- **修复方式**:
+  - `server/tunnel/main.go`: `Unregister` 和 `cleanupDeadTunnelsOnce` 在关闭旧隧道后、发送 `offline` 前，重新检查 `m.tunnels[deviceID]` 是否存在活跃隧道；若存在则跳过 `offline` 通知。
+  - 补充测试覆盖：替换隧道在 `Unregister`/`cleanupDeadTunnelsOnce` 的删除-通知窗口中注册时不发送 `offline`；无替换隧道时正常发送 `offline`。
+  - `notifyDeviceStatus` 的重试延迟风险由 REV33 的毫秒级 `last_seen` 与 API upsert 的 `excluded.last_seen > device_status.last_seen` 保护覆盖，过期的 `offline` 不会覆盖较新的 `online`。
+- **剩余风险**: 检查与通知之间仍存在极小的时间窗口；在此窗口内新隧道注册且旧 `offline` 已决定发送，则仍会发出一次携带旧时间戳的 `offline`。该离线通知会被 API 的 `last_seen` 保护拒绝，不会覆盖在线状态，但会造成一次无效请求。
+
+### REV33: server/api + server/tunnel 秒级 `last_seen` 导致同秒重连状态丢失 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 中
+- **位置**: `server/api/main.go` (`updateDeviceStatus` / `upsertDeviceStatusDB` / `getDeviceStatusDB`)、`server/tunnel/main.go` (`notifyDeviceStatus`)
+- **问题描述**: `server/api/main.go` 写入设备状态时仍使用秒级 `Unix()` 作为 `last_seen`，且 `upsertDeviceStatusDB` 当前为无条件 `ON CONFLICT DO UPDATE`，没有 `excluded.last_seen > device_status.last_seen` 保护。`server/tunnel/main.go` 的 `notifyDeviceStatus` 带指数退避重试，旧的 `offline` 通知可能延迟到达 API，加上同秒内 `last_seen` 相同，无法判断事件先后顺序，导致过期的 `offline` 覆盖较新的 `online`。
+- **风险**: **高**。高频重连场景下状态机不可靠，可能把在线设备判定为离线
+- **修复方式**:
+  - `server/api/main.go`：`last_seen` 改用毫秒级 `UnixMilli()`；`upsertDeviceStatusDB` 的 `ON CONFLICT DO UPDATE` 增加 `WHERE excluded.last_seen > device_status.last_seen` 保护；`getDeviceStatusDB` 按毫秒解析；`updateDeviceStatus` 接受请求体中的可选 `last_seen`（毫秒 Unix 时间戳），未提供时回落为当前时间。
+  - `server/tunnel/main.go`：`notifyDeviceStatus` 在事件发生时捕获 `time.Now().UnixMilli()` 并通过 `last_seen` 字段发送给 API，使延迟到达的 `offline` 携带原始时间戳。
+  - 测试覆盖：毫秒时间戳写入、过期 `offline` 不覆盖较新的 `online`、同毫秒事件不覆盖、`updateDeviceStatus` 按请求时间戳处理、`notifyDeviceStatus` 携带 `last_seen`。
+- **迁移说明**: 数据库表结构不变（`last_seen INTEGER`）。`getDeviceStatusDB` 已添加向后兼容逻辑：读取到小于 `1e12` 的值时自动视为秒级并乘以 1000 转换为毫秒，因此无需停机即可兼容旧数据。若需要一次性统一存量数据的单位为毫秒，可执行：`UPDATE device_status SET last_seen = last_seen * 1000;`。
+
+### REV34: server/api GET `/api/pair/:code` 缺少限流 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 低
+- **位置**: `server/api/main.go` (`GET /api/pair/:code` 路由, `rateLimitMiddleware`, `rateLimitKey`)
+- **问题描述**: REV28 已为该路由补充认证，但仍无速率限制。已认证用户仍可高频枚举 6 位配对码，存在信息泄露和会话探测风险。
+- **风险**: **中**。认证后仍可遍历配对码空间，获取其他工程师/设备的配对会话信息
+- **修复方式**:
+  - 新增 `rateLimitMiddleware` Gin 中间件，复用 `Server.rateLimiter`（`server/shared/ratelimit/ratelimit.go`）。
+  - 限流 key 优先取认证身份：JWT `sub` 用 `jwt:<sub>` 作 key；Internal API Key 用 `internal` 作 key；无身份时回退 `ClientIP()`。
+  - 在 `GET /api/pair/:code` 路由上挂载 `internalOrUserAuthMiddleware()` + `rateLimitMiddleware()` + `getPairingSession`。
+  - 超限时返回 `429 Too Many Requests`，响应体包含 `ErrRateLimitExceeded` 错误信息。
+  - 在 `server/api/main_test.go` 中补充测试：正常请求通过、超限返回 429、JWT 与 Internal API Key 分别限流、不同身份使用独立限流桶。
+
+### REV35: Android `DebugDetector.getprop` 超时顺序失效 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 低
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt` (`getprop` 回退路径)
+- **问题描述**: `getprop` 回退路径先调用 `reader.readLine()` 再调用 `process.waitFor(timeout)`。如果 `getprop` 子进程卡住或不输出换行，`readLine()` 会无限阻塞，超时参数无法生效。
+- **风险**: **中**。调试检测可能冻结 UI 线程或后台检测协程，影响应用响应
+- **修复方式**: 将 `getprop` 读取封装到 `readProcessOutput(command)`：在独立守护线程中执行 `BufferedReader.readLine()`，通过 `Future.get(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)` 限制读取本身；超时或异常时取消 Future 并强制销毁子进程与线程池，避免 `readLine()` 无限阻塞。
+
+### REV36: server/api `compareAndUpdatePairingSessionDB` 未校验会话是否已过期 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 低
+- **位置**: `server/api/main.go` (`compareAndUpdatePairingSessionDB`)
+- **问题描述**: `compareAndUpdatePairingSessionDB` 的乐观锁 WHERE 条件仅检查 `code = ? AND status = ? AND engineer_id = ?`，未包含 `expires_at > ?`。如果会话在读取后已经过期，并发请求仍可能将其成功更新为 `connected`，绕过过期检查。
+- **风险**: **高**。过期的配对会话可能被错误地激活，导致安全风险
+- **修复方式**: 在 WHERE 条件中增加 `AND expires_at > ?` 并使用当前时间作为参数；返回 `ErrConcurrentModification` 时同时覆盖"已过期"场景。补充针对过期会话的单元测试。
+
+### REV37: server/shared/recovery example_test 示例质量 [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 低
+- **位置**: `server/shared/recovery/example_test.go`
+- **问题描述**: Copilot review 指出 `ExampleRecover` 使用 `WithNamedReturn(&n, &err, ...)` 但接收的是普通局部变量而非命名返回值，示例误导；`ExampleRecoverAction` 的 action 函数没有可观察行为，示例失去演示意义。
+- **风险**: **低**。仅影响文档/示例可读性
+- **修复方式**: 修正 `ExampleRecover` 使用真正的命名返回值；为 `ExampleRecoverAction` 的 action 添加可观察副作用并补充 `// Output:`。
+
+### REV38: DebugDetector 异常处理与测试稳定性 [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 低
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt`、`DebugDetectorTest.kt`
+- **问题描述**: Copilot/CodeRabbit review 指出 `DebugDetector` 中 `catch (e: Exception)` 可能触发 detekt `SwallowedException`；`DebugDetectorTest.checkDebugProperties_doesNotThrow_inUnitTestEnvironment` 断言 `assertFalse(...)`，受宿主机属性影响，测试可能不稳定。
+- **风险**: **低**。代码风格与测试稳定性问题
+- **修复方式**: 具体化捕获的异常类型或为 `catch` 块添加注释说明；将受环境影响的测试改为注入可控属性或使用更稳定的断言。
+
+### REV39: `TestUpdatePairingSession_ConcurrentModificationReturns409` 可能不稳定 [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 中
+- **位置**: `server/api/main_test.go` (`TestUpdatePairingSession_ConcurrentModificationReturns409`)
+- **问题描述**: Copilot review 指出该测试使用 "至少一次 409" 断言，并发赛跑结果依赖调度，存在 CI 不稳定风险。
+- **风险**: **低**。测试偶发失败会增加维护成本
+- **修复方式**: 使用确定性同步（如 barrier 或 hook）替代概率性断言，或增加重试次数并明确失败阈值。
+
+### PR16-1: `server/api/Dockerfile` 使用 `CGO_ENABLED=0` 导致 SQLite 驱动无法运行 [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 低
+- **提交哈希**: `7fbe5e9`
+- **位置**: `server/api/Dockerfile` (L8)
+- **问题描述**: PR #16 的 Codex review 指出，API 服务依赖 `mattn/go-sqlite3`，该驱动需要 CGO。`Dockerfile` 中使用 `CGO_ENABLED=0` 编译出的二进制在容器内启动时会因无法加载 SQLite 驱动而失败。
+- **风险**: **高**。服务端 Docker 镜像无法运行，阻塞容器化部署。
+- **修复方式**: 移除 `CGO_ENABLED=0`，或迁移到纯 Go 的 SQLite 驱动（如 `modernc.org/sqlite`）。
+
+### PR16-2: `server/docker-compose.yml` build context 未包含 `shared` 本地模块 [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 低
+- **提交哈希**: `7fbe5e9`
+- **位置**: `server/docker-compose.yml` (L12, L44)
+- **问题描述**: PR #16 的 Codex review 指出，各服务的 `build.context` 仅指向各自子目录（如 `./api`），但 `go.mod` 通过 `replace` 依赖上层或同层的 `shared` 模块，导致 `docker compose build` 时找不到本地替换模块而失败。
+- **风险**: **高**。Docker Compose 无法构建服务。
+- **修复方式**: 将 `build.context` 设置为 `server/` 根目录，并在各 `Dockerfile` 中调整 `COPY` 路径；或重新组织模块以消除本地 `replace`。
+
+### PR16-3: `server/docker-compose.yml` TLS 健康检查仍默认使用 HTTP [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 低
+- **提交哈希**: `7fbe5e9`
+- **位置**: `server/docker-compose.yml` (L35)
+- **问题描述**: PR #16 的 Codex review 指出，`healthcheck` 的默认 URL 是 `http://localhost:8080/health`。当 `ENABLE_TLS=true` 时，HTTP 请求会被拒绝，健康检查始终失败。
+- **风险**: **中**。启用 TLS 后容器被误判为不健康，导致服务反复重启。
+- **修复方式**: 健康检查根据 `ENABLE_TLS` 自动切换 `https://` 协议，或单独提供 `/health` 的 HTTP _plain_ 端点。
+
+### PR16-4: Release 构建未强制要求 `MQTT_TLS_PUBLIC_KEY_PINS_RELEASE` [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 低
+- **提交哈希**: `7fbe5e9`
+- **位置**: `android/app/build.gradle.kts` (L60-L62, L95)
+- **问题描述**: PR #16 的 Codex review 指出，`mqttTlsPublicKeyPinsRelease` 在未配置时会静默回退到 `mqttTlsPublicKeyPinsDebug`（L61），release 构建不会失败。虽然运行时 `MqttConnectionManager` 会抛异常阻止启动，但缺少构建期强制检查。
+- **风险**: **中**。Release 包可能因配置遗漏在运行时崩溃，应像 `MQTT_BROKER_URL_TLS_RELEASE` 一样在构建阶段 fail-fast。
+- **修复方式**: 在 `validateReleaseConfig` 中增加对 `MQTT_TLS_PUBLIC_KEY_PINS_RELEASE` 非空校验，未配置时抛出 `GradleException`。
+
+### PR16-5: `VpnService` 核心路径存在多处设计缺陷 [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 高
+- **提交哈希**: `7fbe5e9`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt`、`ConnectionSessionManager.kt`、`VpnPacketProcessor.kt`
+- **问题描述**: PR #16 的 Codex review 指出 VPN 核心路径存在多项基础缺陷：TCP SYN 无 payload 被丢弃、DNS 响应未回注、UDP 走 SOCKS CONNECT、源 IP 硬编码 10.0.0.1、TCP 逐包开新 Socket 等。这些问题与 `docs/TECH_DEBT.md` 中 C1/C3 多网络风险一致。
+- **风险**: **高**。VPN 核心功能不稳定，多网络/双 WiFi/Link Turbo 等场景下可能出现路由异常或连接失败。
+- **修复方式**: 统一评估 VPN 数据路径，引入 `Network.bindSocket()` 与多网络感知路由；将大文件拆分为 `PacketParser`、`ConnectionManager` 等模块（参见 `docs/TECH_DEBT.md` C1/C3 与 `docs/ISSUES.md` N2）。
+
+---
+
+## 提交后正确性检查发现（2026-07-03，审查 PR #57/#58 分支）
+
+> 以下问题由提交后正确性检查在 `fix/rev31-36-post-commit-review`（PR #58）和
+> `fix/post-commit-review-rev43-rev47`（PR #57）分支上发现。REV34/REV36 的"修复"
+> 本身引入了新的回归缺陷，经多个独立 subagent 复审确认。
+
+### REV48: REV34 限流修复导致合法轮询被封锁 [已修复]
+- **修复状态**: 已修复（本分支）
+- **提交哈希**: `c514fc3`（引入），本分支修复
+- **修复难度**: 低
+- **位置**: `server/api/main.go` (`getPairingSession`, `rateLimitMiddleware`)
+- **问题描述**: REV34 为 `GET /api/pair/:code` 挂载了 `rateLimitMiddleware`，复用的
+  `server/shared/ratelimit` 是**失败计数器**语义（`Allow` 每次调用都递增计数，
+  `Success` 才清零）。但 `getPairingSession` 在任何返回路径（200/410/404/500）都**未
+  调用 `rateLimiter.Success`**，导致每次合法轮询都累加失败计数。默认配置
+  `MaxAttempts=5, Window=5m, BlockDuration=15m`：工程师在前端轮询配对码状态时，5 次
+  请求后即被封锁 15 分钟，远程协助流程完全中断。
+- **触发场景**: 工程师打开配对页面，前端每 2-3 秒轮询 `GET /api/pair/:code` 获取会话
+  状态。约 10-15 秒后（5 次请求）即收到 429，且封锁持续 15 分钟。这是**正常使用路
+  径**下的必然触发，非边缘情况。
+- **风险**: **严重**。100% 的合法轮询用户在 15 秒内被封锁 15 分钟，远程协助功能基
+  本不可用。测试 `TestGetPairingSessionRateLimitedByJWTIdentity` 将此破坏性行为锁定
+  为预期（5×200 后 429），进一步掩盖了问题。
+- **修复方式**:
+  - 在 `getPairingSession` 找到会话时（200 和 410 路径）调用
+    `s.rateLimiter.Success(rateLimitKey(c))`，重置失败计数器。
+  - 404（会话不存在）路径不清零计数器，保留暴力枚举配对码的防护能力。
+  - 更新测试：`TestGetPairingSessionRateLimit_AllowsLegitimatePolling` 验证 20 次合
+    法轮询不被限流；`TestGetPairingSessionRateLimit_BlocksBruteForce` 验证 5 次 404
+    后第 6 次被限流。
+
+### REV49: REV36 `expires_at > ?` 条件导致 `markSessionExpired` 永久失败 [已修复]
+- **修复状态**: 已修复（本分支）
+- **提交哈希**: `f189aac`（引入），本分支修复
+- **修复难度**: 低
+- **位置**: `server/api/main.go` (`compareAndUpdatePairingSessionDB`, `markSessionExpired`)
+- **问题描述**: REV36 在 `compareAndUpdatePairingSessionDB` 的 WHERE 条件中增加了
+  `AND expires_at > ?`（`now`），声称"防止过期的配对会话被错误地激活"。但
+  `markSessionExpired` 的唯一调用时机是 `time.Now().After(session.ExpiresAt)` 为真
+  （即会话已过期）时，此时 `expires_at > now` **恒为假**，导致 UPDATE 影响 0 行，
+  永远返回 `ErrConcurrentModification`。后果：
+  1. 会话状态永远不会被写入为 `"expired"`（DB 中保持原状态如 `"pending"`）。
+  2. `updatePairingSession` 的过期分支将 `ErrConcurrentModification` 映射为 **409
+     Conflict**，而非预期的 **410 Gone**——这是用户可感知的状态码回归。
+  3. `getPairingSession` 的过期分支走 REV31 的回退路径（重新查询），虽然最终能返回
+     410，但多了一次 DB 查询且 `markSessionExpired` 仍未生效。
+- **触发场景**: 配对码 5 分钟过期后，工程师或客户端尝试更新该会话（PUT
+  `/api/pair/:code`），收到 409 Conflict 而非 410 Gone，客户端可能误判为并发冲突
+  并重试，形成无效重试循环。
+- **风险**: **高**。过期会话状态不持久化导致数据不一致；`updatePairingSession` 状态
+  码回归（410→409）影响客户端逻辑。测试
+  `TestCompareAndUpdatePairingSessionDB_ExpiredSessionReturnsConcurrentModification`
+  将此破坏性行为锁定为预期，进一步掩盖了问题。
+- **修复方式**:
+  - 从 `compareAndUpdatePairingSessionDB` 的 WHERE 条件中移除 `AND expires_at > ?`
+    及对应的 `now` 变量，恢复为仅检查乐观锁不变量（`code + status + engineer_id`）。
+  - 过期保护由调用方的显式 `time.Now().After(session.ExpiresAt)` 检查提供（所有调用
+    点在调用 `compareAndUpdatePairingSessionDB`/`markSessionExpired` 前均有此检查）。
+  - 更新测试：`TestCompareAndUpdatePairingSessionDB_DoesNotRejectExpiredSession` 验证
+    过期会话可被成功更新；`TestMarkSessionExpired_SucceedsForExpiredSession` 验证
+    `markSessionExpired` 成功写入 `"expired"` 状态；
+    `TestUpdatePairingSession_ExpiredReturns410Gone` 验证 HTTP 层返回 410 Gone。
+- **注**: PR #57（`fix/post-commit-review-rev43-rev47`）的
+  `compareAndUpdatePairingSessionDB` 本就没有 `expires_at > ?` 条件，因此不受此问题
+  影响。两个 PR 在此函数上存在合并冲突，需协调合并顺序。
+
+### REV50: PR #57/#58 合并冲突需协调 [未修复]
+- **修复状态**: 未修复（需人工协调）
+- **位置**: `server/api/main.go`, `server/tunnel/main.go`,
+  `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt` 等 7 个文件
+- **问题描述**: PR #57（REV43-47）和 PR #58（REV31-36）在以下关键区域存在冲突：
+  1. `compareAndUpdatePairingSessionDB`：PR #57 无 `expires_at > ?`（正确），
+     PR #58 有（REV49 缺陷）。
+  2. `getPairingSession`：PR #57 的 REV44 将 `ErrConcurrentModification` 分支直接返
+     回 410；PR #58 的 REV31 采用重新查询回退逻辑。两者语义不同。
+  3. `createSessionToken`：PR #57 的 REV43 增加过期检查+乐观锁；PR #58 无此变更。
+  4. `cleanupDeadTunnelsOnce`：PR #58 有 REV32 替换检查但缺 REV45 的循环内 `stopMu`
+     保护；PR #57 有 REV45 但缺 REV32。
+  5. `DebugDetector.kt`：PR #57 的 REV47 改变了 3 个测试的契约但未更新测试。
+- **风险**: **中**。直接合并会导致部分修复丢失或编译失败。
+- **建议**: 以 PR #58 为基础合并 PR #57，逐文件解决冲突，确保：
+  - `compareAndUpdatePairingSessionDB` 不含 `expires_at > ?`（采用 PR #57 版本或本分
+    支修复）。
+  - `getPairingSession` 采用 REV31 的重新查询回退逻辑（更健壮）。
+  - `cleanupDeadTunnelsOnce` 同时包含 REV32 替换检查和 REV45 循环内 `stopMu` 保护。
+  - 更新 DebugDetector 的 3 个测试以匹配 REV47 的新契约。
 
