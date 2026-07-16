@@ -69,6 +69,7 @@ summarize_bot_comments.py
 .claude/
 .codebuddy/
 .iflow/
+.Jules/
 .kiro/
 .qoder/
 .qwen/
