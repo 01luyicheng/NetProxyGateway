@@ -163,6 +163,85 @@ jobs:
           fail-on-severity: high
 """
 
+# H1: job-level `continue-on-error: true` masks the entire dep-review job —
+# must FAIL. The directive sits at indent 4 (job-body key), before `steps:`.
+H1_JOB_LEVEL_COE = """\
+name: PR Checks
+jobs:
+  dependency-review:
+    continue-on-error: true
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Dependency review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+"""
+
+# H2: job-level `if: false` skips the dep-review job — must FAIL.
+H2_IF_FALSE = """\
+name: PR Checks
+jobs:
+  dependency-review:
+    if: false
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Dependency review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+"""
+
+# H3: step-level `continue-on-error: ${{ ... }}` expression form — must FAIL.
+# The previous guard only matched the literal `true` and missed expressions.
+H3_EXPR_COE = """\
+name: PR Checks
+jobs:
+  dependency-review:
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Dependency review
+        continue-on-error: ${{ matrix.flag }}
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+"""
+
+# H4: step-level `continue-on-error: true  # comment` trailing-comment form —
+# must FAIL. The previous guard compared the raw value and missed the comment.
+H4_TRAILING_COMMENT_COE = """\
+name: PR Checks
+jobs:
+  dependency-review:
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Dependency review
+        continue-on-error: true  # rationale here
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+"""
+
+# H5: `fail-on-severity: high  # comment` is a legitimate config — must PASS.
+# The previous guard treated the raw value as `high  # comment` and rejected
+# it as an unknown severity (false positive).
+H5_FAIL_ON_SEV_WITH_COMMENT = """\
+name: PR Checks
+jobs:
+  dependency-review:
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Dependency review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high  # CVSS>=7.0 gate
+"""
+
 
 class CheckDependencyReviewTests(unittest.TestCase):
     def test_dev_baseline_passes(self) -> None:
@@ -223,6 +302,51 @@ class CheckDependencyReviewTests(unittest.TestCase):
         """Any action version (v4, v5, ...) is accepted."""
         path = _write_yaml(ACTION_V5)
         self.assertEqual(m.check_dependency_review(path), [])
+
+    def test_h1_job_level_continue_on_error_fails(self) -> None:
+        """H1: job-level `continue-on-error: true` masks the whole job."""
+        path = _write_yaml(H1_JOB_LEVEL_COE)
+        failures = m.check_dependency_review(path)
+        self.assertTrue(
+            any("H1" in f and "job-level" in f for f in failures),
+            f"expected H1 job-level continue-on-error failure, got: {failures}",
+        )
+
+    def test_h2_if_false_skips_job_fails(self) -> None:
+        """H2: `if: false` (or any `if:`) conditionally skips the job."""
+        path = _write_yaml(H2_IF_FALSE)
+        failures = m.check_dependency_review(path)
+        self.assertTrue(
+            any("H2" in f and "`if:`" in f for f in failures),
+            f"expected H2 job-level if: failure, got: {failures}",
+        )
+
+    def test_h3_expression_continue_on_error_fails(self) -> None:
+        """H3: `continue-on-error: ${{ ... }}` expression must fail."""
+        path = _write_yaml(H3_EXPR_COE)
+        failures = m.check_dependency_review(path)
+        self.assertTrue(
+            any("H3" in f and "continue-on-error" in f for f in failures),
+            f"expected H3 expression continue-on-error failure, got: {failures}",
+        )
+
+    def test_h4_trailing_comment_continue_on_error_fails(self) -> None:
+        """H4: `continue-on-error: true  # reason` must fail (comment stripped)."""
+        path = _write_yaml(H4_TRAILING_COMMENT_COE)
+        failures = m.check_dependency_review(path)
+        self.assertTrue(
+            any("H4" in f and "continue-on-error" in f for f in failures),
+            f"expected H4 trailing-comment continue-on-error failure, got: {failures}",
+        )
+
+    def test_h5_trailing_comment_on_fail_on_severity_passes(self) -> None:
+        """H5: `fail-on-severity: high  # comment` must PASS (no false positive)."""
+        path = _write_yaml(H5_FAIL_ON_SEV_WITH_COMMENT)
+        self.assertEqual(
+            m.check_dependency_review(path),
+            [],
+            "fail-on-severity with inline comment must not be a false positive (H5)",
+        )
 
 
 if __name__ == "__main__":

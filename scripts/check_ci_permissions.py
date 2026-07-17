@@ -163,8 +163,17 @@ def check_dependency_review(path: Path) -> list[str]:
       1. A job named `dependency-review` exists.
       2. It uses `actions/dependency-review-action@<any-version>`.
       3. It sets `fail-on-severity` to `low`, `moderate`, or `high`.
-      4. The `Dependency review` step is NOT masked by `continue-on-error: true`
-         (would silently flip a red CVE signal to green — see N90).
+      4. The job has no job-level `continue-on-error:` (H1) or `if:` (H2)
+         directive — either masks or skips the entire job.
+      5. The `Dependency review` step is NOT masked by any
+         `continue-on-error:` key, regardless of value — literal `true`
+         (N90), expression `${{ ... }}` (H3), or trailing-comment form
+         `true  # ...` (H4). All would silently flip a red CVE signal to
+         green.
+
+    Inline ` #...` comments are stripped before value comparison so that
+    legitimate configs like `fail-on-severity: high  # comment` are not
+    flagged as false positives (H5).
     """
     failures: list[str] = []
     text = path.read_text()
@@ -201,12 +210,15 @@ def check_dependency_review(path: Path) -> list[str]:
             f"{DEPENDENCY_REVIEW_ACTION} (CI-DEP-1). Restore the action."
         )
 
-    # Verify fail-on-severity is present and at most `high`.
+    # Verify fail-on-severity is present and at most `high`. Strip inline
+    # ` #...` comments before comparing so that legitimate configs like
+    # `fail-on-severity: high  # comment` are not false positives (H5).
     fail_sev = None
     for raw in job_body:
         s = raw.strip()
         if s.startswith("fail-on-severity:"):
             _, _, val = s.partition(":")
+            val = val.split(" #", 1)[0].rstrip()
             fail_sev = val.strip().strip("\"'").lower()
             break
     if fail_sev is None:
@@ -221,10 +233,36 @@ def check_dependency_review(path: Path) -> list[str]:
             f"{sorted(_ACCEPTABLE_SEVERITIES)} (CI-DEP-1)."
         )
 
-    # Detect `continue-on-error: true` on the dependency-review step. Walk the
-    # body line-by-line, tracking step boundaries (list items starting with
-    # `- `). A step's properties (uses:, continue-on-error:, etc.) may span
-    # multiple lines until the next `- ` or end of the job body.
+    # H1 + H2: scan for job-level `continue-on-error:` or `if:` keys at
+    # indent 4 (job-body keys). Either directive masks or skips the entire
+    # dep-review job, defeating the CI-DEP-1 gate. The check is on key
+    # presence alone — any value (true, false, expression, or comment) is
+    # suspect because the directive itself is wrong for this job.
+    for raw in job_body:
+        # Indent exactly 4 (job-body keys), not 6+ (steps / step keys).
+        if not raw.startswith("    ") or raw.startswith("      "):
+            continue
+        s = raw.strip()
+        if s.startswith("continue-on-error:"):
+            failures.append(
+                f"{path.name}: `dependency-review` job has a job-level "
+                f"`continue-on-error:` directive (CI-DEP-1/H1). This "
+                f"masks the entire job. Remove the directive."
+            )
+        elif s.startswith("if:"):
+            failures.append(
+                f"{path.name}: `dependency-review` job has a job-level "
+                f"`if:` condition (CI-DEP-1/H2). The dep-review job must "
+                f"run unconditionally. Remove the `if:` directive."
+            )
+
+    # H3 + H4: detect ANY `continue-on-error:` key on the dependency-review
+    # step. Walk the body line-by-line, tracking step boundaries (list items
+    # starting with `- `). A step's properties (uses:, continue-on-error:,
+    # etc.) may span multiple lines until the next `- ` or end of the job
+    # body. Detection is on key presence alone — covers literal `true`
+    # (N90), expression `${{ ... }}` (H3), and trailing-comment form
+    # `true  # ...` (H4).
     cur_step_lines: list[str] = []
     steps: list[list[str]] = []
     for raw in job_body:
@@ -245,14 +283,16 @@ def check_dependency_review(path: Path) -> list[str]:
             for line in step_lines:
                 if line.startswith("continue-on-error:"):
                     _, _, val = line.partition(":")
-                    if val.strip().lower() == "true":
-                        failures.append(
-                            f"{path.name}: `dependency-review` step is masked "
-                            f"by `continue-on-error: true` (N90/CI-DEP-1). "
-                            f"This silently flips a red CVE signal to green. "
-                            f"Remove the directive."
-                        )
-                        break
+                    # Strip inline comment so the reported value is clean
+                    # (H4: `true  # reason` -> `true`).
+                    val = val.split(" #", 1)[0].rstrip().strip()
+                    failures.append(
+                        f"{path.name}: `dependency-review` step is masked "
+                        f"by `continue-on-error:` (value='{val}', "
+                        f"N90/CI-DEP-1/H3/H4). This silently flips a red "
+                        f"CVE signal to green. Remove the directive."
+                    )
+                    break
 
     return failures
 
