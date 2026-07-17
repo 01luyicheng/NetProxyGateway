@@ -85,6 +85,25 @@ jobs:
           go-version-file: ${{ matrix.path }}/go.mod
           cache: false
 
+      # Self-hosted runner: /tmp/go-mod-* and /tmp/go-build-* persist across jobs.
+      # actions/cache@v4 restore-by-tar emits "Cannot open: File exists" warnings
+      # when residual files from a prior job collide with the tar extraction.
+      # Although cache restore degrades to a warning (does not fail the step),
+      # the cache is not restored, forcing redundant module downloads on every
+      # run. Pre-clean the directories so restore starts from empty.
+      #
+      # `chmod -R +w` is required because Go toolchain files extracted by
+      # setup-go (under golang.org/toolchain@v*/src/) are marked read-only by
+      # default. Without chmod, `rm -rf` fails with "Permission denied" on these
+      # files. sudo is NOT an option — this self-hosted runner does not have
+      # NOPASSWD sudo configured.
+      # See docs/ISSUES.md CACHE-RESTORE-1.
+      - name: Clean residual Go cache directories
+        if: steps.filter.outputs.component == 'true'
+        run: |
+          chmod -R +w /tmp/go-mod-"${{ matrix.component }}" /tmp/go-build-"${{ matrix.component }}" 2>/dev/null || true
+          rm -rf /tmp/go-mod-"${{ matrix.component }}" /tmp/go-build-"${{ matrix.component }}"
+
       - name: Cache Go modules and build cache
         if: steps.filter.outputs.component == 'true'
         uses: actions/cache@v4
@@ -106,13 +125,55 @@ jobs:
             echo "available=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Step 7.1: Unified Makefile call — build + test + gofmt + vet + mod-tidy-check
-      - name: CI checks for ${{ matrix.component }}
+      # Step 7.1: go build — HARD GATE (no continue-on-error).
+      # Was previously masked along with test+quality in a single
+      # `make go-ci-component` step; see docs/ISSUES.md CI-MASK-1.
+      #
+      # Inlines `cd ${{ matrix.path }} && go build -v ./...` instead of
+      # `make go-build-component` because the self-hosted runner does not
+      # have `make` installed and lacks NOPASSWD sudo to apt-get install it.
+      # matrix.path already provides the full component directory, so the
+      # Makefile's `comp_path()` indirection is not needed.
+      # See docs/ISSUES.md MAKE-MISSING-1.
+      - name: Build ${{ matrix.component }}
         if: steps.filter.outputs.component == 'true'
         env:
           CGO_ENABLED: ${{ steps.gcc.outputs.available == 'true' && '1' || '0' }}
-        run: make go-ci-component COMPONENT=${{ matrix.component }}
-        continue-on-error: true  # quality checks (fmt/vet/tidy) still collecting baseline
+        working-directory: ${{ matrix.path }}
+        run: go build -v ./...
+
+      # Step 7.2: go test — HARD GATE (no continue-on-error). Generates
+      # coverage.out in the component directory for the artifact upload.
+      - name: Test ${{ matrix.component }}
+        if: steps.filter.outputs.component == 'true' && success()
+        env:
+          CGO_ENABLED: ${{ steps.gcc.outputs.available == 'true' && '1' || '0' }}
+        working-directory: ${{ matrix.path }}
+        run: go test -v -coverprofile=coverage.out ./...
+
+      # Step 7.3: quality checks (gofmt + vet + mod-tidy) — masked per ADR-006
+      # baseline collection. Runs even if test failed (always()) so the
+      # baseline is still collected for triage.
+      - name: Quality checks for ${{ matrix.component }}
+        if: always() && steps.filter.outputs.component == 'true'
+        env:
+          CGO_ENABLED: ${{ steps.gcc.outputs.available == 'true' && '1' || '0' }}
+        working-directory: ${{ matrix.path }}
+        run: |
+          out=$(find . -name '*.go' -not -path '*/vendor/*' -exec gofmt -l {} + 2>/dev/null)
+          if [ -n "$out" ]; then
+            echo "FAIL: gofmt found unformatted files:"
+            echo "$out"
+            exit 1
+          fi
+          go vet ./...
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum >/dev/null 2>&1 || {
+            echo "FAIL: go.mod/go.sum not tidy"
+            git checkout -- go.mod go.sum 2>/dev/null || true
+            exit 1
+          }
+        continue-on-error: true  # ADR-006: fmt/vet/tidy baseline collection
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
@@ -120,6 +181,7 @@ jobs:
         with:
           name: go-coverage-${{ matrix.component }}
           path: ${{ matrix.path }}/coverage.out
+          if-no-files-found: ignore  # build/test may not have produced coverage.out
 
       - name: Install govulncheck
         if: always() && steps.filter.outputs.component == 'true'
@@ -138,4 +200,6 @@ jobs:
       # Per-job cleanup: only remove build cache (GOCACHE), keep module cache (GOMODCACHE)
       - name: Cleanup build cache
         if: always()
-        run: rm -rf "$GOCACHE" 2>/dev/null || true
+        run: |
+          chmod -R +w "$GOCACHE" 2>/dev/null || true
+          rm -rf "$GOCACHE" 2>/dev/null || true

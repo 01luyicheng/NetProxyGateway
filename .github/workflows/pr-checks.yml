@@ -40,3 +40,25 @@ jobs:
         uses: actions/dependency-review-action@v4
         with:
           fail-on-severity: high
+
+  # Regression guard for CI-PERM-1 (paths-filter permissions) and
+  # CI-MASK-1 / CI-MASK-2 (build/test/lint/dep-check must not be masked).
+  # Pure-stdlib Python — no dependencies, runs in seconds. Catches drift in
+  # .github/workflows/android-ci.yml and go-ci.yml before a PR merges.
+  ci-config-guard:
+    name: CI config guard
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      # Calls `python3 scripts/check_ci_permissions.py` directly instead of
+      # `make ci-perms-check` because the self-hosted runner does not have
+      # `make` installed and lacks NOPASSWD sudo to apt-get install it.
+      # The Makefile target remains for local dev convenience.
+      # See docs/ISSUES.md MAKE-MISSING-1.
+      - name: Verify CI workflow configuration
+        run: python3 scripts/check_ci_permissions.py

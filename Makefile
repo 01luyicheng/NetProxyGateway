@@ -21,6 +21,9 @@ help:
 	@echo "  go-vuln                Run Go vulnerability scan"
 	@echo "  go-ci                  CI target: build+test+fmt+vet+mod-tidy-check"
 	@echo "  go-ci-component        CI matrix target (COMPONENT=xxx)"
+	@echo "  go-build-component     CI matrix: go build only, HARD GATE (COMPONENT=xxx)"
+	@echo "  go-test-component      CI matrix: go test only, HARD GATE (COMPONENT=xxx)"
+	@echo "  go-quality-component   CI matrix: fmt+vet+tidy, masked in CI (COMPONENT=xxx)"
 	@echo "  go-all                 All Go checks (build+test+fmt+vet+vuln)"
 	@echo "  api-smoke              Build API (CGO=1) and verify /health returns db_status:ok"
 	@echo ""
@@ -180,6 +183,11 @@ go-ci: go-build go-test go-fmt go-vet go-mod-tidy-check
 
 # CI matrix target: build+test+fmt+vet+mod-tidy-check for a single component.
 # Usage: make go-ci-component COMPONENT=api
+# NOTE: Kept for backwards compatibility / local aggregate use. The CI workflow
+# (go-ci.yml) intentionally calls the three split targets below so that
+# `go build` and `go test` are HARD GATES (no continue-on-error), while only
+# the quality checks (fmt/vet/tidy) remain masked per ADR-006. See
+# docs/ISSUES.md CI-MASK-1 for the regression this split fixes.
 go-ci-component:
 	@if [ -z "$(COMPONENT)" ]; then echo "ERROR: COMPONENT is required"; exit 1; fi
 	@$(COMPONENT_PATH_FN) \
@@ -196,6 +204,45 @@ go-ci-component:
 	(cd $$dir && git diff --exit-code -- go.mod go.sum >/dev/null 2>&1; \
 	 git checkout -- go.mod go.sum 2>/dev/null || true) && \
 	echo "=== $$dir CI checks passed ==="
+
+# CI matrix target: go build for a single component (HARD GATE — no masking).
+# Usage: make go-build-component COMPONENT=api
+go-build-component:
+	@if [ -z "$(COMPONENT)" ]; then echo "ERROR: COMPONENT is required"; exit 1; fi
+	@$(COMPONENT_PATH_FN) \
+	dir=$$(comp_path $(COMPONENT)); \
+	echo "=== go build for $$dir ===" && \
+	(cd $$dir && go build -v ./...) && \
+	echo "=== $$dir build passed ==="
+
+# CI matrix target: go test for a single component (HARD GATE — no masking).
+# Generates coverage.out in the component directory for artifact upload.
+# Usage: make go-test-component COMPONENT=api
+go-test-component:
+	@if [ -z "$(COMPONENT)" ]; then echo "ERROR: COMPONENT is required"; exit 1; fi
+	@$(COMPONENT_PATH_FN) \
+	dir=$$(comp_path $(COMPONENT)); \
+	echo "=== go test for $$dir ===" && \
+	(cd $$dir && go test -v -coverprofile=coverage.out ./...) && \
+	echo "=== $$dir test passed ==="
+
+# CI matrix target: quality checks (gofmt + vet + mod-tidy) for a single component.
+# Masked with continue-on-error in go-ci.yml per ADR-006 (baseline collection).
+# Usage: make go-quality-component COMPONENT=api
+go-quality-component:
+	@if [ -z "$(COMPONENT)" ]; then echo "ERROR: COMPONENT is required"; exit 1; fi
+	@$(COMPONENT_PATH_FN) \
+	dir=$$(comp_path $(COMPONENT)); \
+	echo "=== quality checks for $$dir ===" && \
+	out=$$(cd $$dir && find . -name '*.go' -not -path '*/vendor/*' -exec gofmt -l {} + 2>/dev/null); \
+	if [ -n "$$out" ]; then \
+		echo "FAIL: gofmt found unformatted files:"; echo "$$out"; exit 1; \
+	fi && \
+	(cd $$dir && go vet ./...) && \
+	(cd $$dir && go mod tidy) && \
+	(cd $$dir && git diff --exit-code -- go.mod go.sum >/dev/null 2>&1; \
+	 git checkout -- go.mod go.sum 2>/dev/null || true) && \
+	echo "=== $$dir quality checks passed ==="
 
 # ---------------------------------------------------------------------------
 # CI workflow configuration guards
@@ -268,7 +315,7 @@ clean:
 	done
 
 .PHONY: android-build android-test android-lint android-coverage android-dep-check android-all
-.PHONY: go-build go-test go-fmt go-vet go-mod-tidy-check go-test-race go-coverage-check go-vuln go-ci go-ci-component go-all
+.PHONY: go-build go-test go-fmt go-vet go-mod-tidy-check go-test-race go-coverage-check go-vuln go-ci go-ci-component go-build-component go-test-component go-quality-component go-all
 .PHONY: docker-up docker-down docker-build
 .PHONY: api-smoke
 .PHONY: ci-perms-check
