@@ -60,7 +60,7 @@ var (
 	ErrInternalAPIKeyNotConfigured        = errors.New("internal api key not configured")
 	ErrMissingInternalAPIKey              = errors.New("missing internal api key")
 	ErrInvalidInternalAPIKey              = errors.New("invalid internal api key")
-	ErrConcurrentModification            = errors.New("session was modified by another request, please retry")
+	ErrConcurrentModification             = errors.New("session was modified by another request, please retry")
 )
 
 var (
@@ -1187,6 +1187,11 @@ func (s *Server) login(c *gin.Context) {
 
 // healthCheck returns the health status of the server.
 func (s *Server) healthCheck(c *gin.Context) {
+	if !s.rateLimiter.Allow(c.ClientIP()) {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": ErrRateLimitExceeded.Error()})
+		return
+	}
+
 	// Check database connection
 	dbStatus := "ok"
 	if err := s.db.Ping(); err != nil {

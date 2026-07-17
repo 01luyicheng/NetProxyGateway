@@ -1089,3 +1089,59 @@ func TestUpdatePairingSession_ConcurrentModificationReturns409(t *testing.T) {
 		t.Fatalf("expected at least one of %d trials to trigger a 409 Conflict from concurrent modification", trials)
 	}
 }
+
+func TestHealthCheckRateLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	mockDB, err := sql.Open("sqlite3", "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("failed to open in-memory db: %v", err)
+	}
+	defer mockDB.Close()
+
+	// Use a rate limiter with a small limit for testing
+	rlConfig := ratelimit.Config{
+		MaxAttempts:     2,
+		Window:          1 * time.Minute,
+		BlockDuration:   1 * time.Minute,
+		CleanupInterval: 1 * time.Minute,
+		StaleAttemptTTL: 1 * time.Minute,
+	}
+
+	server := &Server{
+		db:          mockDB,
+		rateLimiter: ratelimit.NewRateLimiter(rlConfig),
+	}
+
+	r := gin.New()
+	r.GET("/health", server.healthCheck)
+
+	clientIP := "192.168.1.100"
+
+	// Request 1: Allowed
+	req1, _ := http.NewRequest(http.MethodGet, "/health", nil)
+	req1.Header.Set("X-Forwarded-For", clientIP)
+	w1 := httptest.NewRecorder()
+	r.ServeHTTP(w1, req1)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %v", w1.Code)
+	}
+
+	// Request 2: Allowed
+	req2, _ := http.NewRequest(http.MethodGet, "/health", nil)
+	req2.Header.Set("X-Forwarded-For", clientIP)
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %v", w2.Code)
+	}
+
+	// Request 3: Blocked (Rate Limit Exceeded)
+	req3, _ := http.NewRequest(http.MethodGet, "/health", nil)
+	req3.Header.Set("X-Forwarded-For", clientIP)
+	w3 := httptest.NewRecorder()
+	r.ServeHTTP(w3, req3)
+	if w3.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected status 429 Too Many Requests, got %v", w3.Code)
+	}
+}
