@@ -311,4 +311,14 @@ class DebugDetectorTest {
 
         assertNull(value)
     }
+
+    @Test
+    fun checkTimingAttack_returnsFalse_underNormalExecution() {
+        assertFalse(DebugDetector.checkTimingAttack(1000))
+    }
+
+    @Test
+    fun checkTimingAttack_returnsTrue_whenExecutionExceedsThreshold() {
+        assertTrue(DebugDetector.checkTimingAttack(-1))
+    }
 }

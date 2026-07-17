@@ -453,12 +453,6 @@ object DebugDetector {
     fun checkTimingAttack(thresholdMs: Long = 1000): Boolean {
         val startTime = System.currentTimeMillis()
 
-        // 执行一些简单操作
-        var sum = 0
-        for (i in 0 until 1000000) {
-            sum += i
-        }
-
         val endTime = System.currentTimeMillis()
         val diff = endTime - startTime
 
