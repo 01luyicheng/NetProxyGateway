@@ -242,6 +242,57 @@ jobs:
           fail-on-severity: high  # CVSS>=7.0 gate
 """
 
+# CodeRabbit Major (CI-DEP-1 bypass): a COMMENT mentioning the action name
+# must NOT satisfy the guard. The old substring check on `body_text` would
+# pass here because `actions/dependency-review-action` appears in a comment,
+# even though no real `uses:` step exists. Must FAIL.
+BYPASS_COMMENT_ONLY = """\
+name: PR Checks
+jobs:
+  dependency-review:
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    steps:
+      - uses: actions/checkout@v5
+      # uses: actions/dependency-review-action@v4 — remember to re-add
+      - name: Placeholder
+        uses: some-other/action@v1
+"""
+
+# CodeRabbit Major (CI-DEP-1 bypass): a SIMILAR action name must NOT satisfy
+# the guard. `actions/dependency-review-action-foo@v1` is a different action
+# (note the `-foo` suffix). The old substring check matched because
+# `actions/dependency-review-action` is a prefix. Must FAIL.
+BYPASS_SIMILAR_ACTION = """\
+name: PR Checks
+jobs:
+  dependency-review:
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Dependency review (fake)
+        uses: actions/dependency-review-action-foo@v1
+        with:
+          fail-on-severity: high
+"""
+
+# CodeRabbit Major (CI-DEP-1 bypass): `fail-on-severity` in an UNRELATED step
+# must NOT satisfy the guard when the real `uses:` step is absent. The old
+# code scanned all of `job_body` for `fail-on-severity`, so an attacker could
+# remove the real action step and keep `fail-on-severity` in a placeholder
+# step to fool the guard. Must FAIL.
+BYPASS_SEVERITY_IN_UNRELATED_STEP = """\
+name: PR Checks
+jobs:
+  dependency-review:
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Some other step
+        uses: some-other/action@v1
+        with:
+          fail-on-severity: high
+"""
+
 
 class CheckDependencyReviewTests(unittest.TestCase):
     def test_dev_baseline_passes(self) -> None:
@@ -346,6 +397,38 @@ class CheckDependencyReviewTests(unittest.TestCase):
             m.check_dependency_review(path),
             [],
             "fail-on-severity with inline comment must not be a false positive (H5)",
+        )
+
+    def test_bypass_comment_only_fails(self) -> None:
+        """CodeRabbit Major: a comment mentioning the action must not satisfy
+        the guard. The old substring check on `body_text` passed here."""
+        path = _write_yaml(BYPASS_COMMENT_ONLY)
+        failures = m.check_dependency_review(path)
+        self.assertTrue(
+            any("does not use" in f for f in failures),
+            f"expected 'does not use' for comment-only bypass, got: {failures}",
+        )
+
+    def test_bypass_similar_action_fails(self) -> None:
+        """CodeRabbit Major: a similar action name (e.g. `...-foo@...`) must
+        not satisfy the guard. The old substring check matched the prefix."""
+        path = _write_yaml(BYPASS_SIMILAR_ACTION)
+        failures = m.check_dependency_review(path)
+        self.assertTrue(
+            any("does not use" in f for f in failures),
+            f"expected 'does not use' for similar-action bypass, got: {failures}",
+        )
+
+    def test_bypass_severity_in_unrelated_step_fails(self) -> None:
+        """CodeRabbit Major: `fail-on-severity` in an unrelated step must not
+        satisfy the guard when the real `uses:` step is absent. The old code
+        scanned all of `job_body` for `fail-on-severity`."""
+        path = _write_yaml(BYPASS_SEVERITY_IN_UNRELATED_STEP)
+        failures = m.check_dependency_review(path)
+        self.assertTrue(
+            any("does not use" in f for f in failures),
+            f"expected 'does not use' for unrelated-step severity bypass, "
+            f"got: {failures}",
         )
 
 

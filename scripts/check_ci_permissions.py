@@ -156,20 +156,95 @@ DEPENDENCY_REVIEW_ACTION = "actions/dependency-review-action"
 _ACCEPTABLE_SEVERITIES = {"low", "moderate", "high"}
 
 
+def _parse_steps(job_body: list[str]) -> list[list[str]]:
+    """Split a job body into steps (each a list of stripped lines).
+
+    A step starts with a `- ` list item and accumulates subsequent lines
+    until the next `- ` or end of the job body. Used by the dep-review
+    guard to bind `uses:`, `fail-on-severity`, and `continue-on-error:` to
+    the SAME step, eliminating bypass paths where an attacker satisfies
+    each check from a different (unrelated) step or from a comment
+    (CodeRabbit Major, CI-DEP-1).
+    """
+    cur_step_lines: list[str] = []
+    steps: list[list[str]] = []
+    for raw in job_body:
+        s = raw.strip()
+        if s.startswith("- "):
+            if cur_step_lines:
+                steps.append(cur_step_lines)
+            cur_step_lines = [s]
+        elif cur_step_lines:
+            cur_step_lines.append(s)
+    if cur_step_lines:
+        steps.append(cur_step_lines)
+    return steps
+
+
+def _step_has_exact_uses(step_lines: list[str], action: str) -> bool:
+    """Return True if a step has an EXACT `uses: <action>@<version>` line.
+
+    Exact match (not substring) so that:
+      - `actions/dependency-review-action-foo@...` is REJECTED (the action
+        name differs — `dependency-review-action-foo`, not
+        `dependency-review-action`);
+      - comment lines like `# uses: actions/dependency-review-action@...`
+        are REJECTED (they do not start with `uses:`);
+      - the value must be `<action>` immediately followed by `@<version>`.
+
+    This closes the CodeRabbit Major bypass where a comment, a similar
+    action name, or a reference in an unrelated step could satisfy the old
+    `DEPENDENCY_REVIEW_ACTION in body_text` substring check while the real
+    action was removed.
+    """
+    prefix = f"{action}@"
+    for line in step_lines:
+        s = line.strip()
+        if not s.startswith("uses:"):
+            continue
+        _, _, val = s.partition(":")
+        # Strip inline comment and surrounding whitespace / quotes.
+        val = val.split(" #", 1)[0].strip().strip("\"'")
+        # Exact match: action name immediately followed by @<non-empty>.
+        if val.startswith(prefix) and len(val) > len(prefix):
+            return True
+    return False
+
+
+def _step_get_value(step_lines: list[str], key: str) -> str | None:
+    """Extract the value of `key:` from a step's lines (first match).
+
+    Inline ` #...` comments are stripped so that
+    `fail-on-severity: high  # comment` yields `high`. Returns the value
+    with surrounding whitespace removed, or None if the key is absent.
+    """
+    for line in step_lines:
+        s = line.strip()
+        if not s.startswith(f"{key}:"):
+            continue
+        _, _, val = s.partition(":")
+        val = val.split(" #", 1)[0].rstrip().strip()
+        return val
+    return None
+
+
 def check_dependency_review(path: Path) -> list[str]:
     """Assert pr-checks.yml keeps a non-masked dependency-review job.
 
     Verifies:
       1. A job named `dependency-review` exists.
-      2. It uses `actions/dependency-review-action@<any-version>`.
-      3. It sets `fail-on-severity` to `low`, `moderate`, or `high`.
+      2. It has a step with an EXACT `uses: actions/dependency-review-action@<version>`
+         line. A comment, a similar action name (e.g. `...-foo@...`), or a
+         reference in an unrelated step does NOT satisfy this check
+         (CodeRabbit Major, CI-DEP-1).
+      3. That SAME step sets `fail-on-severity` to `low`, `moderate`, or
+         `high` — reading the value from an unrelated step no longer passes.
       4. The job has no job-level `continue-on-error:` (H1) or `if:` (H2)
          directive — either masks or skips the entire job.
-      5. The `Dependency review` step is NOT masked by any
-         `continue-on-error:` key, regardless of value — literal `true`
-         (N90), expression `${{ ... }}` (H3), or trailing-comment form
-         `true  # ...` (H4). All would silently flip a red CVE signal to
-         green.
+      5. The dep-review step itself is NOT masked by any `continue-on-error:`
+         key, regardless of value — literal `true` (N90), expression
+         `${{ ... }}` (H3), or trailing-comment form `true  # ...` (H4). All
+         would silently flip a red CVE signal to green.
 
     Inline ` #...` comments are stripped before value comparison so that
     legitimate configs like `fail-on-severity: high  # comment` are not
@@ -202,37 +277,6 @@ def check_dependency_review(path: Path) -> list[str]:
                 break
         job_body.append(raw)
 
-    body_text = "\n".join(job_body)
-
-    if DEPENDENCY_REVIEW_ACTION not in body_text:
-        failures.append(
-            f"{path.name}: `dependency-review` job does not use "
-            f"{DEPENDENCY_REVIEW_ACTION} (CI-DEP-1). Restore the action."
-        )
-
-    # Verify fail-on-severity is present and at most `high`. Strip inline
-    # ` #...` comments before comparing so that legitimate configs like
-    # `fail-on-severity: high  # comment` are not false positives (H5).
-    fail_sev = None
-    for raw in job_body:
-        s = raw.strip()
-        if s.startswith("fail-on-severity:"):
-            _, _, val = s.partition(":")
-            val = val.split(" #", 1)[0].rstrip()
-            fail_sev = val.strip().strip("\"'").lower()
-            break
-    if fail_sev is None:
-        failures.append(
-            f"{path.name}: `dependency-review` job is missing "
-            f"`fail-on-severity:` (CI-DEP-1). Set it to `high` or stricter."
-        )
-    elif fail_sev not in _ACCEPTABLE_SEVERITIES:
-        failures.append(
-            f"{path.name}: `dependency-review` job has "
-            f"`fail-on-severity: {fail_sev}`; must be one of "
-            f"{sorted(_ACCEPTABLE_SEVERITIES)} (CI-DEP-1)."
-        )
-
     # H1 + H2: scan for job-level `continue-on-error:` or `if:` keys at
     # indent 4 (job-body keys). Either directive masks or skips the entire
     # dep-review job, defeating the CI-DEP-1 gate. The check is on key
@@ -256,43 +300,62 @@ def check_dependency_review(path: Path) -> list[str]:
                 f"run unconditionally. Remove the `if:` directive."
             )
 
-    # H3 + H4: detect ANY `continue-on-error:` key on the dependency-review
-    # step. Walk the body line-by-line, tracking step boundaries (list items
-    # starting with `- `). A step's properties (uses:, continue-on-error:,
-    # etc.) may span multiple lines until the next `- ` or end of the job
-    # body. Detection is on key presence alone — covers literal `true`
-    # (N90), expression `${{ ... }}` (H3), and trailing-comment form
-    # `true  # ...` (H4).
-    cur_step_lines: list[str] = []
-    steps: list[list[str]] = []
-    for raw in job_body:
-        s = raw.strip()
-        if s.startswith("- "):
-            if cur_step_lines:
-                steps.append(cur_step_lines)
-            cur_step_lines = [s]
-        elif cur_step_lines:
-            # Only accumulate while we're inside a steps: list (indent-based).
-            cur_step_lines.append(s)
-    if cur_step_lines:
-        steps.append(cur_step_lines)
-
+    # Parse steps and bind ALL per-step checks to the SAME step that has an
+    # exact `uses: actions/dependency-review-action@<version>` line. This
+    # closes the CodeRabbit Major bypass where the old substring check on
+    # `body_text` could be satisfied by a comment, a similar action name
+    # (e.g. `actions/dependency-review-action-foo@...`), or a reference in
+    # an unrelated step; and `fail-on-severity` could be read from a
+    # different unrelated step.
+    steps = _parse_steps(job_body)
+    dep_review_step: list[str] | None = None
     for step_lines in steps:
-        joined = "\n".join(step_lines)
-        if DEPENDENCY_REVIEW_ACTION in joined:
-            for line in step_lines:
-                if line.startswith("continue-on-error:"):
-                    _, _, val = line.partition(":")
-                    # Strip inline comment so the reported value is clean
-                    # (H4: `true  # reason` -> `true`).
-                    val = val.split(" #", 1)[0].rstrip().strip()
-                    failures.append(
-                        f"{path.name}: `dependency-review` step is masked "
-                        f"by `continue-on-error:` (value='{val}', "
-                        f"N90/CI-DEP-1/H3/H4). This silently flips a red "
-                        f"CVE signal to green. Remove the directive."
-                    )
-                    break
+        if _step_has_exact_uses(step_lines, DEPENDENCY_REVIEW_ACTION):
+            dep_review_step = step_lines
+            break
+
+    if dep_review_step is None:
+        failures.append(
+            f"{path.name}: `dependency-review` job does not use "
+            f"{DEPENDENCY_REVIEW_ACTION} via an exact "
+            f"`uses: {DEPENDENCY_REVIEW_ACTION}@<version>` step "
+            f"(CI-DEP-1). A comment, a similar action name, or a reference "
+            f"in an unrelated step no longer satisfies this check. Restore "
+            f"the action."
+        )
+    else:
+        # fail-on-severity must come from the SAME step (not any step).
+        # Strip inline ` #...` comments before comparing so that legitimate
+        # configs like `fail-on-severity: high  # comment` are not false
+        # positives (H5).
+        fail_sev_raw = _step_get_value(dep_review_step, "fail-on-severity")
+        if fail_sev_raw is None:
+            failures.append(
+                f"{path.name}: `dependency-review` step is missing "
+                f"`fail-on-severity:` (CI-DEP-1). Set it to `high` or "
+                f"stricter."
+            )
+        else:
+            fail_sev = fail_sev_raw.strip("\"'").lower()
+            if fail_sev not in _ACCEPTABLE_SEVERITIES:
+                failures.append(
+                    f"{path.name}: `dependency-review` step has "
+                    f"`fail-on-severity: {fail_sev}`; must be one of "
+                    f"{sorted(_ACCEPTABLE_SEVERITIES)} (CI-DEP-1)."
+                )
+
+        # H3 + H4: `continue-on-error:` on the dep-review step itself
+        # silently flips a red CVE signal to green. Detection is on key
+        # presence alone — covers literal `true` (N90), expression
+        # `${{ ... }}` (H3), and trailing-comment form `true  # ...` (H4).
+        coe_val = _step_get_value(dep_review_step, "continue-on-error")
+        if coe_val is not None:
+            failures.append(
+                f"{path.name}: `dependency-review` step is masked "
+                f"by `continue-on-error:` (value='{coe_val}', "
+                f"N90/CI-DEP-1/H3/H4). This silently flips a red "
+                f"CVE signal to green. Remove the directive."
+            )
 
     return failures
 
