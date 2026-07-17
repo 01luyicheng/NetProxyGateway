@@ -1924,4 +1924,64 @@
 - **建议修复**: 先在 CI 上收集 `govulncheck` 基线（保留 `continue-on-error` 但记录输出），清零后收紧为硬门禁。或对 `govulncheck` 添加 `fail-on-severity` 类过滤（仅 CVSS≥9.0 失败），与 Android 侧 `failBuildOnCVSS = 9.0f` 对齐。ADR-006 L294 的 "质量检查渐进收紧" 策略应明确包含 `govulncheck`。
 - **关联**: CI-MASK-1、CI-MASK-2、ADR-006 L294。
 
+### CACHE-RESTORE-1: self-hosted runner 上 `actions/cache@v4` 恢复 Go module/build cache 时 tar 解压 "Cannot open: File exists" 警告 [已修复]
+- **状态**: 已修复（PR #81 unmask CI-MASK-1 后暴露并修复）
+- **影响文件**: `.github/workflows/go-ci.yml`（L88-97，新增 "Clean residual Go cache directories" step）
+- **问题描述**: self-hosted runner（`runs-on: [self-hosted, Linux, X64, do-sfo3]`）上 `/tmp/go-mod-${component}` 与 `/tmp/go-build-${component}` 在 job 之间持久存在（`/tmp` 不像 GitHub-hosted runner 那样每次清理）。`actions/cache@v4` 在 cache hit 时用 `tar -xzf` 解压缓存到目标路径，遇到已存在的同名文件会输出 `##[error]/usr/bin/tar: .../xxx.go: Cannot open: File exists` 并以 exit code 2 失败，但 `actions/cache@v4` 把它降级为 `##[warning]Failed to restore`（cache step conclusion 仍为 success，不阻塞 build）。后果是 cache 未恢复，每次 build 都重新下载 Go modules（约 30s 浪费）。
+- **触发场景**: 任何 self-hosted runner 上 `actions/cache@v4` 恢复到非空目标目录；`Cleanup build cache` step 只删除 `GOCACHE`（`/tmp/go-build-*`）保留 `GOMODCACHE`（`/tmp/go-mod-*`），放大了下次 cache restore 的冲突概率。
+- **修复**: 在 `Cache Go modules and build cache` step 之前新增 `Clean residual Go cache directories` step，无条件 `rm -rf /tmp/go-mod-${component} /tmp/go-build-${component}`，确保 cache restore 从空目录开始。
+- **验证**: 修复前 PR #81 的 7 个 Go Server Build job 全部 FAILURE（但**根因是 MAKE-MISSING-1 而非本条目**——cache step 实际仍为 success，build step 因 `make: command not found` 失败）。修复后预期 cache warning 消除、module cache 正常恢复。
+- **修复难度**: 低。新增 1 个 step，3 行 YAML（含 7 行注释，外加 chmod 一行）。
+- **关联**: CI-MASK-1（unmask 暴露此问题）、MAKE-MISSING-1（真正导致 Go CI 失败的根因）、CI-MASK-3（同 mask 链路上的 govulncheck）。
+
+### MAKE-MISSING-1: self-hosted runner 上 `make` 命令未安装且 sudo 无 NOPASSWD 导致 Go CI 与 ci-config-guard 失败 [已修复]
+- **状态**: 已修复（PR #81 unmask CI-MASK-1 后暴露并修复）
+- **影响文件**: `.github/workflows/go-ci.yml`（L128-176，删除 "Ensure make is installed" step，Build/Test/Quality step 改为直接调用 go 命令）、`.github/workflows/pr-checks.yml`（L48-64，ci-config-guard 改为直接调用 python3）
+- **问题描述**: self-hosted runner（`runs-on: [self-hosted, Linux, X64, do-sfo3]`）上未预装 `make` 命令，且 `runner` 用户没有 NOPASSWD sudo 权限（`sudo: a password is required`）。`go-ci.yml` 原本调用 `make go-build-component` / `make go-test-component` / `make go-quality-component`（Makefile 通过 `comp_path()` 解析 `server/shared/*` 与 `server/*` 的路径），每个 Go matrix job 的 build step 报 `line 1: make: command not found` 并以 exit code 127 失败。`pr-checks.yml` 的 `ci-config-guard` 调用 `make ci-perms-check` 同样失败。CI-MASK-1 unmask 后立刻暴露为 7 个 Go matrix job + ci-config-guard 全部 FAILURE。
+- **触发场景**: 任何调用 `make go-*-component` 的 Go CI job 或调用 `make ci-perms-check` 的 ci-config-guard job。
+- **修复**: 不再依赖 make，直接在 workflow 中内联等价命令：
+  - `go-ci.yml` Build step：`working-directory: ${{ matrix.path }}` + `go build -v ./...`（matrix.path 已提供完整路径，无需 Makefile 的 `comp_path()`）
+  - `go-ci.yml` Test step：`working-directory: ${{ matrix.path }}` + `go test -v -coverprofile=coverage.out ./...`
+  - `go-ci.yml` Quality step：内联 gofmt/vet/mod-tidy 逻辑（与 Makefile `go-quality-component` 一致）
+  - `pr-checks.yml` ci-config-guard：`python3 scripts/check_ci_permissions.py`（Makefile `ci-perms-check` 的等价命令）
+- **验证**: 修复前 7 个 Go matrix job 的 build step 全部 `exit code 127` + ci-config-guard `sudo: a password is required`（已通过 `gh run view 29589488519 --log-failed` 与 `gh run view 29589488535 --log-failed` 交叉验证）。修复后预期所有 Go matrix job 与 ci-config-guard 通过。
+- **修复难度**: 中。删除 1 个 step（Ensure make），重写 3 个 step 的 run 命令（Build/Test/Quality），1 个 step 改用 python3。
+- **根因**: runner provision 缺口（do-sfo3 droplet 镜像未包含 build-essential，且 runner 用户无 NOPASSWD sudo）。长期方案是在 runner provision 脚本中预装 `build-essential` 并配置 NOPASSWD sudo，本 PR 的"绕过 make"是更可靠的永久方案——CI 不应依赖 runner provision，workflow 应自包含。
+- **关联**: CI-MASK-1（unmask 暴露此问题）、CACHE-RESTORE-1（同 PR 同步修复的次要 warning）。
+
+### DEP-REVIEW-1: dependency-review job 失败因为 GitHub Dependency Graph 与 Advanced Security 未启用 [待评估]
+- **状态**: 待评估（PR #81 暴露但未修复，需仓库管理员在 GitHub Settings 启用）
+- **影响文件**: `.github/workflows/pr-checks.yml`（L32-42，dependency-review job）、GitHub 仓库 `01luyicheng/NetProxyGateway` 的 Settings → Security → Security overview
+- **问题描述**: `pr-checks.yml` 的 `dependency-review` job 调用 `actions/dependency-review-action@v4`，但仓库未启用 GitHub Dependency Graph 与 Advanced Security，导致 action 报错：`Dependency review is not supported on this repository. Please ensure that Dependency graph is enabled along with GitHub Advanced Security`。
+- **触发场景**: 任何触发 dependency-review job 的 PR。
+- **风险**: **中-高**（安全）。dependency-review 是检测 PR 引入新依赖漏洞的关键门禁，未启用等同于无依赖审查。
+- **建议修复**: 在 GitHub Settings → Code & automation → Code security → Security overview 启用：
+  1. Dependency graph（免费功能，所有 public repo 应启用）
+  2. GitHub Advanced Security（需付费 license 或 public repo 免费）
+  - 或：如果暂时无法启用 GHAS，把 `dependency-review` job 改为 `continue-on-error: true` 并加注释说明，但这样会失去依赖审查能力。
+- **关联**: CI-DEP-1（required status checks 未启用是此问题长期未被发现的结构性原因之一）。
+
+### MAINSCREEN-DUP-IMPORT-1: `MainScreen.kt` 存在重复 import 导致 `compileDebugKotlin` 失败 [已修复]
+- **状态**: 已修复（PR #81 unmask CI-MASK-2 后暴露并修复）
+- **影响文件**: `android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt`（删除 L22 重复 `KeyboardActions` import 与 L43 重复 `LocalFocusManager` import）
+- **问题描述**: `MainScreen.kt` 同时存在两组重复 import（基于 dev 分支原始行号）：
+  - L20 与 L22：`import androidx.compose.foundation.text.KeyboardActions`
+  - L43 与 L45：`import androidx.compose.ui.platform.LocalFocusManager`
+  Kotlin 编译器报 `Conflicting import: imported name 'KeyboardActions' is ambiguous.`（CI 日志只输出第一处冲突，第二处 LocalFocusManager 因 Kotlin 编译器去重策略未单独报错但客观存在），`compileDebugKotlin` FAILED → `assembleDebug` FAILED → Android CI 红。dev 分支最近 5 次 Android CI run 全部 failure（自 PR #78 `🎨 Palette: 改进配对码输入的键盘交互` 起即开始失败），但被 `lintDebug`/`dependencyCheckAnalyze` 的 `continue-on-error: true`（CI-MASK-2）掩盖为"绿"——实际 `Build with Gradle` step 从未加 `continue-on-error`，但 PR 合并时未把 Android CI 列入 required status checks，故仍能合并。
+- **触发场景**: 任何触发 `./android/gradlew -p android assembleDebug` 的 PR；自 PR #78 起每个 Android PR 的 CI 都失败，但因 required status checks 未启用而未阻塞合并。
+- **修复**: 删除 L22（重复 `KeyboardActions`）与 L43（重复 `LocalFocusManager` 第一处），保留 L20 `KeyboardActions` 与 L45 `LocalFocusManager`（删除 L22 与 L43 后 L45 上移到 L43，共 -2 行位移，仍保持 `LocalContext` 在前 `LocalFocusManager` 在后的字母序）。`git diff` 共 -2 行，无新增逻辑。
+- **验证**: 修复前 `e: file:///.../MainScreen.kt:20:41 Conflicting import` × 2，`compileDebugKotlin FAILED`；修复后预期 `assembleDebug` 通过。
+- **修复难度**: 低。删除 2 行重复 import。
+- **关联**: CI-MASK-2（unmask 暴露此问题）、CI-DEP-1（required status checks 缺口是此问题长期未被发现的结构性原因之一）。
+
+### CI-DEP-1: GitHub required status checks 未启用，允许 CI 失败的 PR 合并 [待评估]
+- **状态**: 待评估（PR #81 暴露但未修复，需独立 PR 处理 branch protection 配置）
+- **影响文件**: GitHub 仓库 `01luyicheng/NetProxyGateway` 的 branch protection rules（不在仓库代码内）
+- **问题描述**: `dev`/`main` 分支的 branch protection 未把 `Go CI`/`Android CI` 列为 required status checks。这导致 MAINSCREEN-DUP-IMPORT-1 自 PR #78（2026-07-11 合并）起让 dev 分支最近 5 次 Android CI 全部 failure，但 PR 仍能合并。同样地，CACHE-RESTORE-1 与 MAKE-MISSING-1 在 dev 上长期被 CI-MASK-1 掩盖（CI 显示为 success），即便 required status checks 启用也无法发现。
+- **触发场景**: 任何 PR 合并到 `dev` 或 `main`。
+- **风险**: **高**。CI 失败的 PR 可直接合并，违背 AGENTS.md 第 7 节"验证门禁（必须通过）"约定。
+- **建议修复**: 在 GitHub Settings → Branches → Branch protection rules 中为 `dev`/`main` 启用 "Require status checks to pass before merging"，并把 `Go Server Build (api)`、`Go Server Build (socks5-proxy)`、`Go Server Build (tunnel)`、`Go Server Build (httpclient)`、`Go Server Build (ratelimit)`、`Go Server Build (recovery)`、`Go Server Build (stringutil)`、`Android Build & Test`、`ci-config-guard` 列为 required。注意必须先让 dev 上的 CI 全绿才能启用，否则现有失败 PR 会全部阻塞。**前置依赖**：需先修复 DEP-REVIEW-1（dependency-review job 当前失败），否则启用 required 后所有 PR 会被 dependency-review 阻塞。
+- **关联**: CI-MASK-1、CI-MASK-2、MAINSCREEN-DUP-IMPORT-1、CACHE-RESTORE-1、MAKE-MISSING-1、DEP-REVIEW-1。
+
+
 

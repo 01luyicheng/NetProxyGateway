@@ -49,10 +49,16 @@ jobs:
     name: CI config guard
     runs-on: [self-hosted, Linux, X64, do-sfo3]
     timeout-minutes: 5
-    permissions: contents: read
+    permissions:
+      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
 
+      # Calls `python3 scripts/check_ci_permissions.py` directly instead of
+      # `make ci-perms-check` because the self-hosted runner does not have
+      # `make` installed and lacks NOPASSWD sudo to apt-get install it.
+      # The Makefile target remains for local dev convenience.
+      # See docs/ISSUES.md MAKE-MISSING-1.
       - name: Verify CI workflow configuration
-        run: make ci-perms-check
+        run: python3 scripts/check_ci_permissions.py
