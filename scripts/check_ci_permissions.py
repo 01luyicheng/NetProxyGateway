@@ -130,6 +130,236 @@ def check_file(path: Path) -> list[str]:
     return failures
 
 
+# ---------------------------------------------------------------------------
+# CI-DEP-1 regression guard
+# ---------------------------------------------------------------------------
+# Asserts that `.github/workflows/pr-checks.yml` retains a `dependency-review`
+# job using `actions/dependency-review-action` with `fail-on-severity` of at
+# most `high` (i.e. `low`, `moderate`, or `high`). This job is the ONLY
+# universally-triggered, non-masked, CVSS>=7.0 dependency-CVE gate covering
+# both the Go and Android ecosystems on every PR.
+#
+# Other gates are insufficient on their own:
+#   - go-ci.yml `govulncheck` step is masked (`continue-on-error: true`) per
+#     CI-MASK-3 (see docs/ISSUES.md).
+#   - android-ci.yml `dependencyCheckAnalyze` only fails at CVSS>=9.0
+#     (`failBuildOnCVSS = 9.0f` in android/app/build.gradle.kts) and was
+#     previously masked per CI-MASK-2.
+#   - security.yml is path-filtered and explicitly "NOT a required check".
+#
+# Removing this job (as PR #71 did in N90, and as PRs #79 / #82 did again)
+# eliminates the only failing-check signal for CVSS 7.0-8.9 dependency CVEs
+# in either ecosystem. See docs/ISSUES.md CI-DEP-1.
+DEPENDENCY_REVIEW_ACTION = "actions/dependency-review-action"
+# Severity thresholds ordered from strictest to most permissive. The guard
+# accepts any value at least as strict as `high`.
+_ACCEPTABLE_SEVERITIES = {"low", "moderate", "high"}
+
+
+def _parse_steps(job_body: list[str]) -> list[list[str]]:
+    """Split a job body into steps (each a list of stripped lines).
+
+    A step starts with a `- ` list item and accumulates subsequent lines
+    until the next `- ` or end of the job body. Used by the dep-review
+    guard to bind `uses:`, `fail-on-severity`, and `continue-on-error:` to
+    the SAME step, eliminating bypass paths where an attacker satisfies
+    each check from a different (unrelated) step or from a comment
+    (CodeRabbit Major, CI-DEP-1).
+    """
+    cur_step_lines: list[str] = []
+    steps: list[list[str]] = []
+    for raw in job_body:
+        s = raw.strip()
+        if s.startswith("- "):
+            if cur_step_lines:
+                steps.append(cur_step_lines)
+            cur_step_lines = [s]
+        elif cur_step_lines:
+            cur_step_lines.append(s)
+    if cur_step_lines:
+        steps.append(cur_step_lines)
+    return steps
+
+
+def _step_has_exact_uses(step_lines: list[str], action: str) -> bool:
+    """Return True if a step has an EXACT `uses: <action>@<version>` line.
+
+    Exact match (not substring) so that:
+      - `actions/dependency-review-action-foo@...` is REJECTED (the action
+        name differs — `dependency-review-action-foo`, not
+        `dependency-review-action`);
+      - comment lines like `# uses: actions/dependency-review-action@...`
+        are REJECTED (they do not start with `uses:`);
+      - the value must be `<action>` immediately followed by `@<version>`.
+
+    This closes the CodeRabbit Major bypass where a comment, a similar
+    action name, or a reference in an unrelated step could satisfy the old
+    `DEPENDENCY_REVIEW_ACTION in body_text` substring check while the real
+    action was removed.
+    """
+    prefix = f"{action}@"
+    for line in step_lines:
+        s = line.strip()
+        if not s.startswith("uses:"):
+            continue
+        _, _, val = s.partition(":")
+        # Strip inline comment and surrounding whitespace / quotes.
+        val = val.split(" #", 1)[0].strip().strip("\"'")
+        # Exact match: action name immediately followed by @<non-empty>.
+        if val.startswith(prefix) and len(val) > len(prefix):
+            return True
+    return False
+
+
+def _step_get_value(step_lines: list[str], key: str) -> str | None:
+    """Extract the value of `key:` from a step's lines (first match).
+
+    Inline ` #...` comments are stripped so that
+    `fail-on-severity: high  # comment` yields `high`. Returns the value
+    with surrounding whitespace removed, or None if the key is absent.
+    """
+    for line in step_lines:
+        s = line.strip()
+        if not s.startswith(f"{key}:"):
+            continue
+        _, _, val = s.partition(":")
+        val = val.split(" #", 1)[0].rstrip().strip()
+        return val
+    return None
+
+
+def check_dependency_review(path: Path) -> list[str]:
+    """Assert pr-checks.yml keeps a non-masked dependency-review job.
+
+    Verifies:
+      1. A job named `dependency-review` exists.
+      2. It has a step with an EXACT `uses: actions/dependency-review-action@<version>`
+         line. A comment, a similar action name (e.g. `...-foo@...`), or a
+         reference in an unrelated step does NOT satisfy this check
+         (CodeRabbit Major, CI-DEP-1).
+      3. That SAME step sets `fail-on-severity` to `low`, `moderate`, or
+         `high` — reading the value from an unrelated step no longer passes.
+      4. The job has no job-level `continue-on-error:` (H1) or `if:` (H2)
+         directive — either masks or skips the entire job.
+      5. The dep-review step itself is NOT masked by any `continue-on-error:`
+         key, regardless of value — literal `true` (N90), expression
+         `${{ ... }}` (H3), or trailing-comment form `true  # ...` (H4). All
+         would silently flip a red CVE signal to green.
+
+    Inline ` #...` comments are stripped before value comparison so that
+    legitimate configs like `fail-on-severity: high  # comment` are not
+    flagged as false positives (H5).
+    """
+    failures: list[str] = []
+    text = path.read_text()
+    lines = text.splitlines()
+
+    # Locate the `dependency-review:` job block.
+    job_start: int | None = None
+    for i, raw in enumerate(lines):
+        if raw.startswith("  dependency-review:"):
+            job_start = i
+            break
+    if job_start is None:
+        failures.append(
+            f"{path.name}: `dependency-review` job missing — restores a "
+            f"CVSS>=7.0 dependency-CVE gate (CI-DEP-1). Re-add the job "
+            f"using {DEPENDENCY_REVIEW_ACTION} with `fail-on-severity: high`."
+        )
+        return failures
+
+    # Collect the job body (until the next 2-space-indented key or EOF).
+    job_body: list[str] = []
+    for raw in lines[job_start + 1:]:
+        if raw.startswith("  ") and not raw.startswith("    ") and raw.strip() and not raw.lstrip().startswith("#"):
+            # Next top-level job key (2-space indent, non-blank, non-comment).
+            if raw.endswith(":"):
+                break
+        job_body.append(raw)
+
+    # H1 + H2: scan for job-level `continue-on-error:` or `if:` keys at
+    # indent 4 (job-body keys). Either directive masks or skips the entire
+    # dep-review job, defeating the CI-DEP-1 gate. The check is on key
+    # presence alone — any value (true, false, expression, or comment) is
+    # suspect because the directive itself is wrong for this job.
+    for raw in job_body:
+        # Indent exactly 4 (job-body keys), not 6+ (steps / step keys).
+        if not raw.startswith("    ") or raw.startswith("      "):
+            continue
+        s = raw.strip()
+        if s.startswith("continue-on-error:"):
+            failures.append(
+                f"{path.name}: `dependency-review` job has a job-level "
+                f"`continue-on-error:` directive (CI-DEP-1/H1). This "
+                f"masks the entire job. Remove the directive."
+            )
+        elif s.startswith("if:"):
+            failures.append(
+                f"{path.name}: `dependency-review` job has a job-level "
+                f"`if:` condition (CI-DEP-1/H2). The dep-review job must "
+                f"run unconditionally. Remove the `if:` directive."
+            )
+
+    # Parse steps and bind ALL per-step checks to the SAME step that has an
+    # exact `uses: actions/dependency-review-action@<version>` line. This
+    # closes the CodeRabbit Major bypass where the old substring check on
+    # `body_text` could be satisfied by a comment, a similar action name
+    # (e.g. `actions/dependency-review-action-foo@...`), or a reference in
+    # an unrelated step; and `fail-on-severity` could be read from a
+    # different unrelated step.
+    steps = _parse_steps(job_body)
+    dep_review_step: list[str] | None = None
+    for step_lines in steps:
+        if _step_has_exact_uses(step_lines, DEPENDENCY_REVIEW_ACTION):
+            dep_review_step = step_lines
+            break
+
+    if dep_review_step is None:
+        failures.append(
+            f"{path.name}: `dependency-review` job does not use "
+            f"{DEPENDENCY_REVIEW_ACTION} via an exact "
+            f"`uses: {DEPENDENCY_REVIEW_ACTION}@<version>` step "
+            f"(CI-DEP-1). A comment, a similar action name, or a reference "
+            f"in an unrelated step no longer satisfies this check. Restore "
+            f"the action."
+        )
+    else:
+        # fail-on-severity must come from the SAME step (not any step).
+        # Strip inline ` #...` comments before comparing so that legitimate
+        # configs like `fail-on-severity: high  # comment` are not false
+        # positives (H5).
+        fail_sev_raw = _step_get_value(dep_review_step, "fail-on-severity")
+        if fail_sev_raw is None:
+            failures.append(
+                f"{path.name}: `dependency-review` step is missing "
+                f"`fail-on-severity:` (CI-DEP-1). Set it to `high` or "
+                f"stricter."
+            )
+        else:
+            fail_sev = fail_sev_raw.strip("\"'").lower()
+            if fail_sev not in _ACCEPTABLE_SEVERITIES:
+                failures.append(
+                    f"{path.name}: `dependency-review` step has "
+                    f"`fail-on-severity: {fail_sev}`; must be one of "
+                    f"{sorted(_ACCEPTABLE_SEVERITIES)} (CI-DEP-1)."
+                )
+
+        # H3 + H4: `continue-on-error:` on the dep-review step itself
+        # silently flips a red CVE signal to green. Detection is on key
+        # presence alone — covers literal `true` (N90), expression
+        # `${{ ... }}` (H3), and trailing-comment form `true  # ...` (H4).
+        coe_val = _step_get_value(dep_review_step, "continue-on-error")
+        if coe_val is not None:
+            failures.append(
+                f"{path.name}: `dependency-review` step is masked "
+                f"by `continue-on-error:` (value='{coe_val}', "
+                f"N90/CI-DEP-1/H3/H4). This silently flips a red "
+                f"CVE signal to green. Remove the directive."
+            )
+
+    return failures
+
+
 def main() -> int:
     targets = ["android-ci.yml", "go-ci.yml"]
     all_failures: list[str] = []
@@ -139,7 +369,13 @@ def main() -> int:
             all_failures.append(f"{name}: workflow file missing")
             continue
         all_failures.extend(check_file(path))
-        all_failures.extend(check_masking(path))
+
+    # CI-DEP-1 guard: dependency-review job must remain in pr-checks.yml.
+    pr_checks = WORKFLOWS_DIR / "pr-checks.yml"
+    if not pr_checks.exists():
+        all_failures.append("pr-checks.yml: workflow file missing")
+    else:
+        all_failures.extend(check_dependency_review(pr_checks))
 
     if all_failures:
         print("FAIL: CI configuration regression detected:")
@@ -148,123 +384,13 @@ def main() -> int:
         return 1
 
     print("OK: every dorny/paths-filter job has job-level 'pull-requests: read'.")
+    print("OK: pr-checks.yml retains a non-masked dependency-review job (CI-DEP-1).")
     for name in targets:
         jobs = _parse_jobs((WORKFLOWS_DIR / name).read_text())
         for jname, info in jobs.items():
             if info["filter"]:
                 print(f"  {name} :: {jname} -> {sorted(info['perms'])}")
-    print("OK: no critical build/test/lint/dep-check step is masked by continue-on-error.")
     return 0
-
-
-# ---------------------------------------------------------------------------
-# CI-MASK-1 / CI-MASK-2 regression guard
-# ---------------------------------------------------------------------------
-# Asserts that critical hard-gate steps are NOT masked by `continue-on-error:
-# true`. The following steps must NEVER be masked (a `continue-on-error: true`
-# on them silently turns build/test/lint/dep-check failures into CI success,
-# defeating the merge gate):
-#
-#   go-ci.yml:
-#     - step running `make go-build-component`  (go build — HARD GATE)
-#     - step running `make go-test-component`   (go test  — HARD GATE)
-#   android-ci.yml:
-#     - step running `lintDebug`                 (Lint — HARD GATE, abortOnError=false)
-#     - step running `dependencyCheckAnalyze`    (CVSS>=9.0 vuln gate)
-#
-# Masked-but-allowed (documented): go-quality-component (ADR-006 baseline),
-# govulncheck (baseline), testDebugUnitTest (N87), jacocoTestReport (N87
-# downstream). See docs/ISSUES.md CI-MASK-1 / CI-MASK-2.
-
-# Map of workflow filename -> dict {step-run-substring: reason}.
-# A step whose `run:` value contains the substring AND has
-# `continue-on-error: true` triggers a failure.
-MUST_NOT_MASK = {
-    "go-ci.yml": {
-        "go-ci-component": "go-ci-component chains build+test+quality in one recipe; masking it re-introduces CI-MASK-1",
-        "go-build-component": "go build is a HARD GATE (CI-MASK-1)",
-        "go-test-component": "go test is a HARD GATE (CI-MASK-1)",
-    },
-    "android-ci.yml": {
-        "lintDebug": "Lint is a HARD GATE (CI-MASK-2); abortOnError=false keeps it green",
-        "dependencyCheckAnalyze": "dependency vulnerability check is the only CVSS>=9.0 gate (CI-MASK-2)",
-    },
-}
-
-
-def _parse_steps(text: str):
-    """Yield {name, run, masked} for each step in the first `steps:` block.
-
-    Minimal indentation-aware parser: step list items at col 6, step keys at
-    col 8. Tracks `name:`, `run:` and `continue-on-error:` for each step.
-    """
-    cur: dict | None = None
-    in_steps = False
-    for raw in text.splitlines():
-        if not raw.strip() or raw.lstrip().startswith("#"):
-            continue
-        indent = len(raw) - len(raw.lstrip(" "))
-        content = raw.strip()
-
-        if indent == 4 and content == "steps:":
-            in_steps = True
-            continue
-        if not in_steps:
-            continue
-        # Leaving the steps block (any key at indent <= 4 that isn't steps:)
-        if indent <= 4 and content != "steps:":
-            if cur is not None:
-                yield cur
-                cur = None
-            in_steps = False
-            continue
-
-        # New step list item: "- name:" or "-" at indent 6
-        if indent == 6 and content.startswith("-"):
-            if cur is not None:
-                yield cur
-            cur = {"name": "", "run": "", "masked": False}
-            # Inline "- name: foo" form
-            inline = content[1:].strip()
-            if inline.startswith("name:"):
-                cur["name"] = inline.split(":", 1)[1].strip().strip('"\'')
-            continue
-        if cur is None:
-            continue
-
-        # Step keys at indent 8
-        if indent == 8 and ":" in content:
-            key, _, val = content.partition(":")
-            key = key.strip()
-            # Strip inline comments (e.g. "true  # rationale" -> "true").
-            # YAML requires whitespace before # to start a comment.
-            val = val.split(" #", 1)[0].rstrip()
-            val = val.strip()
-            if key == "name":
-                cur["name"] = val.strip('"\'')
-            elif key == "run":
-                cur["run"] = val
-            elif key == "continue-on-error":
-                cur["masked"] = val.lower() in ("true", "yes", "on")
-    if cur is not None:
-        yield cur
-
-
-def check_masking(path: Path) -> list[str]:
-    failures: list[str] = []
-    rules = MUST_NOT_MASK.get(path.name)
-    if not rules:
-        return failures
-    for step in _parse_steps(path.read_text()):
-        for substring, reason in rules.items():
-            if substring in step["run"] and step["masked"]:
-                label = step["name"] or f"step running {step['run']!r}"
-                failures.append(
-                    f"{path.name}: step '{label}' runs '{substring}' but has "
-                    f"continue-on-error: true — {reason}. Remove "
-                    f"continue-on-error from this step."
-                )
-    return failures
 
 
 if __name__ == "__main__":
