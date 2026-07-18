@@ -2001,5 +2001,18 @@
 - **AI 执行决策指引**: **不要尝试修复此问题**。如果有人提议"硬编码 CGO_ENABLED=1"、"安装 gcc"、"切换到 modernc.org/sqlite"，应指向本条目并拒绝。等到 self-hosted runner 切换回 GitHub runners 即可。
 - **关联**: CI-MASK-1（unmask 暴露此问题）、MAKE-MISSING-1（同 PR #81 CI 修复链）、CI-DEP-1（required status checks 未启用让此问题不阻塞合并，反而让 dev 能继续推进）。
 
+### CI-GUARD-BYPASS-S1to3: `check_ci_permissions.py` 的 3 个边缘绕过路径 [未修复 — 低风险]
+- **状态**: 未修复。H1-H5（5 个主要绕过路径）已通过本 PR（基于 PR #96 rebase）关闭并合入 dev；S1-S3 是 subagent 审查发现的边缘绕过，风险低，暂不修复。
+- **修复难度**: 中。需要扩展 `check_dependency_review()` 函数的 YAML 解析逻辑，处理引号键、冒号前空格、伪前置 step 三种边缘情况。
+- **影响文件**: `scripts/check_ci_permissions.py` 的 `check_dependency_review()` 和 `_parse_steps()` 函数 + `scripts/test_check_ci_permissions.py` 新增 3 个测试用例
+- **绕过路径**:
+  - **S1（引号键）**: `'continue-on-error': true`（键用单引号包裹）。YAML 规范允许引号键，PyYAML 解析时作为字符串键。当前 `_parse_steps()` 用 `line.strip().startswith('continue-on-error')` 匹配，引号键会绕过。
+  - **S2（冒号前空格）**: `continue-on-error : true`（键与冒号间有空格）。YAML 规范允许冒号前后空格，PyYAML 接受。当前匹配逻辑不处理这种情况。
+  - **S3（伪前置 step 误导）**: 在 `dependency-review` step 之前放置一个无关 step（如 `- name: Print config` + `run: echo "fail-on-severity: high"`），让 `_parse_steps()` 从无关 step 中提取 `fail-on-severity`，从而让真正的 dependency-review step 缺失该字段也能通过。
+- **风险评估**: 低。三种绕过都需要恶意构造，实际 CI 配置中罕见。`dependency-review` job 当前在 dev 上存在且未被 mask，紧迫性低。
+- **触发场景**: 攻击者（或恶意 bot）提交 PR 试图绕过 dependency-review guard。考虑到 PR #79/#82 的 palette bot 越界删除先例，理论上可能复发，但 palette bot 不会用引号键/冒号空格等边缘语法。
+- **AI 执行决策指引**: 暂不修复。如果未来发现实际绕过尝试，再优先处理。当前 guard 已覆盖 H1-H5 主要绕过路径，足以防止常见的 palette bot 越界。
+- **关联**: CI-DEP-1（dependency-review job 删除防护的原始需求）、CI-MASK-1/2/3（CI masking 系列）。
+
 
 

@@ -1,5 +1,13 @@
-# Lightweight PR checks: commitlint + dependency-review
-# Not a required check — uses paths filter for fine-grained triggering
+# Lightweight PR checks: commitlint + dependency-review.
+#
+# NOTE: This workflow is NOT path-filtered (it triggers on every PR to
+# main/dev). The `dependency-review` job below is the ONLY universally
+# triggered, non-masked, CVSS>=7.0 dependency-CVE gate covering both the Go
+# and Android ecosystems. Do NOT remove it, do NOT add `continue-on-error:
+# true` to its step, and do NOT downgrade `fail-on-severity` beyond `high`.
+# The `scripts/check_ci_permissions.py` guard (run via `ci-config-guard` job
+# below) enforces all three invariants. See `docs/ISSUES.md` CI-DEP-1 / N90
+# for prior regressions.
 name: PR Checks
 
 on:
@@ -36,6 +44,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
 
+      # SECURITY GATE: do NOT add `continue-on-error: true` here.
+      # dependency-review-action with `fail-on-severity: high` must hard-fail
+      # the PR check when a high/critical CVE dependency is introduced.
+      # Adding continue-on-error would silently turn that red signal green
+      # (see docs/ISSUES.md N90 / CI-DEP-1). Removing this job entirely
+      # eliminates the only universally-triggered CVSS>=7.0 dependency-CVE
+      # gate (see docs/ISSUES.md CI-DEP-1, regression in PRs #79 / #82).
+      # The `scripts/check_ci_permissions.py` guard enforces this invariant.
       - name: Dependency review
         uses: actions/dependency-review-action@v4
         with:
