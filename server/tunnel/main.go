@@ -235,6 +235,31 @@ type TunnelManager struct {
 	// dead tunnels have been removed from the map but before closing them or
 	// sending offline notifications. Nil in production.
 	testHookAfterDeadTunnelsRemoved chan struct{}
+	// testHookAfterUnregisterRecheck is used by tests to observe and then pause
+	// Unregister right after the REV32 replacement re-check (and after last_seen
+	// is captured) but before spawning the offline notification goroutine. Nil
+	// in production.
+	testHookAfterUnregisterRecheck *testRecheckHook
+	// testHookAfterDeadTunnelsRecheck is used by tests to observe and then pause
+	// cleanup right after the REV32 replacement re-check (and after last_seen is
+	// captured) but before spawning the offline notification goroutine. Nil in
+	// production.
+	testHookAfterDeadTunnelsRecheck *testRecheckHook
+}
+
+// testRecheckHook lets tests observe (reached) and then pause (hold) a code
+// path immediately after the REV32 replacement re-check and last_seen capture.
+// reached is a buffered signal; hold blocks until the test releases it.
+type testRecheckHook struct {
+	reached chan struct{} // buffered(1); manager non-blocking sends to signal the point was hit
+	hold    chan struct{} // manager blocks on receive; test closes to release
+}
+
+func (h *testRecheckHook) signal() {
+	select {
+	case h.reached <- struct{}{}:
+	default:
+	}
 }
 
 // NewTunnelManager creates a new tunnel manager.
@@ -287,6 +312,11 @@ func (m *TunnelManager) Register(deviceID string, conn *websocket.Conn) *TunnelC
 		oldTunnel = old
 	}
 	m.tunnels[deviceID] = tunnel
+	// Capture the online event timestamp under m.mu so it is always ≤ the
+	// registration instant. This guarantees any concurrent offline notification
+	// whose last_seen was captured at an earlier re-check cannot be newer than
+	// this online notification (REV33 ordering). See REV51.
+	lastSeen := time.Now().UnixMilli()
 	m.mu.Unlock()
 
 	// Close old tunnel outside m.mu to avoid blocking I/O under the lock.
@@ -306,7 +336,7 @@ func (m *TunnelManager) Register(deviceID string, conn *websocket.Conn) *TunnelC
 	}
 	m.wg.Add(1)
 	m.stopMu.Unlock()
-	go m.notifyDeviceStatus(deviceID, "online", "")
+	go m.notifyDeviceStatus(deviceID, "online", "", lastSeen)
 
 	return tunnel
 }
@@ -351,7 +381,20 @@ func (m *TunnelManager) Unregister(deviceID string, tunnel *TunnelConn) {
 		m.mu.RUnlock()
 		return
 	}
+	// Capture the offline event timestamp under m.mu at the re-check instant.
+	// Because the re-check observed no replacement, any Register that happens
+	// later acquires m.mu (write) and captures a strictly newer online
+	// last_seen, so the API's strict `last_seen >` guard will reject this
+	// offline notification. Capturing inside the goroutine instead would let
+	// scheduler delay produce an offline last_seen newer than the online one
+	// (REV51).
+	lastSeen := time.Now().UnixMilli()
 	m.mu.RUnlock()
+
+	if h := m.testHookAfterUnregisterRecheck; h != nil {
+		h.signal()
+		<-h.hold
+	}
 
 	// Check stopped before wg.Add(1) to prevent WaitGroup reuse panic
 	// after Stop() has called wg.Wait().
@@ -362,7 +405,7 @@ func (m *TunnelManager) Unregister(deviceID string, tunnel *TunnelConn) {
 	}
 	m.wg.Add(1)
 	m.stopMu.Unlock()
-	go m.notifyDeviceStatus(deviceID, "offline", "")
+	go m.notifyDeviceStatus(deviceID, "offline", "", lastSeen)
 }
 
 // Get retrieves a tunnel by device ID.
@@ -373,8 +416,12 @@ func (m *TunnelManager) Get(deviceID string) (*TunnelConn, bool) {
 	return tunnel, ok
 }
 
-// notifyDeviceStatus notifies the API of a device status change.
-func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string) {
+// notifyDeviceStatus notifies the API of a device status change. lastSeen is
+// the millisecond Unix timestamp captured at the event-decision instant (under
+// m.mu) by the caller; it must not be re-captured here, otherwise scheduler
+// delay can make an offline notification appear newer than a concurrent online
+// notification and defeat the API's last_seen guard (REV51).
+func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string, lastSeen int64) {
 	m.stopMu.Lock()
 	if m.stopped {
 		m.stopMu.Unlock()
@@ -384,14 +431,11 @@ func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string) 
 	m.stopMu.Unlock()
 
 	defer m.wg.Done()
-	// Capture the event timestamp at notification time so delayed retries do
-	// not accidentally present a fresher wall-clock time than a newer status
-	// already stored by the API (REV33).
 	payload := map[string]any{
 		"device_id":   deviceID,
 		"status":      status,
 		"tunnel_addr": tunnelAddr,
-		"last_seen":   time.Now().UnixMilli(),
+		"last_seen":   lastSeen,
 	}
 
 	data, err := json.Marshal(payload)
@@ -549,7 +593,14 @@ func (m *TunnelManager) cleanupDeadTunnelsOnce() {
 			m.mu.RUnlock()
 			continue
 		}
+		// Capture last_seen at the re-check instant under m.mu (REV51).
+		lastSeen := time.Now().UnixMilli()
 		m.mu.RUnlock()
+
+		if h := m.testHookAfterDeadTunnelsRecheck; h != nil {
+			h.signal()
+			<-h.hold
+		}
 
 		// Check stopped before wg.Add(1) to prevent WaitGroup reuse panic
 		// after Stop() has called wg.Wait(). Same pattern as Register/Unregister. (REV45)
@@ -560,7 +611,7 @@ func (m *TunnelManager) cleanupDeadTunnelsOnce() {
 		}
 		m.wg.Add(1)
 		m.stopMu.Unlock()
-		go m.notifyDeviceStatus(deviceID, "offline", "")
+		go m.notifyDeviceStatus(deviceID, "offline", "", lastSeen)
 	}
 }
 

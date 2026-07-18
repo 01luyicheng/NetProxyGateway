@@ -40,7 +40,7 @@ func TestNotifyDeviceStatusAddsInternalAPIKeyHeader(t *testing.T) {
 	})
 
 	manager.wg.Add(1)
-	manager.notifyDeviceStatus("device-123", "online", "")
+	manager.notifyDeviceStatus("device-123", "online", "", time.Now().UnixMilli())
 
 	waitDone := make(chan struct{})
 	go func() {
@@ -66,7 +66,6 @@ func TestNotifyDeviceStatusIncludesLastSeenTimestamp(t *testing.T) {
 	)
 	wg.Add(1)
 
-	before := time.Now().UnixMilli()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Errorf("failed to decode payload: %v", err)
@@ -79,8 +78,12 @@ func TestNotifyDeviceStatusIncludesLastSeenTimestamp(t *testing.T) {
 
 	manager := NewTunnelManager(&Config{APIEndpoint: server.URL})
 
+	// REV51: last_seen must be the exact value captured by the caller at the
+	// event-decision instant, not re-captured as time.Now() inside the
+	// notification goroutine.
+	wantLastSeen := int64(1700000000123)
 	manager.wg.Add(1)
-	manager.notifyDeviceStatus("device-123", "online", "")
+	manager.notifyDeviceStatus("device-123", "online", "", wantLastSeen)
 
 	waitDone := make(chan struct{})
 	go func() {
@@ -94,8 +97,6 @@ func TestNotifyDeviceStatusIncludesLastSeenTimestamp(t *testing.T) {
 		t.Fatal("timed out waiting for notifyDeviceStatus")
 	}
 
-	after := time.Now().UnixMilli()
-
 	raw, ok := body["last_seen"]
 	if !ok {
 		t.Fatalf("expected payload to contain last_seen, got %v", body)
@@ -104,8 +105,9 @@ func TestNotifyDeviceStatusIncludesLastSeenTimestamp(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected last_seen to be a JSON number, got %T", raw)
 	}
-	if int64(lastSeen) < before || int64(lastSeen) > after {
-		t.Fatalf("last_seen = %d, want between %d and %d", int64(lastSeen), before, after)
+	if int64(lastSeen) != wantLastSeen {
+		t.Fatalf("last_seen = %d, want exactly %d (caller-captured value must be forwarded verbatim)",
+			int64(lastSeen), wantLastSeen)
 	}
 }
 
@@ -135,7 +137,7 @@ func TestNotifyDeviceStatusRetriesAndEventuallySucceeds(t *testing.T) {
 
 	manager := NewTunnelManager(&Config{APIEndpoint: server.URL})
 	manager.wg.Add(1)
-	manager.notifyDeviceStatus("device-123", "online", "")
+	manager.notifyDeviceStatus("device-123", "online", "", time.Now().UnixMilli())
 
 	for i := 0; i < 2; i++ {
 		select {
@@ -179,7 +181,7 @@ func TestNotifyDeviceStatusDoesNotRetryOnBadRequest(t *testing.T) {
 
 	manager := NewTunnelManager(&Config{APIEndpoint: server.URL})
 	manager.wg.Add(1)
-	manager.notifyDeviceStatus("device-123", "online", "")
+	manager.notifyDeviceStatus("device-123", "online", "", time.Now().UnixMilli())
 
 	select {
 	case <-requestSignal:
@@ -649,7 +651,7 @@ func TestNotifyDeviceStatusExhaustsRetries(t *testing.T) {
 
 	manager := NewTunnelManager(&Config{APIEndpoint: server.URL})
 	manager.wg.Add(1)
-	manager.notifyDeviceStatus("device-123", "online", "")
+	manager.notifyDeviceStatus("device-123", "online", "", time.Now().UnixMilli())
 
 	for i := 0; i < 3; i++ {
 		select {
@@ -700,7 +702,7 @@ func TestNotifyDeviceStatusRetriesOnTooManyRequests(t *testing.T) {
 
 	manager := NewTunnelManager(&Config{APIEndpoint: server.URL})
 	manager.wg.Add(1)
-	manager.notifyDeviceStatus("device-123", "online", "")
+	manager.notifyDeviceStatus("device-123", "online", "", time.Now().UnixMilli())
 
 	for i := 0; i < 2; i++ {
 		select {
@@ -859,7 +861,7 @@ func TestNotifyDeviceStatusNoRaceWithStop(t *testing.T) {
 	manager.wg.Add(1)
 	go func() {
 		close(started)
-		manager.notifyDeviceStatus("device-123", "online", "")
+		manager.notifyDeviceStatus("device-123", "online", "", time.Now().UnixMilli())
 	}()
 
 	<-started
@@ -911,7 +913,7 @@ func TestNotifyDeviceStatusAfterStopIsIgnored(t *testing.T) {
 	manager.Stop()
 
 	manager.wg.Add(1)
-	manager.notifyDeviceStatus("device-123", "online", "")
+	manager.notifyDeviceStatus("device-123", "online", "", time.Now().UnixMilli())
 
 	time.Sleep(200 * time.Millisecond)
 
@@ -1238,6 +1240,136 @@ func TestUnregisterSendsOfflineWhenNotReplaced(t *testing.T) {
 	}
 	if !hasOffline {
 		t.Fatalf("expected offline notification when not replaced, got statuses=%v", statuses)
+	}
+}
+
+// TestUnregisterOfflineLastSeenStrictlyOlderThanConcurrentRegister verifies
+// the REV51 fix: when an offline notification from Unregister races with a
+// concurrent online registration, the offline notification's last_seen must be
+// strictly OLDER than the replacement's online last_seen. The API enforces a
+// strict `last_seen >` guard, so an offline that is newer-or-equal would be
+// accepted and wrongly persist the device as OFFLINE.
+//
+// Mechanism: the test pauses Unregister immediately AFTER the REV32 re-check
+// captured the offline last_seen (under m.mu) but BEFORE the offline goroutine
+// is spawned. In that window it registers a replacement (whose online
+// last_seen is captured under m.mu and is therefore strictly newer). It then
+// releases Unregister. With the fix, the offline goroutine forwards the
+// already-captured (older) last_seen; without the fix it would re-capture
+// time.Now() inside the goroutine, producing a last_seen newer than the online
+// one and defeating the API guard.
+func TestUnregisterOfflineLastSeenStrictlyOlderThanConcurrentRegister(t *testing.T) {
+	var mu sync.Mutex
+	type notification struct {
+		status   string
+		lastSeen int64
+	}
+	var notifications []notification
+
+	manager := NewTunnelManager(&Config{APIEndpoint: "http://test"})
+	defer manager.Stop()
+
+	manager.httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			var payload map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			_ = r.Body.Close()
+			status, _ := payload["status"].(string)
+			rawLS, _ := payload["last_seen"].(float64)
+			mu.Lock()
+			notifications = append(notifications, notification{status, int64(rawLS)})
+			mu.Unlock()
+			return okHTTPResponse(), nil
+		}),
+	}
+
+	// Pause Unregister right after the REV32 re-check captured the offline
+	// last_seen (under m.mu) but before spawning the offline goroutine.
+	hook := &testRecheckHook{
+		reached: make(chan struct{}, 1),
+		hold:    make(chan struct{}),
+	}
+	manager.testHookAfterUnregisterRecheck = hook
+
+	first := manager.Register("device-123", nil)
+
+	unregisterDone := make(chan struct{})
+	go func() {
+		manager.Unregister("device-123", first)
+		close(unregisterDone)
+	}()
+
+	// Wait until Unregister has reached the re-check and captured the offline
+	// last_seen. (The old tunnel was removed, closed, re-checked as not
+	// replaced, and offline last_seen captured under m.mu.)
+	select {
+	case <-hook.reached:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for Unregister to reach re-check hook")
+	}
+
+	// Sleep so the replacement's online last_seen (captured next) lands in a
+	// strictly later millisecond than the offline last_seen captured at the
+	// re-check. This makes the ordering assertion deterministic at ms
+	// resolution.
+	time.Sleep(10 * time.Millisecond)
+
+	// Register a replacement while Unregister is paused. Its online last_seen
+	// is captured under m.mu at this instant — strictly newer than the offline
+	// last_seen captured at the re-check.
+	replacement := manager.Register("device-123", nil)
+
+	// Release Unregister; the offline goroutine now spawns and forwards the
+	// already-captured (older) offline last_seen.
+	close(hook.hold)
+
+	select {
+	case <-unregisterDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for Unregister")
+	}
+
+	waitTimeout(t, &manager.wg, 2*time.Second)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	var offlineLS int64
+	var haveOffline, haveOnline bool
+	var maxOnlineLS int64
+	for _, n := range notifications {
+		switch n.status {
+		case "offline":
+			offlineLS = n.lastSeen
+			haveOffline = true
+		case "online":
+			haveOnline = true
+			if n.lastSeen > maxOnlineLS {
+				maxOnlineLS = n.lastSeen
+			}
+		}
+	}
+
+	if !haveOffline {
+		t.Fatalf("expected an offline notification, got %v", notifications)
+	}
+	if !haveOnline {
+		t.Fatalf("expected at least one online notification, got %v", notifications)
+	}
+
+	// REV51 invariant: the offline last_seen must be strictly older than the
+	// replacement's online last_seen so the API's strict `last_seen >` guard
+	// rejects the stale offline. Without the fix (capturing last_seen inside
+	// the goroutine), the offline last_seen would be newer than the online one
+	// and the guard would wrongly accept it.
+	if offlineLS >= maxOnlineLS {
+		t.Fatalf("REV51 violation: offline last_seen (%d) must be strictly older than online last_seen (%d); notifications=%v",
+			offlineLS, maxOnlineLS, notifications)
+	}
+
+	current, ok := manager.Get("device-123")
+	if !ok || current != replacement {
+		t.Fatal("expected replacement tunnel to remain registered")
 	}
 }
 
