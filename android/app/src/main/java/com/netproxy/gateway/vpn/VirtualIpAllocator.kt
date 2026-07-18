@@ -1,6 +1,5 @@
 package com.netproxy.gateway.vpn
 
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 import javax.inject.Singleton
