@@ -11,11 +11,20 @@ concurrency:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  # Self-hosted runner (shared with dev branch workflows) has the Android SDK
+  # pre-installed at /opt/android-sdk. ubuntu-latest is blocked by a GitHub
+  # Actions spending-limit / payment failure, which caused every PR targeting
+  # main to fail in ~3s ("The job was not started because recent account
+  # payments have failed or your spending limit needs to be increased").
+  # Switching to the self-hosted runner unblocks those PRs without incurring
+  # Actions minutes charges. See issue #89.
+  ANDROID_HOME: /opt/android-sdk
+  ANDROID_SDK_ROOT: /opt/android-sdk
 
 jobs:
   android-build:
     name: Android Build & Test
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
 
     steps:
       - name: Checkout code
@@ -112,7 +121,7 @@ jobs:
 
   go-build:
     name: Go Server Build
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
     strategy:
       matrix:
         component: [api, socks5-proxy, tunnel]
@@ -159,3 +168,28 @@ jobs:
         with:
           name: go-coverage-${{ matrix.component }}
           path: server/${{ matrix.component }}/coverage.out
+
+  # Dependency review gate (issue #89 item 3).
+  # This is the ONLY universally-triggered, non-masked, CVSS>=7.0 dependency-CVE
+  # gate covering both the Go and Android ecosystems on every PR targeting main.
+  # It mirrors the `dependency-review` job in dev's .github/workflows/pr-checks.yml.
+  # Do NOT add `continue-on-error: true` here and do NOT downgrade
+  # `fail-on-severity` beyond `high` — that would silently flip a red CVE signal
+  # green (see docs/ISSUES.md CI-DEP-1 / N90 on the dev branch for prior
+  # regressions where this gate was removed or masked).
+  dependency-review:
+    name: Dependency Review
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Dependency review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+
