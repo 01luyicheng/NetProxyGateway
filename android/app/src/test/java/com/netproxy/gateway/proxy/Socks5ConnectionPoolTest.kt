@@ -397,4 +397,45 @@ class Socks5ConnectionPoolTest {
         assertFalse(connection.inUse.get())
         verify(atLeast = 1) { socket.close() }
     }
+
+    @Test
+    fun pooledConnection_markUsed_updatesState() {
+        val socket = mockValidSocket()
+        val createdAt = System.currentTimeMillis() - 10000
+        val connection = PooledSocks5Connection(
+            socket = socket,
+            destinationIp = "10.0.0.1",
+            destinationPort = 443,
+            createdAt = createdAt
+        )
+
+        assertFalse(connection.inUse.get())
+        assertEquals(0, connection.useCount.get())
+        assertEquals(createdAt, connection.lastUsedAt.get())
+
+        val beforeUsed = System.currentTimeMillis()
+        connection.markUsed()
+        val afterUsed = System.currentTimeMillis()
+
+        assertTrue(connection.inUse.get())
+        assertEquals(1, connection.useCount.get())
+        assertTrue(connection.lastUsedAt.get() >= beforeUsed)
+        assertTrue(connection.lastUsedAt.get() <= afterUsed)
+    }
+
+    @Test
+    fun pooledConnection_markReturned_updatesState() {
+        val socket = mockValidSocket()
+        val connection = PooledSocks5Connection(
+            socket = socket,
+            destinationIp = "10.0.0.1",
+            destinationPort = 443
+        )
+
+        connection.markUsed()
+        assertTrue(connection.inUse.get())
+
+        connection.markReturned()
+        assertFalse(connection.inUse.get())
+    }
 }
