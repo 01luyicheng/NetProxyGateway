@@ -390,4 +390,100 @@ class DebugDetectorTest {
         assertTrue(result)
         assertTrue(processCalls.contains("ro.debuggable"))
     }
+    // ------------------------------------------------------------------
+    // checkTimingAttack — 反动态调试时序检测
+    //
+    // 以下测试是 PR #95 的回归守卫。PR #95 误将 `checkTimingAttack` 中的工作负载
+    // 循环判为“死代码”删除，使函数在默认 1000ms 阈值下恒返回 false（两次相邻的
+    // `System.currentTimeMillis()` 调用差值在毫秒粒度上几乎总是 0），导致反调试
+    // 检测形同虚设。PR #95 添加的两条测试 (`returnsFalse_underNormalExecution`
+    // 与 `returnsTrue_whenExecutionExceedsThreshold`) 在回归后仍是 tautology
+    // （前者恒真、后者用 `-1` 阈值也是恒真），无法捕获回归。
+    //
+    // 本批测试通过可注入的时钟 (`now: () -> Long`) 让时序逻辑可被确定性验证，
+    // 并通过 [@Volatile][DebugDetector.workloadFingerprint] 字段断言工作负载确实执行。
+    // ------------------------------------------------------------------
+
+    /**
+     * 默认 1000ms 阈值下，工作负载（100 万次整数累加）在真实硬件上的耗时远低于
+     * 1000ms，应返回 false。该测试现在具有实际意义：循环若被删除，[workloadFingerprint]
+     * 不会更新，会被 [checkTimingAttack_executesObservableWorkload] 捕获。
+     */
+    @Test
+    fun checkTimingAttack_returnsFalse_underNormalExecution() {
+        assertFalse(DebugDetector.checkTimingAttack(1000))
+    }
+
+    /**
+     * 模拟调试器单步执行：让注入的时钟在两次读取之间前进 2000ms。该测试不依赖
+     * 真实时序或实际调试器附加，可确定性验证阈值逻辑。
+     */
+    @Test
+    fun checkTimingAttack_returnsTrue_whenClockSimulatesDebuggerSlowdown() {
+        val times = ArrayDeque(listOf(0L, 2000L))
+        val fakeClock = { times.removeFirst() }
+        assertTrue(
+            "slow clock (2000ms diff) must trigger detection at 1000ms threshold",
+            DebugDetector.checkTimingAttack(thresholdMs = 1000, now = fakeClock)
+        )
+    }
+
+    /**
+     * 模拟快速执行：注入的时钟只前进 10ms。低于 1000ms 阈值，应返回 false。
+     */
+    @Test
+    fun checkTimingAttack_returnsFalse_whenClockSimulatesFastExecution() {
+        val times = ArrayDeque(listOf(0L, 10L))
+        val fakeClock = { times.removeFirst() }
+        assertFalse(
+            "fast clock (10ms diff) must not trigger detection at 1000ms threshold",
+            DebugDetector.checkTimingAttack(thresholdMs = 1000, now = fakeClock)
+        )
+    }
+
+    /**
+     * 边界条件：diff 恰好等于阈值（严格 `>` 比较）应返回 false。
+     */
+    @Test
+    fun checkTimingAttack_returnsFalse_whenDiffEqualsThreshold() {
+        val times = ArrayDeque(listOf(0L, 1000L))
+        val fakeClock = { times.removeFirst() }
+        assertFalse(
+            "diff == threshold must NOT trigger (strict > comparison)",
+            DebugDetector.checkTimingAttack(thresholdMs = 1000, now = fakeClock)
+        )
+    }
+
+    /**
+     * PR #95 回归守卫：工作负载循环必须实际执行，不能被静默删除或被 DCE 消除。
+     *
+     * 双重断言：
+     * 1. [DebugDetector.timingCheckInvocationCount] 在循环之后递增——证明函数体执行
+     *    到了循环之后的代码（如果循环被删除且计数器行也跟着删除，编译会失败；若只
+     *    删除循环，计数器仍递增但 fingerprint 不更新，断言 2 捕获）。
+     * 2. [DebugDetector.workloadFingerprint] 等于 `0 until 1_000_000` 的累加和（带
+     *    Int 溢出回绕）——若循环被删除，`sum` 永远为 0，fingerprint 与期望值不符。
+     */
+    @Test
+    fun checkTimingAttack_executesObservableWorkload() {
+        val beforeCount = DebugDetector.timingCheckInvocationCount
+
+        // 用 Long.MAX_VALUE 阈值确保不触发（与触发逻辑解耦，专注工作负载可观测性）
+        DebugDetector.checkTimingAttack(thresholdMs = Long.MAX_VALUE)
+
+        assertEquals(
+            "timingCheckInvocationCount must increment after checkTimingAttack (function completed)",
+            beforeCount + 1,
+            DebugDetector.timingCheckInvocationCount
+        )
+
+        // 0 until 1_000_000 的累加和（Kotlin Int 溢出回绕，与生产代码 `sum += i` 语义一致）
+        val expected = (0 until 1_000_000).sum()
+        assertEquals(
+            "workloadFingerprint must equal expected sum (loop must execute, DCE guard). " +
+                "If this fails, the workload loop was likely removed — see PR #95 regression.",
+            expected,
+            DebugDetector.workloadFingerprint
+        )
+    }
 }

@@ -2015,4 +2015,65 @@
 - **关联**: CI-DEP-1（dependency-review job 删除防护的原始需求）、CI-MASK-1/2/3（CI masking 系列）。
 
 
+---
+
+## 提交后正确性检查发现（2026-07-18，审查 PR #95 / #91 / #96 / #92 / #86）
+
+> 由 5 个并行 subagent 一审 + 2 个独立 subagent 二审交叉确认。所有发现均未在合并基线
+> 的 `docs/` 中记录过，符合"仅报告尚未被记录在文档中的问题"的门槛。
+
+### PR-95-TIMING-REGRESSION: 反调试时序检测被静默禁用 [已在本分支修复]
+
+- **状态**: 已在本分支修复（`fix/pr95-timing-attack-workload-restore`）
+- **提交哈希**: PR #95 分支 `582966e`（origin/jules-3397389426294637075-40b8fe73）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt` (`checkTimingAttack`, L453-L466 在 main 上；PR #95 删除 L456-L460)
+- **问题描述**: PR #95 "⚡ 性能优化: 移除 checkTimingAttack 中的无意义死循环" 误将
+  `for (i in 0 until 1000000) sum += i` 循环判为"死代码"删除。该循环是**被测量的
+  工作负载**——删除后函数体变为两次相邻的 `System.currentTimeMillis()` 调用，毫秒
+  粒度上差值几乎总是 0，在默认 `thresholdMs = 1000` 下 `0 > 1000` 恒为 false。该
+  检测是 `DebugDetector` 中**唯一**基于时序的动态分析检测，专门捕获能绕过静态检查
+  （TracerPid、`/proc/self/status`）的自定义调试器或插桩工具。删除循环等于完全
+  禁用这一检测通道。
+- **执行路径**: `NetProxyApp.onCreate` → `performSecurityChecks` →
+  `SecurityManager.performSecurityCheck` (`SecurityManager.kt:98`) →
+  `DebugDetector.check` (`DebugDetector.kt:90`) → `checkTimingAttack` →
+  `detectedMethods.add("timing-attack")` → `isDebugged = true` →
+  `SecurityCheckResult.isSecure = false`。
+- **触发场景**: 攻击者附加自定义调试器或 Frida 在单步/断点密集模式下逆向应用启动
+  阶段的 MQTT 凭证或代理配置。PR #95 之前：1M 次迭代在单步下膨胀到数秒 →
+  `diff > 1000` → 触发检测；PR #95 之后：`startTime` 与 `endTime` 相邻，`diff ≈ 0`，
+  永不触发——攻击者甚至无需绕过该检查。
+- **风险**: **Medium-High**。当前 `handleSecurityRisk` 仅记录日志（`NetProxyApp.kt:64-73`），
+  但代码 TODO（`NetProxyApp.kt:68-72`，"退出应用（在 release 模式下可考虑）"）一旦
+  落地，此破损的检测将成为静默漏洞。其他 9 个静态检测（debugger-connected、
+  being-debugged、ptrace-status、frida、xposed 等）仍工作，所以不是完全失守，
+  但 defense-in-depth 中时序维度被关闭。
+- **PR #95 添加的测试反而固化了回归**:
+  - `checkTimingAttack_returnsFalse_underNormalExecution` → 回归后 diff 恒为 0，
+    该测试 trivially 通过，名为"正常执行"实际无法区分正常/异常。
+  - `checkTimingAttack_returnsTrue_whenExecutionExceedsThreshold` 用 `thresholdMs = -1`
+    调用，`0 > -1` 恒真，是 tautology——任何实现都会通过。
+  两条测试均未模拟"调试器减速的时钟"或断言工作负载耗时，无法捕获回归。
+- **修复方式**（本分支）:
+  1. 恢复 100 万次整数累加工作负载。
+  2. 通过 `@Volatile var workloadFingerprint: Int` 写入 `sum`，使循环具备可观测
+     副作用，防止 JIT DCE 删除（也使未来的"无意义死循环"误判需要明确删除该字段，
+     触发编译失败提醒）。
+  3. 新增 `@Volatile var timingCheckInvocationCount: Long`，在循环之后递增，作为
+     函数体完成执行的锚点。
+  4. 新增 `now: () -> Long = { System.currentTimeMillis() }` 参数，使时序逻辑可被
+     注入式测试确定性验证（不依赖真实时序或实际调试器附加）。
+  5. 添加 5 条测试：
+     - `returnsFalse_underNormalExecution`：真实时钟 + 默认阈值（基线）
+     - `returnsTrue_whenClockSimulatesDebuggerSlowdown`：注入 fake clock，diff=2000ms
+       → true（确定性验证阈值逻辑）
+     - `returnsFalse_whenClockSimulatesFastExecution`：注入 fake clock，diff=10ms
+       → false
+     - `returnsFalse_whenDiffEqualsThreshold`：边界 `diff == threshold`（严格 `>`）
+     - `executesObservableWorkload`：断言 `timingCheckInvocationCount` 递增且
+       `workloadFingerprint` 等于 `0 until 1_000_000` 的累加和——循环若被删除，
+       fingerprint 不会更新，断言失败。
+- **关联**: PR #91 / PR #96 / PR #92 的审查评论已分别留在各 PR；本分支只修复
+  PR #95，因为它是唯一可在新分支上独立、最小化、高置信度修复的问题（PR #91 / #96
+  是他人 PR 的活体分支，只能评论不能直接修改；PR #92 标题与 diff 不符属于沟通问题）。
 

@@ -485,20 +485,68 @@ object DebugDetector {
     }
 
     /**
-     * 检查时间差异常（反动态调试）
-     * 在调试器中单步执行时，时间差会异常大
+     * 最近一次 [checkTimingAttack] 工作负载（100 万次整数累加）的计算结果。
+     *
+     * 用途：
+     * 1. 防止 JIT 死代码消除（DCE）误删循环——[@Volatile] 写入构成可观测副作用，
+     *    使 JIT 无法证明循环无副作用从而删除它。这是 PR #95 的回归教训：该 PR
+     *    误将循环判为“死代码”删除，导致反调试检测形同虚设（参见
+     *    [docs/ISSUES.md] 的 PR-95-TIMING-REGRESSION 条目）。
+     * 2. 测试断言工作负载确实执行
+     *    （[DebugDetectorTest.checkTimingAttack_executesObservableWorkload]）。
      */
-    fun checkTimingAttack(thresholdMs: Long = 1000): Boolean {
-        val startTime = System.currentTimeMillis()
+    @Volatile
+    var workloadFingerprint: Int = 0
+        private set
 
-        // 执行一些简单操作
+    /**
+     * [checkTimingAttack] 的累计调用次数。每次成功执行完工作负载后递增。
+     * 用于测试断言工作负载确实完成（DCE / 静默删除防护）。
+     */
+    @Volatile
+    var timingCheckInvocationCount: Long = 0L
+        private set
+
+    /**
+     * 检查时间差异常（反动态调试）。
+     *
+     * 在调试器中单步执行或命中软件断点时，工作负载（100 万次整数累加）的实际耗时
+     * 会被显著放大（从亚毫秒膨胀到秒级），从而被 [thresholdMs] 阈值识别。这是
+     * `DebugDetector` 中**唯一**基于时序的动态分析检测，专门用于捕获那些能绕过
+     * 静态检查（如 TracerPid、`/proc/self/status`）的自定义调试器或插桩工具。
+     *
+     * **不可将循环作为“死代码”删除**——即使 `sum` 的值不被外部读取，其副作用
+     * （消耗 CPU 时间）正是检测信号。结果通过 [@Volatile][workloadFingerprint]
+     * 字段对外可观测以防止 DCE。详见 PR #95 的回归教训。
+     *
+     * @param thresholdMs 触发检测的时间阈值（毫秒），默认 1000ms
+     * @param now 可注入的时钟，便于单元测试模拟慢/快执行；生产代码使用默认
+     *           [System.currentTimeMillis]。注入时调用方需保证 [now] 在每次调用
+     *           时返回单调不减的时间戳。
+     */
+    fun checkTimingAttack(
+        thresholdMs: Long = 1000,
+        now: () -> Long = { System.currentTimeMillis() }
+    ): Boolean {
+        val startTime = now()
+
+        // 固定工作负载：100 万次整数累加。在调试器单步执行下，这段循环的耗时
+        // 会被显著放大（从亚毫秒膨胀到秒级），从而被阈值检测识别。
+        // 注意：循环不可作为“死代码”删除——其副作用（消耗 CPU 时间）正是检测信号。
+        // （PR #95 的回归教训：该 PR 误判循环为死代码并删除，使反调试检测形同虚设。）
         var sum = 0
-        for (i in 0 until 1000000) {
+        for (i in 0 until 1_000_000) {
             sum += i
         }
+        // 通过 @Volatile 写入避免 JIT 死代码消除循环（PR #95 的回归教训）。
+        workloadFingerprint = sum
 
-        val endTime = System.currentTimeMillis()
+        val endTime = now()
         val diff = endTime - startTime
+
+        // 计数器在循环之后递增——若循环被静默删除，计数器行为不变，但
+        // workFingerprint 不再更新，测试可据此捕获回归。
+        timingCheckInvocationCount++
 
         return diff > thresholdMs
     }
