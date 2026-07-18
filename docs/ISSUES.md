@@ -1980,8 +1980,26 @@
 - **问题描述**: `dev`/`main` 分支的 branch protection 未把 `Go CI`/`Android CI` 列为 required status checks。这导致 MAINSCREEN-DUP-IMPORT-1 自 PR #78（2026-07-11 合并）起让 dev 分支最近 5 次 Android CI 全部 failure，但 PR 仍能合并。同样地，CACHE-RESTORE-1 与 MAKE-MISSING-1 在 dev 上长期被 CI-MASK-1 掩盖（CI 显示为 success），即便 required status checks 启用也无法发现。
 - **触发场景**: 任何 PR 合并到 `dev` 或 `main`。
 - **风险**: **高**。CI 失败的 PR 可直接合并，违背 AGENTS.md 第 7 节"验证门禁（必须通过）"约定。
-- **建议修复**: 在 GitHub Settings → Branches → Branch protection rules 中为 `dev`/`main` 启用 "Require status checks to pass before merging"，并把 `Go Server Build (api)`、`Go Server Build (socks5-proxy)`、`Go Server Build (tunnel)`、`Go Server Build (httpclient)`、`Go Server Build (ratelimit)`、`Go Server Build (recovery)`、`Go Server Build (stringutil)`、`Android Build & Test`、`ci-config-guard` 列为 required。注意必须先让 dev 上的 CI 全绿才能启用，否则现有失败 PR 会全部阻塞。**前置依赖**：需先修复 DEP-REVIEW-1（dependency-review job 当前失败），否则启用 required 后所有 PR 会被 dependency-review 阻塞。
-- **关联**: CI-MASK-1、CI-MASK-2、MAINSCREEN-DUP-IMPORT-1、CACHE-RESTORE-1、MAKE-MISSING-1、DEP-REVIEW-1。
+- **建议修复**: 在 GitHub Settings → Branches → Branch protection rules 中为 `dev`/`main` 启用 "Require status checks to pass before merging"，并把 `Go Server Build (api)`、`Go Server Build (socks5-proxy)`、`Go Server Build (tunnel)`、`Go Server Build (httpclient)`、`Go Server Build (ratelimit)`、`Go Server Build (recovery)`、`Go Server Build (stringutil)`、`Android Build & Test`、`ci-config-guard` 列为 required。注意必须先让 dev 上的 CI 全绿才能启用，否则现有失败 PR 会全部阻塞。**前置依赖**：(1) 需先修复 DEP-REVIEW-1（dependency-review job 当前失败），否则启用 required 后所有 PR 会被 dependency-review 阻塞；(2) 需等 self-hosted runner 切换回 GitHub runners 后 CGO-DETECT-1 自动消失，否则 `Go Server Build (api)` 的 Test step 会持续失败阻塞所有修改 `server/api/**` 的 PR。
+- **关联**: CI-MASK-1、CI-MASK-2、MAINSCREEN-DUP-IMPORT-1、CACHE-RESTORE-1、MAKE-MISSING-1、DEP-REVIEW-1、CGO-DETECT-1。
+
+### CGO-DETECT-1: self-hosted runner 缺少 gcc，导致 server/api 的 go-sqlite3 测试在 CI 中失败 [无需修复 — 临时 runner 问题]
+- **状态**: 无需修复。当前 self-hosted runner 是临时使用，下个月将切换回 GitHub 提供的 Ubuntu runners（预装 build-essential/gcc），切换后此问题自动消失。
+- **修复难度**: 无需投入。两条路径均**不应执行**：(a) 不在 self-hosted runner 上安装 gcc（临时环境不值得改动）；(b) 不切换 sqlite 驱动（避免不必要的代码变更和 SQL 占位符语法调整）。
+- **影响文件**: `.github/workflows/go-ci.yml` 的 `Check gcc availability` step（保留不动，已正确）+ `server/api/` 的 sqlite 驱动选择（**不修改**）
+- **问题描述**: PR #81 unmask CI-MASK-1 后，dev 上 `Go Server Build (api)` job 的 `Test api` step 持续失败（CI run 29603650822）。22+ 个数据库测试（TestServerCloseStopsCleanupWorkers、TestValidateSessionExpiredTokenDeleteFailureDoesNotLogRawToken、TestCreatePairingSession* 等）报 `Binary was compiled with 'CGO_ENABLED=0', go-sqlite3 requires cgo to work. This is a stub`。**Build step 通过**，仅 Test step 失败。
+- **诊断证据**:
+  - CI run 29603650822（dev commit `552f93e`）：`Go Server Build (api)` job 中 `Build api` ✅，`Test api` ❌。其他 6 个 Go 组件 ✅。
+  - CI run 29595665762（PR #81 commit `1fc9f64`）：`go env` 输出 `CC='gcc'`（**Go 默认值，不代表 gcc 真的存在**）和 `CGO_ENABLED='0'`。
+  - CI run 29627525005（PR #98 commit `2ec1408`，尝试硬编码 `CGO_ENABLED=1`）：`Build api` 直接失败，错误 `cgo: C compiler "gcc" not found: exec: "gcc": executable file not found in $PATH`。`Build tunnel` 和 `Build socks5-proxy` 同样失败（`runtime/cgo` 包需要 gcc）。
+- **根因**: self-hosted runner 上**没有 gcc**。`go env` 输出 `CC='gcc'` 只是 Go 的默认配置值，不代表 gcc 真的存在于 PATH。GitHub 提供的 ubuntu-latest runners 预装 build-essential（包括 gcc），切换后 `Check gcc availability` step 会自动检测到 gcc 并设置 `CGO_ENABLED=1`。
+- **`Check gcc availability` step 行为正确**: PR #81 的 `Check gcc availability` step 用 `command -v gcc &>/dev/null` 检测 gcc，因为 gcc 不存在所以返回非零退出码，执行 `else` 分支输出 `available=false`。表达式 `${{ steps.gcc.outputs.available == 'true' && '1' || '0' }}` 正确解析为 `'0'`，`Build api` 的 env `CGO_ENABLED: 0` 是正确的。Build 通过（go-sqlite3 用 stub 编译），Test 失败（stub 不能用）。**该 step 在切换回 GitHub runners 后将自动恢复正常工作**。
+- **PR #98 第三轮诊断的错误**: 之前误以为 `steps.gcc.outputs.available` 未被 Build step 正确读取。这是错的。`Check gcc availability` step 实际工作正常，PR #98 试图硬编码 `CGO_ENABLED=1` 反而让 dev 从"1 个组件失败"退化到"3 个组件失败"（api/tunnel/socks5-proxy 的 Build 都失败）。PR #98 已关闭。
+- **教训**: `go env` 输出的 `CC` 字段是 Go 的默认配置，**不能作为 gcc 是否存在的证据**，应该用 `command -v gcc` 或 `which gcc` 验证。
+- **触发场景**: 任何修改 `server/api/**`、`Makefile`、`.github/workflows/go-ci.yml` 的 PR 在 self-hosted runner 期间会看到 `Go Server Build (api)` job 失败。**这是已知噪音，不应阻塞 PR 合并**（CI-DEP-1 required status checks 未启用，所以失败 job 不阻塞合并）。
+- **风险**: 低。仅影响 `server/api` 的 Test step；Build 通过，不影响产物正确性。CI 红色噪音直到 runner 切换。
+- **AI 执行决策指引**: **不要尝试修复此问题**。如果有人提议"硬编码 CGO_ENABLED=1"、"安装 gcc"、"切换到 modernc.org/sqlite"，应指向本条目并拒绝。等到 self-hosted runner 切换回 GitHub runners 即可。
+- **关联**: CI-MASK-1（unmask 暴露此问题）、MAKE-MISSING-1（同 PR #81 CI 修复链）、CI-DEP-1（required status checks 未启用让此问题不阻塞合并，反而让 dev 能继续推进）。
 
 
 
