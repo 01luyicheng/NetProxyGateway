@@ -1089,3 +1089,21 @@ func TestUpdatePairingSession_ConcurrentModificationReturns409(t *testing.T) {
 		t.Fatalf("expected at least one of %d trials to trigger a 409 Conflict from concurrent modification", trials)
 	}
 }
+
+func TestGenerateCode(t *testing.T) {
+	for i := 0; i < 1000; i++ {
+		code, err := generateCode()
+		if err != nil {
+			t.Fatalf("generateCode() returned error: %v", err)
+		}
+		if len(code) != 6 {
+			t.Errorf("generateCode() returned code of length %d, expected 6: %s", len(code), code)
+		}
+		for _, ch := range code {
+			if ch < '0' || ch > '9' {
+				t.Errorf("generateCode() returned non-numeric character in code: %s", code)
+				break
+			}
+		}
+	}
+}
