@@ -1089,3 +1089,49 @@ func TestUpdatePairingSession_ConcurrentModificationReturns409(t *testing.T) {
 		t.Fatalf("expected at least one of %d trials to trigger a 409 Conflict from concurrent modification", trials)
 	}
 }
+
+func TestGenerateSecureRandomString(t *testing.T) {
+	tests := []struct {
+		name   string
+		length int
+	}{
+		{"length 0", 0},
+		{"length 1", 1},
+		{"length 32", 32},
+		{"length 100", 100},
+		{"length 1000", 1000},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			str, err := generateSecureRandomString(tt.length)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if len(str) != tt.length {
+				t.Errorf("expected length %d, got %d", tt.length, len(str))
+			}
+
+			for _, char := range str {
+				if !((char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9')) {
+					t.Errorf("string contains invalid character: %c in %q", char, str)
+				}
+			}
+		})
+	}
+
+	t.Run("uniqueness", func(t *testing.T) {
+		seen := make(map[string]bool)
+		for i := 0; i < 1000; i++ {
+			str, err := generateSecureRandomString(32)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if seen[str] {
+				t.Fatalf("generated duplicate string: %s", str)
+			}
+			seen[str] = true
+		}
+	})
+}
