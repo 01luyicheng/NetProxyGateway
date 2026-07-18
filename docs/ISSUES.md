@@ -1983,5 +1983,23 @@
 - **建议修复**: 在 GitHub Settings → Branches → Branch protection rules 中为 `dev`/`main` 启用 "Require status checks to pass before merging"，并把 `Go Server Build (api)`、`Go Server Build (socks5-proxy)`、`Go Server Build (tunnel)`、`Go Server Build (httpclient)`、`Go Server Build (ratelimit)`、`Go Server Build (recovery)`、`Go Server Build (stringutil)`、`Android Build & Test`、`ci-config-guard` 列为 required。注意必须先让 dev 上的 CI 全绿才能启用，否则现有失败 PR 会全部阻塞。**前置依赖**：需先修复 DEP-REVIEW-1（dependency-review job 当前失败），否则启用 required 后所有 PR 会被 dependency-review 阻塞。
 - **关联**: CI-MASK-1、CI-MASK-2、MAINSCREEN-DUP-IMPORT-1、CACHE-RESTORE-1、MAKE-MISSING-1、DEP-REVIEW-1。
 
+### CGO-DETECT-1: `Check gcc availability` step output 传递失败导致 CGO_ENABLED=0，go-sqlite3 测试全部失败 [已修复]
+- **状态**: 已修复（本 PR 采用硬编码 `CGO_ENABLED: 1` 方案）
+- **修复难度**: 低。删除 `Check gcc availability` step，3 处 `env.CGO_ENABLED` 从表达式 `${{ steps.gcc.outputs.available == 'true' && '1' || '0' }}` 改为字面量 `"1"`。
+- **影响文件**: `.github/workflows/go-ci.yml` 的 `Check gcc availability` step（已删除）+ Build/Test/Quality step 的 `env.CGO_ENABLED`
+- **问题描述**: PR #81 squash merge 到 dev（commit `552f93e`）后，`Go Server Build (api)` job 的 22+ 个数据库测试（TestServerCloseStopsCleanupWorkers、TestValidateSessionExpiredTokenDeleteFailureDoesNotLogRawToken、TestCreatePairingSession* 等）报 `Binary was compiled with 'CGO_ENABLED=0', go-sqlite3 requires cgo to work. This is a stub`。Build step 的 env 显示 `CGO_ENABLED: 0`（应为 `1`），即 `${{ steps.gcc.outputs.available == 'true' && '1' || '0' }}` 解析为 `'0'`，说明 `steps.gcc.outputs.available` 未被 Build step 正确读取为 `'true'`。
+- **诊断证据**: CI run 29595665762 (commit `1fc9f64`) 的 `Go Server Build (api)` job 日志显示：
+  - `Set up Go` step 的 `go env` 输出 `CC='gcc'`、`CXX='g++'`、`GCCGO='gccgo'`（gcc 在 PATH 中）
+  - `go env` 同时输出 `CGO_ENABLED='0'`（Go 默认值，与通常默认 `1` 相悖，暗示 runner 上有人通过 `go env -w CGO_ENABLED=0` 或环境变量禁用了 CGO）
+  - `Check gcc availability` step 成功完成（无 failure，shell 为 `/usr/bin/bash -e {0}`）
+  - `Build` step 的 env 显示 `CGO_ENABLED: 0`（应为 `1`）
+  - 测试报错 `Binary was compiled with 'CGO_ENABLED=0'`
+- **根因**: 未在日志中完全证实。最可能的原因是 self-hosted runner 上 `steps.gcc.outputs.available` 的 step output 传递异常（runner 版本/配置问题）。原假设"`&>` 在 bash `set -e` 模式下与 `if` 语句交互异常"已被 subagent 审查否定：`&>` 自 bash 2.0+ 即支持，且与 `>/dev/null 2>&1` 语义等价，替换不可能改变行为。`go env` 输出 `CGO_ENABLED='0'` 的现象比 `&>` 假设更值得追查，但与本次修复正交。
+- **触发场景**: 任何修改 `server/api/**`、`Makefile`、`.github/workflows/go-ci.yml` 的 PR。
+- **风险**: 中。仅影响需要 CGO 的组件（目前只有 `server/api` 依赖 go-sqlite3），但导致 api 全部测试失败，阻塞 PR 合并。
+- **建议修复（已实施）**: 移除 `Check gcc availability` step，在 Build/Test/Quality step 中硬编码 `CGO_ENABLED: "1"`。理由：self-hosted runner 是受控环境，gcc 由 runner provision 保证（`go env` 已证实 `CC='gcc'`），不需要动态检测；动态检测依赖 step output 传递，而该机制在本 runner 上不可靠。
+- **未解决的旁路问题**: runner 上 `go env` 默认 `CGO_ENABLED='0'` 的来源（`go env -w` 历史 / `/etc/environment` / `~/.bashrc`）未排查。这可能与 self-hosted runner 的 provision 脚本有关，建议 runner 维护者排查。本 PR 通过硬编码 `CGO_ENABLED=1` 在 step env 层面覆盖，不受影响。
+- **关联**: CI-MASK-1（unmask 暴露此问题）、MAKE-MISSING-1（同 PR #81 的 CI 修复链）。
+
 
 

@@ -115,15 +115,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-${{ matrix.component }}-
 
-      - name: Check gcc availability
-        if: steps.filter.outputs.component == 'true'
-        id: gcc
-        run: |
-          if command -v gcc &>/dev/null; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-          fi
+      # NOTE: CGO is required by go-sqlite3 (server/api). The self-hosted
+      # runner has gcc pre-installed (confirmed by `go env` output CC='gcc').
+      # A dynamic "Check gcc availability" step was removed because step
+      # output propagation failed on this runner (CGO_ENABLED evaluated to 0
+      # despite gcc being present — see docs/ISSUES.md CGO-DETECT-1).
+      # Hardcoding CGO_ENABLED=1 is correct for this controlled environment.
 
       # Step 7.1: go build — HARD GATE (no continue-on-error).
       # Was previously masked along with test+quality in a single
@@ -138,7 +135,7 @@ jobs:
       - name: Build ${{ matrix.component }}
         if: steps.filter.outputs.component == 'true'
         env:
-          CGO_ENABLED: ${{ steps.gcc.outputs.available == 'true' && '1' || '0' }}
+          CGO_ENABLED: "1"
         working-directory: ${{ matrix.path }}
         run: go build -v ./...
 
@@ -147,7 +144,7 @@ jobs:
       - name: Test ${{ matrix.component }}
         if: steps.filter.outputs.component == 'true' && success()
         env:
-          CGO_ENABLED: ${{ steps.gcc.outputs.available == 'true' && '1' || '0' }}
+          CGO_ENABLED: "1"
         working-directory: ${{ matrix.path }}
         run: go test -v -coverprofile=coverage.out ./...
 
@@ -157,7 +154,7 @@ jobs:
       - name: Quality checks for ${{ matrix.component }}
         if: always() && steps.filter.outputs.component == 'true'
         env:
-          CGO_ENABLED: ${{ steps.gcc.outputs.available == 'true' && '1' || '0' }}
+          CGO_ENABLED: "1"
         working-directory: ${{ matrix.path }}
         run: |
           out=$(find . -name '*.go' -not -path '*/vendor/*' -exec gofmt -l {} + 2>/dev/null)
