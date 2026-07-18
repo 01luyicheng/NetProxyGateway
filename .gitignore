@@ -36,6 +36,13 @@ server/tunnel/tunnel
 # Commitlint (config is tracked, node_modules would be ignored if installed locally)
 node_modules/
 
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
 # Temporary files generated during development/review
 *.diff
 diff_output.txt
