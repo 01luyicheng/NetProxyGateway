@@ -1089,3 +1089,48 @@ func TestUpdatePairingSession_ConcurrentModificationReturns409(t *testing.T) {
 		t.Fatalf("expected at least one of %d trials to trigger a 409 Conflict from concurrent modification", trials)
 	}
 }
+
+func TestValidateJWTSecret(t *testing.T) {
+	tests := []struct {
+		name      string
+		secret    string
+		wantErr   bool
+		errMsgStr string
+	}{
+		{
+			name:      "empty secret",
+			secret:    "",
+			wantErr:   true,
+			errMsgStr: "JWT_SECRET environment variable is not set",
+		},
+		{
+			name:      "short secret",
+			secret:    strings.Repeat("a", MinJWTSecretLength-1),
+			wantErr:   true,
+			errMsgStr: fmt.Sprintf("JWT_SECRET must be at least %d characters long", MinJWTSecretLength),
+		},
+		{
+			name:    "exact length secret",
+			secret:  strings.Repeat("a", MinJWTSecretLength),
+			wantErr: false,
+		},
+		{
+			name:    "long secret",
+			secret:  strings.Repeat("a", MinJWTSecretLength+10),
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateJWTSecret(tt.secret)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateJWTSecret() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantErr && !strings.Contains(err.Error(), tt.errMsgStr) {
+				t.Errorf("validateJWTSecret() error msg = %v, want to contain %v", err.Error(), tt.errMsgStr)
+			}
+		})
+	}
+}
