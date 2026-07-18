@@ -129,6 +129,15 @@
 - **问题**: read 锁内收集无效连接、write 锁外清理时状态可能已变
 - **缓解**: 于 `write` 锁内对 `!conn.inUse.get() && !conn.isValid()` 二次校验后再 `remove`/`close`
 
+### VPNLOG-IPV6-1: redactConnectionKey 使用 substringBefore(":") 错误截断 IPv6 地址
+- **提交哈希**: `623e369`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnLogRedaction.kt` (L94-95)
+- **问题**: `redactConnectionKey` 使用 `segments[0].substringBefore(":")` 从 "srcIp:srcPort" 中提取 IP。对 IPv4 正常（`192.168.1.100:12345` → `192.168.1.100`），但对 IPv6 会截断到第一个冒号前（`fe80::1ff:fe23:4567:890a:54321` → `fe80`）。截断后的字符串不是有效 IPv6 地址，`redactIp` 返回 `***`（REDACTED_UNKNOWN）而非 `****:****:...`（REDACTED_IPV6）。
+- **风险**: 低。IPv6 连接键在日志中被脱敏为 `***- ***` 而非 `****:****:****:****:****:****:****:****- ****:****:****:****:****:****:****:****`。不影响安全性（IP 仍被脱敏），但日志格式不一致，IPv6 流量无法与无效输入区分，影响日志分析与统计。
+- **修复难度**: 中。需区分 IPv4/IPv6 连接键格式；IPv6 地址+端口需用 `[ip]:port` 包裹或按最后冒号分隔端口。
+- **修复状态**: 未修复（pre-existing bug，超出 PR #93 范围）
+- **关联测试**: `VpnLogRedactionTest.redactConnectionKey_validFormatIpv6_returnsRedactedKey` 已记录此实际行为（期望 `***- ***`），并标注 TODO 指向本条目。
+
 ### L2: TODO注释未处理
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L458)
 - **问题**: 存在未处理的TODO注释，涉及安全配置
