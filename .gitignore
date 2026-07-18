@@ -71,18 +71,6 @@ summarize_bot_comments.py
 # Kotlin
 .kotlin/
 
-# AI IDE tooling - IDE specific config directories
-.agents/
-.claude/
-.codebuddy/
-.iflow/
-.Jules/
-.kiro/
-.qoder/
-.qwen/
-.trae/
-.windsurf/
-
 # Environment variables
 .env
 .env.*
