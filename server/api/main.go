@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	sqlite3 "github.com/mattn/go-sqlite3"
@@ -60,7 +61,7 @@ var (
 	ErrInternalAPIKeyNotConfigured        = errors.New("internal api key not configured")
 	ErrMissingInternalAPIKey              = errors.New("missing internal api key")
 	ErrInvalidInternalAPIKey              = errors.New("invalid internal api key")
-	ErrConcurrentModification            = errors.New("session was modified by another request, please retry")
+	ErrConcurrentModification             = errors.New("session was modified by another request, please retry")
 )
 
 var (
@@ -1230,6 +1231,17 @@ func main() {
 
 	r := gin.New()
 	r.Use(gin.Recovery())
+	// Configure CORS
+	corsConfig := cors.DefaultConfig()
+	corsConfig.AllowOrigins = []string{"http://localhost:3000", "http://localhost:8080"}
+	// TODO: Read allowed origins from environment variable in production
+	corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
+	corsConfig.AllowHeaders = []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Requested-With"}
+	corsConfig.ExposeHeaders = []string{"Content-Length"}
+	corsConfig.AllowCredentials = true
+	corsConfig.MaxAge = 12 * time.Hour
+	r.Use(cors.New(corsConfig))
+
 	r.Use(gin.Logger())
 
 	// Health check (public)
