@@ -10,6 +10,9 @@ import android.content.Context
 import android.content.ContextWrapper
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.ui.draw.rotate
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -858,15 +861,21 @@ private fun DiagnosticsCard(uiState: UiState) {
                     text = stringResource(R.string.diagnostics_title),
                     style = MaterialTheme.typography.titleMedium
                 )
+                val rotation by animateFloatAsState(
+                    targetValue = if (expanded) 180f else 0f,
+                    label = "expand_icon_rotation"
+                )
                 Icon(
-                    imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                    imageVector = Icons.Default.KeyboardArrowDown,
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.rotate(rotation)
                 )
             }
 
-            if (expanded) {
-                Spacer(modifier = Modifier.height(12.dp))
+            AnimatedVisibility(visible = expanded) {
+                Column {
+                    Spacer(modifier = Modifier.height(12.dp))
 
                 val durationSec = uiState.connectionDurationMs / 1000
                 DiagnosticsRow(
@@ -930,6 +939,7 @@ private fun DiagnosticsCard(uiState: UiState) {
                         if (uiState.networkIsValidated) R.string.network_in_use else R.string.network_not_in_use
                     )
                 )
+                }
             }
         }
     }
