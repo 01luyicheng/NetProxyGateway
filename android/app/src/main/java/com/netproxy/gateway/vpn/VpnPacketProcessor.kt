@@ -1,6 +1,5 @@
 package com.netproxy.gateway.vpn
 
-import kotlin.math.min
 
 /**
  * VPN 数据包处理工具类
