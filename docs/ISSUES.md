@@ -2086,3 +2086,57 @@
   PR #95，因为它是唯一可在新分支上独立、最小化、高置信度修复的问题（PR #91 / #96
   是他人 PR 的活体分支，只能评论不能直接修改；PR #92 标题与 diff 不符属于沟通问题）。
 
+---
+
+## PR #91 / #92 审查与 self-hosted runner CI 问题（2026-07-18 补充）
+
+> 3 个新条目记录今日 PR 审查与 CI 基础设施状态：CI-DEP-1-RELAPSE-3（PR #91 第 3 次
+> 复发）、HEALTH-RATELIMIT-1（PR #92 设计缺陷）、SELF-HOSTED-RUNNER-1（临时 runner
+> 期间已知 CI 问题）。
+
+### CI-DEP-1-RELAPSE-3: PR #91 第 3 次尝试删除 dependency-review job + 削弱 commitlint [已记录 — PR 已关闭]
+
+- **状态**: 已记录（PR #91 closed，未合并；CI-DEP-1 守卫已生效）
+- **修复难度**: 低（PR 已关闭，无需修复；保留记录作为复发模式证据）
+- **修复状态**: 已记录
+- **位置**: PR #91（已关闭）— diff 涉及 `.github/workflows/pr-checks.yml`（删除 dependency-review job）、`.commitlintrc.json`（body-max-line-length 设为 severity=0）、`android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt`（与 PR #87 字节级相同）
+- **问题描述**: PR #91 标题声称是 UX 改进，但 diff 包含 3 个无关的安全回归：
+  (a) 删除了 `.github/workflows/pr-checks.yml` 中的 `dependency-review` job，继 PR #79/#82 后第 3 次尝试删除该 job，违反 CI-DEP-1 守卫；
+  (b) 将 `.commitlintrc.json` 的 `body-max-line-length` 规则设为 severity=0（禁用），削弱 commit message 长度检查；
+  (c) 改动 `MainScreen.kt`，与 PR #87 字节级完全相同（PR #87 已合并到 dev）。
+  PR 描述掩盖实际改动，属于"恶意/疏忽的 PR 描述掩盖实际改动"模式。
+- **触发场景**: 恶意/疏忽的 PR 描述掩盖实际改动；palette bot 或类似自动化工具的越界删除行为复发。
+- **风险**: **High**。如果合并：(a) 会静默移除 dependency-review 安全门，让依赖漏洞检测失效；(b) 削弱 commitlint body-max-line-length 规则，让超长 commit message 通过；(c) MainScreen.kt 重复改动可能引入冲突或回退 PR #87 的修复。
+- **修复方式**: PR 已关闭；CI-DEP-1 守卫已生效（`scripts/check_ci_permissions.py` 拦截了 dependency-review job 的删除）。建议后续遇到类似 PR（标题声称改进但 diff 包含 dependency-review 删除或 commitlint 削弱）应直接关闭，并在 PR 评论中指向本条目与 CI-DEP-1。
+- **关联**: CI-DEP-1（required status checks / dependency-review 守卫的原始需求）、N90、PR #79、PR #82（前两次复发）、PR #87（PR #91 的 UX 部分已被 PR #87 合并到 dev）。
+
+### HEALTH-RATELIMIT-1: PR #92 健康检查接口速率限制实现有 3 个设计缺陷 [未修复 — 待重做]
+
+- **状态**: 未修复 — 待重做（PR #92 已关闭，未合并）
+- **修复难度**: 中
+- **修复状态**: 未修复
+- **位置**: PR #92（已关闭，未合并）— diff 涉及 `server/api/` 健康检查接口的速率限制实现
+- **问题描述**: PR #92 标题"添加健康检查接口的速率限制机制"，但实现有 3 个关键缺陷：
+  (a) **K8s readiness 误伤**：复用 `s.rateLimiter`（与 login 共享），会导致 K8s readiness probe 被限流，造成 Pod 误判不健康并重启；
+  (b) **X-Forwarded-For 可伪造**：gin 默认 `TrustedProxies=["0.0.0.0/0","::/0"]`，攻击者可伪造 IP 绕过限流；
+  (c) **共享限流桶**：健康检查不应与登录共享限流桶——健康检查是基础设施探针，登录是用户认证，二者的限流语义和阈值不同。
+- **触发场景**: K8s 部署环境下，readiness probe 频繁调用健康检查接口，被限流后导致 Pod 被误判不健康并触发重启循环。
+- **风险**: **Medium**。仅在 K8s 部署 + 高频 readiness probe 场景下显现，但一旦显现会导致服务不稳定。
+- **修复方式**: 重做 PR，使用独立的限流桶（如 `s.healthRateLimiter`），不依赖 X-Forwarded-For，只基于 RemoteIP（gin 的 `c.ClientIP()` 在 `TrustedProxies=[]` 时返回 RemoteAddr）。如果需要支持反向代理场景，应显式配置 `TrustedProxies` 为可信代理列表，而非默认的全网信任。
+- **关联**: 无
+
+### SELF-HOSTED-RUNNER-1: 临时 self-hosted runner 期间 3 个已知 CI 问题 [未修复 — 等待基础设施切换]
+
+- **状态**: 临时基础设施问题 — 切回 GitHub-hosted runners 后自动缓解
+- **修复难度**: 低（无需修复代码，等切换 runner）
+- **修复状态**: 未修复 — 等待基础设施切换
+- **位置**: `.github/workflows/pr-checks.yml`（dependency-review job）+ `.github/workflows/android-ci.yml`（"Run dependency vulnerability check" step）+ self-hosted runner 容量配置
+- **问题描述**: 当前使用临时 self-hosted runner（用户提示下个月切回 GitHub-hosted runners），期间有 3 个已知 CI 基础设施问题：
+  (a) **dependency-review job 失败**：错误信息 `Dependency review is not supported on this repository. Please ensure that Dependency graph is enabled along with GitHub Advanced Security`。根本原因是仓库为 private 且未启用 GitHub Advanced Security（GHAS），dependency-review-action 无法工作。**与 runner 无关**：即使切回 GitHub-hosted runners 也会失败（private 仓库需要 GHAS 才能使用 dependency-review-action）。当前用 admin merge 绕过（与 PR #99/#100 一致），与代码无关。
+  (b) **Android CI "Run dependency vulnerability check" 步骤 cancelled**：现象为步骤 13（OWASP Dependency-Check）跑了 28 分钟后被 cancelled。根本原因是 self-hosted runner 网络问题，OWASP Dependency-Check 拉取 NVD 数据库超时。**与 runner 相关**：切回 GitHub-hosted runners 后会自动解决（GitHub 网络好）。当前用 admin merge 绕过，因为关键 Build/Test/Lint/JaCoCo 步骤都已通过。
+  (c) **Runner 容量问题**：多个 CI job 长时间 queued 无法获取 runner。根本原因是 self-hosted runner 数量有限，单个 Android CI job 可能卡住 1.5+ 小时占用 runner。**与 runner 相关**：切回 GitHub-hosted runners 后会自动解决。
+- **触发场景**: 所有 PR。
+- **风险**: **Low**。仅 CI 基础设施问题，不影响代码正确性；用 admin merge 绕过。
+- **修复方式**: (a) 切回 GitHub-hosted runners 后 Android CI 网络问题（b/c）自动解决；(b) dependency-review 即使切回 GitHub-hosted runners 也会失败——需启用 GHAS 或修改 CI 配置，但当前用 admin merge 绕过（同 DEP-REVIEW-1 的处理思路）；(c) 切回后 runner 容量自动解决。
+- **关联**: CGO-DETECT-1（同样是临时 runner 问题，已标记 no-fix needed）、DEP-REVIEW-1（dependency-review job 失败的根本原因相同：未启用 GHAS）、CI-DEP-1（required status checks 未启用让这些 CI 问题不阻塞合并）。
+
