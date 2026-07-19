@@ -2147,3 +2147,21 @@
   - 其余 7 处 `notifyDeviceStatus` 调用点更新为 4 参数签名。
 - **关联**: 修正 REV32"剩余风险"与 REV33"修复方式"中关于 `last_seen` 保护已生效的不准确断言。本修复基于 `fix/rev31-36-post-commit-review` 分支（PR #58），因为该竞态是 PR #58 引入 `last_seen` 字段后特有的。
 
+### ROOTDETECTOR-BUSYBOX-1: `RootDetectorTest.checkBusyBox_returnsFalse_whenNoBusyBoxFoundAndWhichFails` 在 Windows + Git Bash 环境下失败 [未修复 — 环境相关]
+- **修复状态**: 未修复（环境相关，非代码缺陷）
+- **修复难度**: 低。三个可选修复方向（见下）
+- **影响文件**: `android/app/src/test/java/com/netproxy/gateway/security/RootDetectorTest.kt` (L163-166)、`android/app/src/main/java/com/netproxy/gateway/security/RootDetector.kt` (L202-229)
+- **问题描述**: `RootDetectorTest.checkBusyBox_returnsFalse_whenNoBusyBoxFoundAndWhichFails` 断言 `RootDetector.checkBusyBox()` 返回 `false`，注释假设"在测试环境中，BusyBox 文件不存在且 `which` 命令不可用"。但在 Windows 开发机 + Git Bash 环境下，Git Bash 把 `which` 加入了 PATH，导致 `RootDetector.kt` L211 的 `ProcessBuilder("which", "busybox")` 能成功执行。若系统中存在任何名为 `busybox` 的可执行文件（或 `which` 的行为与测试预期不符），`checkBusyBox()` 可能返回 `true`，测试失败。
+- **诊断证据**:
+  - 本地 `make android-test` 输出：`RootDetectorTest > checkBusyBox_returnsFalse_whenNoBusyBoxFoundAndWhichFails FAILED    java.lang.AssertionError at RootDetectorTest.kt:165`，282 tests completed, 1 failed。
+  - ISSUES.md L1214（既有记录）："全量 473 测试仅 1 失败（`RootDetectorTest.checkBusyBox`，既存问题与本次修改无关）"。
+  - `RootDetector.kt` L211：`val process = ProcessBuilder("which", "busybox").redirectErrorStream(true).start()`，依赖系统 PATH 中的 `which` 命令。
+- **根因**: 测试假设"JVM 单元测试环境下 `which` 不可用"只在纯 JVM 环境（如 CI 的 ubuntu-latest 无 Git Bash）成立。Windows 开发机普遍安装 Git for Windows，其 `bin/sh.exe` 被加入 PATH 后 `which` 可用，测试假设被破坏。这是测试环境假设与开发者实际环境的差异，非生产代码缺陷。
+- **触发场景**: Windows 开发机 + Git Bash 在 PATH 中时，本地运行 `make android-test` 或 `./gradlew :app:testDebugUnitTest`。CI 上（GitHub-hosted ubuntu runners）不会触发，因 `which` 默认可用但 BusyBox 不在 PATH 中，`which busybox` 返回非零退出码且 stdout 为空，`checkBusyBox()` 返回 false，测试通过。
+- **风险**: **Low**。仅影响本地开发体验，不影响 CI 绿灯，不影响生产代码。但会让 Windows 开发者每次跑 `make android-test` 都看到 1 个失败，可能掩盖其他真实失败。
+- **修复方式**（三选一，按推荐度排序）:
+  1. **修改测试**（推荐，最简单）：给 `checkBusyBox_returnsFalse_whenNoBusyBoxFoundAndWhichFails` 加 JUnit 5 条件注解 `@DisabledOnOs(OS.WINDOWS)`，并补充注释说明原因。缺点：只是规避，未真正验证 Windows 下的行为。
+  2. **Mock ProcessBuilder**（最干净）：重构 `RootDetector.checkBusyBox()` 使 `which` 执行通过可注入的接口（如 `ProcessExecutor`），测试中 mock 该接口返回空结果。缺点：改动较大，需引入接口和依赖注入。
+  3. **运行时环境检测**：修改 `RootDetector.checkBusyBox()` 在非 Android 运行时环境（通过 `System.getProperty("java.runtime.name")` 或类似方式检测）直接返回 false。缺点：生产代码引入测试相关逻辑，不推荐。
+- **关联**: 本条目在 PR #120（docs/sync-with-code-reality）中首次记录，该 PR 的 `make android-test` 验证暴露了此失败。
+
