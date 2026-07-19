@@ -1,6 +1,8 @@
 package ratelimit
 
 import (
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -176,4 +178,59 @@ func TestCleanup_KeepsBlockedEntries(t *testing.T) {
 	if !exists {
 		t.Fatal("expected blocked entry to still exist")
 	}
+}
+
+// TestCleanupLoopStopsOnStop is a regression test for issue #90 G1:
+// cleanupLoop must exit after Stop() instead of busy-looping on the
+// closed stopCh (100% CPU + goroutine leak).
+func TestCleanupLoopStopsOnStop(t *testing.T) {
+	cfg := Config{
+		MaxAttempts:     5,
+		Window:          5 * time.Minute,
+		BlockDuration:   15 * time.Minute,
+		CleanupInterval: 10 * time.Millisecond,
+		StaleAttemptTTL: 30 * time.Minute,
+	}
+	rl := NewRateLimiter(cfg)
+
+	// Wait for cleanupLoop goroutine to start so we can later verify it exits.
+	// Without this, the test could race the goroutine's creation and pass
+	// even on the buggy version (goroutine never observed running).
+	startDeadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(startDeadline) {
+		if hasCleanupLoopGoroutine() {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !hasCleanupLoopGoroutine() {
+		t.Fatal("cleanupLoop goroutine did not start within 500ms — cannot verify regression")
+	}
+
+	rl.Stop()
+
+	// After Stop(), cleanupLoop should exit promptly. Poll all goroutine
+	// stacks for up to 2s; the fixed implementation exits on the first
+	// iteration of the outer for-loop (sub-millisecond). The buggy version
+	// spins forever on the closed stopCh and never exits.
+	stopDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(stopDeadline) {
+		if !hasCleanupLoopGoroutine() {
+			return // passed
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("cleanupLoop goroutine still running 2s after Stop() — busy-loop leak not fixed")
+}
+
+// hasCleanupLoopGoroutine reports whether a ratelimit.cleanupLoop goroutine
+// is currently live by scanning all goroutine stacks. The lowercase pattern
+// "cleanupLoop" matches the (*RateLimiter).cleanupLoop method frame (and its
+// inner func1 closure) but does NOT match this test's own frames
+// (TestCleanupLoopStopsOnStop / hasCleanupLoopGoroutine), which use an
+// uppercase "CleanupLoop" — strings.Contains is case-sensitive.
+func hasCleanupLoopGoroutine() bool {
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	return strings.Contains(string(buf[:n]), "cleanupLoop")
 }
