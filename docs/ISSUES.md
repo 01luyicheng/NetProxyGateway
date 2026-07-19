@@ -2165,3 +2165,45 @@
   3. **运行时环境检测**：修改 `RootDetector.checkBusyBox()` 在非 Android 运行时环境（通过 `System.getProperty("java.runtime.name")` 或类似方式检测）直接返回 false。缺点：生产代码引入测试相关逻辑，不推荐。
 - **关联**: 本条目在 PR #120（docs/sync-with-code-reality）中首次记录，该 PR 的 `make android-test` 验证暴露了此失败。
 
+### MAKEFILE-TIDY-NOOP-1: `go-ci-component` / `go-quality-component` 的 `go mod tidy` 漂移检查是静默 no-op [已修复]
+
+- **状态**: 已修复（分支 `fix/pr120-makefile-tidy-noop`，PR #123，base: `docs/sync-with-code-reality`）
+- **修复难度**: 低（最小化 shell 退出码语义修复，2 处共 4 行）
+- **影响文件**: `Makefile`（`go-ci-component` 目标 L208-211、`go-quality-component` 目标 L247-251）
+- **问题描述**: `go-ci-component` 与 `go-quality-component` 两个 Makefile 目标的 `go mod tidy` 漂移检查子 shell 写成：
+
+  ```makefile
+  (cd $$dir && git diff --exit-code -- go.mod go.sum >/dev/null 2>&1; \
+   git checkout -- go.mod go.sum 2>/dev/null || true) && \
+  echo "=== $$dir CI checks passed ==="
+  ```
+
+  POSIX 子 shell `(cmd1; cmd2)` 的退出码等于**最后一条**命令的退出码。这里最后一条是 `git checkout -- go.mod go.sum 2>/dev/null || true`，由于 `|| true` 兜底，**永远返回 0**。`git diff --exit-code` 检测到漂移时返回的非零退出码被完全丢弃，`&&` 链继续走到 `echo "...passed"`。结果：`go.mod`/`go.sum` 处于 untidy 状态时，drift 检查 100% 静默通过，与同文件 `go-mod-tidy-check`（L144-158，正确使用 `if [ $$? -ne 0 ]`）的正确实现形成直接对比。
+- **触发场景**: 开发者在 `server/api/handlers.go` 新增一个 import（如 `github.com/go-chi/chi/v5/middleware`），本地 `go build` 因 module cache 命中而通过，但忘记运行 `go mod tidy` 提交 `go.sum` 中对应的 checksum 行 → 推送 PR → `make go-ci-component COMPONENT=api` 进入漂移检查子 shell → `go mod tidy` 在 CI 里把 `go.sum` 补齐 → `git diff --exit-code` 本应返回 1，但被子 shell 末尾的 `git checkout ... || true` 吞掉 → 子 shell 退出 0 → `&&` 继续 `echo "=== ... CI checks passed ==="` → CI 绿灯 → PR 合并 → 下游某个干净 checkout（fresh Docker 构建、新 contributor 机器）因 `go.sum` 校验失败而 `go build` 报 `missing go.sum entry` 崩溃。
+- **风险**: **中（P2）**。bug 完全静默（`>/dev/null 2>&1` + `|| true`，无 FAIL 输出）；爆炸半径限于本地开发与未来 CI 接线风险——当前 `.github/workflows/ci.yml` 的 `go-build` job 直接运行 `go build -v ./...`、`go test -v ...`、`govulncheck ./...`，**未调用任何 Makefile 目标**，故 CI 当前不触发此 bug。但 Makefile L191-195 注释声称 `go-ci.yml`（文件名实际为 `ci.yml`）会调用 `go-ci-component`，且 `go-quality-component` 在 `go-ci.yml` 中按 ADR-006 以 `continue-on-error: true` 掩码运行（收集基线）——若维持现状 no-op，则"基线数据"本身是假的（永远报 passed），掩盖长期漂移趋势。
+- **根因**: 子 shell `(...)` 退出码语义与 `|| true` 兜底组合的副作用——`git diff --exit-code` 的退出码需要显式捕获（`rc=$$?`）或显式检查（`if [ $$? -ne 0 ]`）才能传播到外层 `&&` 链。
+- **验证**:
+  - 静态分析：`(cmd1; cmd2 || true)` 的退出码恒为 0（POSIX 子 shell 退出码 = 最后一条命令退出码）。
+  - 经验复现：在 `/tmp` 临时 git 仓库中构造 untidy `go.mod`（追加未使用 `require github.com/google/uuid v1.6.0`），逐字运行 bug 版子 shell → exit code 0（漂移被掩盖）；逐字运行 `go-mod-tidy-check` 的正确版子 shell → exit code 1（漂移被检出）。
+  - 溯源：该 bug 由 PR #81（`552f93e`，"fix(ci): unmask go build/test + android lint/dep-check"）引入；`origin/main` 的 Makefile 仅 122 行，**不包含** `go-ci-component`/`go-quality-component` 任何目标，故 bug 未流入 main。PR #120（`docs/sync-with-code-reality`）携带该 bug 但未引入也未修改这两处。本修复在 PR #120 分支基础上定向修复。
+- **修复方式**: 在两处子 shell 内用 `rc=$$?` 捕获 `git diff --exit-code` 的退出码，**再**执行 `git checkout` 清理（保留原作者"检查后清理"意图），最后 `exit $$rc` 让子 shell 返回真实退出码。tidy 时 rc=0，`&&` 链继续到 `echo "...passed"`；untidy 时 rc≠0，`&&` 短路，目标失败。同时新增 `FAIL: ...` 提示行，避免完全静默。修复与同文件 `go-mod-tidy-check` 的"先检查、后清理、保留退出码"思路一致，只是收进同一子 shell 以适应单组件目标的 `&&` 链风格。修复 diff（两处对称）：
+
+  ```diff
+  	(cd $$dir && go mod tidy) && \
+  -	(cd $$dir && git diff --exit-code -- go.mod go.sum >/dev/null 2>&1; \
+  -	 git checkout -- go.mod go.sum 2>/dev/null || true) && \
+  +	(cd $$dir && git diff --exit-code -- go.mod go.sum >/dev/null 2>&1; rc=$$?; \
+  +	 git checkout -- go.mod go.sum 2>/dev/null || true; \
+  +	 if [ $$rc -ne 0 ]; then echo "FAIL: $$dir has untidy go.mod/go.sum"; fi; exit $$rc) && \
+  	echo "=== $$dir CI checks passed ==="
+  ```
+- **回归测试**: 新增 `scripts/test_makefile_tidy_check.py`（6 个用例，纯 stdlib，无需 Go 工具链/网络）：
+  1. `test_go_ci_component_uses_rc_capture` — 断言 `go-ci-component` recipe 含 `rc=$$?` 与 `exit $$rc`。
+  2. `test_go_quality_component_uses_rc_capture` — 同上，针对 `go-quality-component`。
+  3. `test_no_buggy_drift_check_pattern_remains` — 全文扫描：每个 `git diff --exit-code -- go.mod go.sum` 必须在后续 2 行内被 `rc=$$?` 或 `if [ $$? -ne 0 ]` 守卫。
+  4. `test_fixed_snippet_fails_on_untidy_go_mod` — 端到端：untidy go.mod 下固定版子 shell 必须非零退出。
+  5. `test_fixed_snippet_passes_on_tidy_go_mod` — 端到端：tidy go.mod 下固定版子 shell 必须零退出。
+  6. `test_buggy_snippet_silently_passes_on_untidy_go_mod` — 文档型：复现 bug 行为（bug 版子 shell 在 untidy 时仍返回 0），用于未来若有人"简化"recipe 时立即报警。
+  - 运行：`python3 scripts/test_makefile_tidy_check.py`，6/6 通过。
+- **关联**: CI-MASK-1（同一 Makefile 的 masking 反模式家族）、CI-MASK-2、ADR-006 L294（声明 fmt/vet/tidy 基线掩盖意图，但未授权 drift 检查本身失效）、MAKE-MISSING-1（CI 实际不调用 Makefile 目标的结构性原因）。本条目由 post-commit 正确性审查（PR #120 评审）发现，经两个独立 subagent 交叉验证（静态分析 + 经验复现 + 溯源）确认。
+
