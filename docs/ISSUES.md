@@ -40,27 +40,12 @@
 
 ## High
 
-### H4: SOCKS5代理DNS重绑定攻击风险
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt` (L107-131, L264)
-- **问题**: `validateTargetAddress` 中进行了一次 DNS 解析（`InetAddress.getByName(host)`，L112）验证 IP 范围，但后续 `bootstrap.connect(host, port)`（L264）会**再次独立解析 DNS**。攻击者可控制 DNS 服务器，在验证时返回合法 IP（如 10.x.x.x），在实际连接时解析到内网地址（如 127.0.0.1），绕过 IP 验证。此外 `InetAddress.getByName()` 是同步阻塞调用（见 N30）。
-- **风险**: 攻击者可能通过 DNS 重绑定绕过 IP 验证，访问内网资源
-- **建议修复**:
-  1. 验证通过后缓存解析结果，后续连接使用已验证的 IP（`connect(InetSocketAddress(ip, port))`）
-  2. 检查解析后的 IP 是否与目标域名匹配
-  3. 考虑使用 DNS-over-HTTPS (DoH)
-- **代码**:
-  ```kotlin
-  private fun validateTargetAddress(host: String, port: Int): Boolean {
-      // ... 端口验证 ...
-      val inetAddr = java.net.InetAddress.getByName(host)  // 第一次解析
-      val ip = inetAddr.hostAddress ?: return false
-      // IP范围验证：拒绝127.x, 169.254.x, 0.0.0.0, 255.255.255.255, 224.x
-      // 仅允许RFC1918私有地址
-      IpAddressUtils.isPrivateIpv4Rfc1918(ip)
-  }
-  // ...
-  bootstrap.connect(host, port)  // 第二次独立解析！
-  ```
+### H4: SOCKS5代理DNS重绑定攻击风险 [已修复]
+- **状态**: 已修复
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/proxy/Socks5ProxyHandler.kt` (L109-137)
+- **修复内容**: `validateTargetAddress` 现在直接拒绝域名类型地址（SOCKS5 ATYP=0x03），返回 `false`。注释明确说明：域名地址会绕过 IP 验证（因为 DNS 解析被推迟到连接器阶段），允许域名将使工程师能够访问公网资源，违反"仅允许 RFC1918/ULA 私有地址"的安全策略。
+- **残余风险**: 低。客户端无法再通过域名发起 SOCKS5 连接，从根源上消除 DNS 重绑定窗口。注释中仍引用 H4 与 N30 作为历史背景。
+- **关联问题**: N30（已弃用同步 DNS 调用）
 
 ### H5: 连接池清理竞争条件 [已修复]
 - **状态**: 已修复
@@ -211,11 +196,12 @@
 - **风险**: 低。日志噪音，不利于问题排查
 - **建议修复**: 调整日志级别，使用结构化日志或 MDC
 
-### N10: 监控指标缺失
-- **位置**: 全局
-- **问题**: 没有性能指标收集（连接建立时间、流量统计等），没有健康检查端点，没有错误上报机制
-- **风险**: 中。难以发现和诊断线上问题
-- **建议修复**: 添加关键指标收集和上报机制
+### N10: 监控指标缺失 [部分修复]
+- **状态**: 部分修复
+- **位置**: `server/tunnel/main.go` (L970-972)
+- **已修复部分**: Tunnel Gateway 已暴露 `/health` 和 `/stats` 两个 HTTP 端点（L971-972），分别用于健康检查和性能指标查询。`/stats` 端点可通过 `--stats-token` 标志（L1000）配置访问令牌保护。
+- **未修复部分**: 仍缺少结构化错误上报机制（如 Sentry/Prometheus alertmanager 集成）；Android 客户端侧尚无指标收集与上报。
+- **残余风险**: 中。服务端基础可观测性已具备，但跨组件错误聚合与客户端侧监控仍缺失。
 
 ### N11: 硬编码默认值不安全 [已修复]
 - **状态**: 已修复（release 构建改为 fail-fast，debug 保留 localhost 默认值用于本地开发）
@@ -331,13 +317,13 @@
 ### H14: processTcpReturn 调用路径仍阻止0长度 TCP 控制包注入
 - **状态**: 已修复
 - **修复提交**: `07aaa3b`
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/ConnectionSessionManager.kt`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/ConnectionSessionManager.kt` (L186-190)、`ConnectionSession.kt` (L8-102)、`VpnPacketProcessor.kt` (L106-130)
 - **修复内容**:
   - `ConnectionSession` 新增 `TcpState` 枚举和 seq/ack 管理
   - `VpnPacketProcessor` 支持动态 TCP 标志位（SYN+ACK, FIN+ACK, ACK, RST, PSH+ACK）
   - `processTcpReturn` 处理无数据但需控制包场景（`needsControlPacket()`）
   - 新增11个TCP控制包相关测试
-- **风险**: 高。当前返回路径对纯TCP控制包支持不完整，可能导致连接状态推进异常或超时。
+- **残余风险**: 无
 
 ### H15: VpnService测试直接实例化Android Service
 - **状态**: 已修复

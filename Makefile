@@ -44,12 +44,17 @@ help:
 # Android
 # ---------------------------------------------------------------------------
 
-# Cross-platform Gradle wrapper: use .bat on Windows, shell script elsewhere
+# Force sh shell on Windows for bash-compatible recipe syntax.
+# mingw32-make defaults to cmd.exe which cannot parse bash functions like
+# comp_path() used in go-* targets. Git for Windows ships sh.exe.
 ifeq ($(OS),Windows_NT)
-GRADLEW := gradlew.bat
-else
-GRADLEW := ./gradlew
+SHELL := C:/Program Files/Git/bin/sh.exe
 endif
+
+# Cross-platform Gradle wrapper. With SHELL forced to sh on Windows (via Git
+# Bash), use the Unix gradlew script uniformly. The .bat variant is not
+# invocable from sh.
+GRADLEW := ./gradlew
 
 ANDROID_DIR := android
 
