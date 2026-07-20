@@ -1500,3 +1500,25 @@
 - **风险**: **高**。工程师可通过域名访问公网资源，完全绕过私有网络访问策略
 - **修复方式**: 对域名目标返回 `false`，拒绝所有域名连接，确保安全策略一致。更新注释说明拒绝原因
 
+## 提交后正确性检查发现
+
+### REV43: PR #108 API 服务器 CORS `AllowOrigins` 硬编码 localhost 导致生产环境跨域请求被 403 拒绝 [已修复]
+- **修复状态**: 已修复（堆叠修复 PR，目标分支为 PR #108 的 `jules-16778843622874874870-dedfe299`）
+- **提交哈希**: `ed27556`（PR #108 head；问题由此提交引入，`main` 不受影响）
+- **位置**: `server/api/main.go` (L1234-L1243, `main()` 内的 CORS 配置块)
+- **问题描述**: PR #108 为 API 服务器新增 `gin-contrib/cors v1.7.7` 中间件时，将 `corsConfig.AllowOrigins` 硬编码为 `["http://localhost:3000", "http://localhost:8080"]`，并附带 `// TODO: Read allowed origins from environment variable in production` 注释。`gin-contrib/cors@v1.7.7` 在 `(*cors).applyCors`（`config.go:85-88`）中对不在 `AllowOrigins` 列表中的 Origin 直接调用 `c.AbortWithStatus(http.StatusForbidden)`，而不是仅省略 `Access-Control-Allow-Origin` 响应头。结果：任何非 localhost 的 Origin（即生产环境前端的实际域名）都会在到达路由处理器之前被中间件以 403 中止。
+- **触发场景**: (1) API 服务器部署到生产环境（如 `https://api.example.com`），前端部署在 `https://app.example.com`；(2) 浏览器发送 `POST /api/login`，携带 `Origin: https://app.example.com`；(3) CORS 中间件：Origin 不匹配 `http://localhost:3000/8080`、不匹配 `http://+Host`/`https://+Host`（host 不同）→ `c.AbortWithStatus(403)`；(4) 路由处理器和认证中间件均不执行，前端对所有跨域请求收到 403，应用不可用。(5) 同样影响任何携带 `Origin` 头的非浏览器客户端（部分移动 SDK、API 网关、监控探针、Hoppshotch 等 Web API 工具）。
+- **回归证据**: 在 PR #108 合入前无 CORS 中间件，跨域请求能到达处理器（浏览器端才会拦截响应）；PR #108 后服务器端硬性 403 中止。`server/tunnel/main.go:962` 已有 env-var 驱动的 `TUNNEL_ALLOWED_ORIGINS` 模式（配合 `parseAllowedOrigins`，`server/tunnel/main.go:607`），API 服务器未采用相同模式，是不一致。
+- **风险**: **高**。功能性回归（生产环境阻断），不是安全漏洞本身（403 拒绝反而更安全），但导致应用完全不可用。安全方向正确，但 origin 白名单是硬编码 dev 值。
+- **修复难度**: 低
+- **修复方式**:
+  1. 抽取 `buildCorsConfig(allowedOriginsEnv string) cors.Config` 与 `parseCORSAllowedOrigins(raw string) []string` 两个辅助函数。
+  2. `main()` 中以 `buildCorsConfig(os.Getenv("API_ALLOWED_ORIGINS"))` 替换原硬编码块。
+  3. `parseCORSAllowedOrigins` 按逗号分隔、trim 空白、丢弃空条目；若 env 未设置或全部为空，回退到原 dev 默认值 `["http://localhost:3000", "http://localhost:8080"]`，保证本地开发不受影响。
+  4. 移除 `// TODO` 注释。
+- **关联模式**: 与 `server/tunnel/main.go` 的 `TUNNEL_ALLOWED_ORIGINS` + `parseAllowedOrigins` 模式一致；本修复使用更简单的字符串切片返回（不做 origin 规范化），因为 `gin-contrib/cors` 内部已做精确字符串匹配，不需要 set 语义。
+- **验证**: 新增 11 个测试（`TestParseCORSAllowedOrigins_*` 4 个、`TestBuildCorsConfig_*` 2 个、`TestCORSIntegration_*` 5 个），覆盖：(a) env 未设置时回退默认值；(b) env 设置时使用 env 值；(c) 空白条目被丢弃；(d) 默认配置下生产 origin 收到 403（回归守卫）；(e) env 设置后生产 origin 收到 200 + 正确 ACAO 头（修复验证）；(f) env 设置后未授权 origin 仍被 403 拒绝（安全守卫）；(g) 允许 origin 的 OPTIONS 预检返回 204。所有测试通过。
+- **经验性复现**: 独立 subagent 编写了独立 Go 程序，使用 PR #108 完全相同的 `corsConfig`，通过 `httptest` 发送请求，观测到：允许 origin → 200；`https://app.example.com` → 403；OPTIONS 预检非允许 origin → 403。库源码 `config.go:85-88` 证实 `AbortWithStatus(http.StatusForbidden)` 行为。
+- **交叉验证**: 3 个独立 subagent 一致确认（原始审查 + 经验性复现 + 独立复审）。
+- **未引入新回归**: `AllowCredentials=true` + 显式 origin 列表是安全的（无 `*`）；认证中间件按路由注册，CORS 不会绕过认证；preflight 正确在认证前短路。修复保持所有原有配置（AllowMethods/AllowHeaders/ExposeHeaders/AllowCredentials/MaxAge）不变。
+
