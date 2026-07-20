@@ -73,6 +73,11 @@
     <string name="audit_logs_empty">No recent logs.</string>
     <string name="clear_logs">Clear logs</string>
 
+    <string name="clear_logs_confirm_title">Clear all logs?</string>
+    <string name="clear_logs_confirm_message">This action cannot be undone.</string>
+    <string name="clear_logs_confirm_ok">Clear</string>
+    <string name="clear_logs_confirm_cancel">Cancel</string>
+
     <string name="diagnostics_title">Diagnostics</string>
     <string name="diagnostics_connection_duration">Connection duration</string>
     <string name="diagnostics_last_heartbeat">Last heartbeat</string>

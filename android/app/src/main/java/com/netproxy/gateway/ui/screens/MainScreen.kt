@@ -40,6 +40,8 @@ import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -336,6 +338,32 @@ private fun AuditLogsScreen(
         DateTimeFormatter.ofPattern("HH:mm:ss", Locale.getDefault())
             .withZone(ZoneId.systemDefault())
     }
+    var showClearConfirmDialog by rememberSaveable { mutableStateOf(false) }
+
+    if (showClearConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showClearConfirmDialog = false },
+            title = { Text(stringResource(R.string.clear_logs_confirm_title)) },
+            text = { Text(stringResource(R.string.clear_logs_confirm_message)) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        AppAuditLogStore.clear()
+                        showClearConfirmDialog = false
+                    }
+                ) {
+                    Text(stringResource(R.string.clear_logs_confirm_ok))
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showClearConfirmDialog = false }
+                ) {
+                    Text(stringResource(R.string.clear_logs_confirm_cancel))
+                }
+            }
+        )
+    }
 
     Column(
         modifier = Modifier
@@ -344,9 +372,8 @@ private fun AuditLogsScreen(
             .padding(16.dp)
     ) {
         OutlinedButton(
-            onClick = {
-                AppAuditLogStore.clear()
-            }
+            onClick = { showClearConfirmDialog = true },
+            enabled = visibleEntries.isNotEmpty()
         ) {
             Text(stringResource(R.string.clear_logs))
         }
