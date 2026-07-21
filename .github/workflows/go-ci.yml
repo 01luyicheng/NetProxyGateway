@@ -1,0 +1,205 @@
+# Go CI — required check: "Go Server Build (<component>)"
+# Uses matrix.include to avoid cartesian product. 7 components: 3 server + 4 shared.
+# paths-ignore ensures the workflow always triggers on PRs (required check needs a conclusion).
+# dorny/paths-filter detects per-component changes; skips build if none but outputs success.
+name: Go CI
+
+on:
+  pull_request:
+    branches: [main, dev]
+    types: [opened, synchronize, reopened]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.gitattributes'
+      - '.commitlintrc.json'
+      - '.editorconfig'
+      - 'android/**'
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  go:
+    name: Go Server Build (${{ matrix.component }})
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: api
+            path: server/api
+          - component: socks5-proxy
+            path: server/socks5-proxy
+          - component: tunnel
+            path: server/tunnel
+          - component: httpclient
+            path: server/shared/httpclient
+          - component: ratelimit
+            path: server/shared/ratelimit
+          - component: recovery
+            path: server/shared/recovery
+          - component: stringutil
+            path: server/shared/stringutil
+    env:
+      # Cache isolation per component (persistent self-hosted runner)
+      GOMODCACHE: /tmp/go-mod-${{ matrix.component }}
+      GOCACHE: /tmp/go-build-${{ matrix.component }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Detect changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            component:
+              - '${{ matrix.path }}/**'
+              - 'Makefile'
+              - '.github/workflows/go-ci.yml'
+
+      - name: Set up Go
+        if: steps.filter.outputs.component == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.path }}/go.mod
+          cache: false
+
+      # Self-hosted runner: /tmp/go-mod-* and /tmp/go-build-* persist across jobs.
+      # actions/cache@v4 restore-by-tar emits "Cannot open: File exists" warnings
+      # when residual files from a prior job collide with the tar extraction.
+      # Although cache restore degrades to a warning (does not fail the step),
+      # the cache is not restored, forcing redundant module downloads on every
+      # run. Pre-clean the directories so restore starts from empty.
+      #
+      # `chmod -R +w` is required because Go toolchain files extracted by
+      # setup-go (under golang.org/toolchain@v*/src/) are marked read-only by
+      # default. Without chmod, `rm -rf` fails with "Permission denied" on these
+      # files. sudo is NOT an option — this self-hosted runner does not have
+      # NOPASSWD sudo configured.
+      # See docs/ISSUES.md CACHE-RESTORE-1.
+      - name: Clean residual Go cache directories
+        if: steps.filter.outputs.component == 'true'
+        run: |
+          chmod -R +w /tmp/go-mod-"${{ matrix.component }}" /tmp/go-build-"${{ matrix.component }}" 2>/dev/null || true
+          rm -rf /tmp/go-mod-"${{ matrix.component }}" /tmp/go-build-"${{ matrix.component }}"
+
+      - name: Cache Go modules and build cache
+        if: steps.filter.outputs.component == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/go-mod-${{ matrix.component }}
+            /tmp/go-build-${{ matrix.component }}
+          key: ${{ runner.os }}-go-${{ matrix.component }}-${{ hashFiles(format('{0}/go.sum', matrix.path), format('{0}/go.mod', matrix.path)) }}
+          restore-keys: |
+            ${{ runner.os }}-go-${{ matrix.component }}-
+
+      - name: Check gcc availability
+        if: steps.filter.outputs.component == 'true'
+        id: gcc
+        run: |
+          if command -v gcc &>/dev/null; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Step 7.1: go build — HARD GATE (no continue-on-error).
+      # Was previously masked along with test+quality in a single
+      # `make go-ci-component` step; see docs/ISSUES.md CI-MASK-1.
+      #
+      # Inlines `cd ${{ matrix.path }} && go build -v ./...` instead of
+      # `make go-build-component` because the self-hosted runner does not
+      # have `make` installed and lacks NOPASSWD sudo to apt-get install it.
+      # matrix.path already provides the full component directory, so the
+      # Makefile's `comp_path()` indirection is not needed.
+      # See docs/ISSUES.md MAKE-MISSING-1.
+      - name: Build ${{ matrix.component }}
+        if: steps.filter.outputs.component == 'true'
+        env:
+          CGO_ENABLED: ${{ steps.gcc.outputs.available == 'true' && '1' || '0' }}
+        working-directory: ${{ matrix.path }}
+        run: go build -v ./...
+
+      # Step 7.2: go test — HARD GATE (no continue-on-error). Generates
+      # coverage.out in the component directory for the artifact upload.
+      - name: Test ${{ matrix.component }}
+        if: steps.filter.outputs.component == 'true' && success()
+        env:
+          CGO_ENABLED: ${{ steps.gcc.outputs.available == 'true' && '1' || '0' }}
+        working-directory: ${{ matrix.path }}
+        run: go test -v -coverprofile=coverage.out ./...
+
+      # Step 7.3: quality checks (gofmt + vet + mod-tidy) — masked per ADR-006
+      # baseline collection. Runs even if test failed (always()) so the
+      # baseline is still collected for triage.
+      - name: Quality checks for ${{ matrix.component }}
+        if: always() && steps.filter.outputs.component == 'true'
+        env:
+          CGO_ENABLED: ${{ steps.gcc.outputs.available == 'true' && '1' || '0' }}
+        working-directory: ${{ matrix.path }}
+        run: |
+          out=$(find . -name '*.go' -not -path '*/vendor/*' -exec gofmt -l {} + 2>/dev/null)
+          if [ -n "$out" ]; then
+            echo "FAIL: gofmt found unformatted files:"
+            echo "$out"
+            exit 1
+          fi
+          go vet ./...
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum >/dev/null 2>&1 || {
+            echo "FAIL: go.mod/go.sum not tidy"
+            git checkout -- go.mod go.sum 2>/dev/null || true
+            exit 1
+          }
+        continue-on-error: true  # ADR-006: fmt/vet/tidy baseline collection
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always() && steps.filter.outputs.component == 'true'
+        with:
+          name: go-coverage-${{ matrix.component }}
+          path: ${{ matrix.path }}/coverage.out
+          if-no-files-found: ignore  # build/test may not have produced coverage.out
+
+      - name: Install govulncheck
+        if: always() && steps.filter.outputs.component == 'true'
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run vulnerability check
+        if: always() && steps.filter.outputs.component == 'true'
+        working-directory: ${{ matrix.path }}
+        run: govulncheck ./...
+        continue-on-error: true
+
+      - name: No changes for ${{ matrix.component }} — skip
+        if: steps.filter.outputs.component == 'false'
+        run: echo "No changes for ${{ matrix.component }}, skipping build & test."
+
+      # Per-job cleanup: only remove build cache (GOCACHE), keep module cache (GOMODCACHE)
+      - name: Cleanup build cache
+        if: always()
+        run: |
+          chmod -R +w "$GOCACHE" 2>/dev/null || true
+          rm -rf "$GOCACHE" 2>/dev/null || true

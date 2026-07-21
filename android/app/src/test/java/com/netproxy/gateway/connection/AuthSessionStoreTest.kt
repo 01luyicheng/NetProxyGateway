@@ -5,12 +5,14 @@ import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.netproxy.gateway.result.AppResult
+import com.netproxy.gateway.utils.securelyClear
 import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
 import io.mockk.mockkConstructor
 import io.mockk.mockkStatic
 import io.mockk.runs
+import io.mockk.spyk
 import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.CoroutineScope
@@ -869,8 +871,140 @@ class AuthSessionStoreTest {
         assertTrue(session1!!.authToken.contentEquals(session2!!.authToken))
         // The returned CharArray should be a copy, not the same reference as inMemoryToken
         // (Modifying one should not affect the other)
-        session1.authToken.fill('\u0000')
+        session1.authToken.securelyClear()
         assertFalse(session2.authToken.contentEquals(CharArray("secret-token".length)))
         assertTrue(session2.authToken.contentEquals("secret-token".toCharArray()))
+    }
+
+    // ==================== 凭证零化路径测试 (C82) ====================
+    //
+    // 验证 AuthSessionStore 中 6 处 securelyClear() 调用确实将 CharArray 填零。
+    // - update/updateWithResult/clear/clearWithResult: 通过反射捕获 inMemoryToken 旧引用，
+    //   断言在新值替换/清空前旧引用已被填零。
+    // - isValid/validateWithResult: loadSession() 返回的 authToken 是 inMemoryToken 的副本，
+    //   finally 块零化的是该副本。使用 spyk 拦截私有 loadSession() 以捕获该副本引用。
+
+    @Test
+    fun update_zerosOldInMemoryTokenBeforeReplace() {
+        // Setup: populate inMemoryToken with an initial value
+        authSessionStore.update("device-1", "old-token".toCharArray())
+
+        // Capture the old inMemoryToken reference via reflection
+        val oldToken = getInMemoryToken(authSessionStore)
+        assertNotNull("inMemoryToken should be set after update", oldToken)
+        assertTrue(
+            "oldToken should hold 'old-token' before the second update",
+            oldToken!!.contentEquals("old-token".toCharArray())
+        )
+
+        // Act: update with a new token; this should zero the old inMemoryToken before replacing it
+        authSessionStore.update("device-2", "new-token".toCharArray())
+
+        // Assert: the old reference (captured above) should now be filled with '\u0000'
+        assertTrue(
+            "Old inMemoryToken should be zeroed before being replaced in update()",
+            oldToken.all { it == '\u0000' }
+        )
+    }
+
+    @Test
+    fun updateWithResult_zerosOldInMemoryTokenBeforeReplace() {
+        authSessionStore.update("device-1", "old-token".toCharArray())
+
+        val oldToken = getInMemoryToken(authSessionStore)
+        assertNotNull("inMemoryToken should be set after update", oldToken)
+
+        val result = authSessionStore.updateWithResult("device-2", "new-token".toCharArray())
+
+        assertTrue(result.isSuccess())
+        assertEquals(Unit, result.getOrNull())
+        assertTrue(
+            "Old inMemoryToken should be zeroed before being replaced in updateWithResult()",
+            oldToken!!.all { it == '\u0000' }
+        )
+    }
+
+    @Test
+    fun clear_zerosInMemoryToken() {
+        authSessionStore.update("device-1", "secret-token".toCharArray())
+
+        val oldToken = getInMemoryToken(authSessionStore)
+        assertNotNull("inMemoryToken should be set after update", oldToken)
+
+        authSessionStore.clear()
+
+        assertTrue(
+            "inMemoryToken should be zeroed by clear()",
+            oldToken!!.all { it == '\u0000' }
+        )
+        assertNull("inMemoryToken field should be null after clear()", getInMemoryToken(authSessionStore))
+    }
+
+    @Test
+    fun clearWithResult_zerosInMemoryToken() {
+        authSessionStore.update("device-1", "secret-token".toCharArray())
+
+        val oldToken = getInMemoryToken(authSessionStore)
+        assertNotNull("inMemoryToken should be set after update", oldToken)
+
+        val result = authSessionStore.clearWithResult()
+
+        assertTrue(result.isSuccess())
+        assertEquals(Unit, result.getOrNull())
+        assertTrue(
+            "inMemoryToken should be zeroed by clearWithResult()",
+            oldToken!!.all { it == '\u0000' }
+        )
+        assertNull(
+            "inMemoryToken field should be null after clearWithResult()",
+            getInMemoryToken(authSessionStore)
+        )
+    }
+
+    @Test
+    fun isValid_zerosSessionAuthTokenCopyInFinally() {
+        // Use a spy to intercept the private loadSession() so isValid() operates on
+        // a ProxyAuthSession whose authToken reference we hold. The finally block in
+        // isValid() should zero that authToken copy.
+        val spy = spyk(authSessionStore)
+
+        val capturedToken = "token-abc".toCharArray()
+        val stubbedSession = ProxyAuthSession("device-123", capturedToken)
+
+        every { spy["loadSession"]() } returns stubbedSession
+
+        val result = spy.isValid("device-123", "token-abc".toCharArray())
+
+        assertTrue("isValid should return true for valid credentials", result)
+        assertTrue(
+            "session.authToken copy should be zeroed in isValid()'s finally block",
+            capturedToken.all { it == '\u0000' }
+        )
+    }
+
+    @Test
+    fun validateWithResult_zerosSessionAuthTokenCopyInFinally() {
+        val spy = spyk(authSessionStore)
+
+        val capturedToken = "token-abc".toCharArray()
+        val stubbedSession = ProxyAuthSession("device-123", capturedToken)
+
+        every { spy["loadSession"]() } returns stubbedSession
+
+        val result = spy.validateWithResult("device-123", "token-abc".toCharArray())
+
+        assertTrue("validateWithResult should return success", result.isSuccess())
+        assertEquals(true, result.getOrNull())
+        assertTrue(
+            "session.authToken copy should be zeroed in validateWithResult()'s finally block",
+            capturedToken.all { it == '\u0000' }
+        )
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun getInMemoryToken(store: AuthSessionStore): CharArray? {
+        val field = AuthSessionStore::class.java.getDeclaredField("inMemoryToken")
+        field.isAccessible = true
+        return field.get(store) as CharArray?
     }
 }

@@ -10,6 +10,9 @@ import android.content.Context
 import android.content.ContextWrapper
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.ui.draw.rotate
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -17,11 +20,16 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SignalCellularAlt
@@ -37,9 +45,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.hilt.navigation.compose.hiltViewModel
 
 import com.netproxy.gateway.R
@@ -501,6 +512,7 @@ fun PairingSection(
     viewModel: MainViewModel
 ) {
     var pairingCode by rememberSaveable { mutableStateOf("") }
+    val focusManager = LocalFocusManager.current
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -516,10 +528,35 @@ fun PairingSection(
 
             OutlinedTextField(
                 value = pairingCode,
-                onValueChange = { pairingCode = it },
+                onValueChange = { newValue ->
+                    if (newValue.length <= 6 && newValue.all { it in '0'..'9' }) {
+                        pairingCode = newValue
+                    }
+                },
                 label = { Text(stringResource(R.string.pairing_code_input_label)) },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !uiState.isPairingInProgress
+                enabled = !uiState.isPairingInProgress,
+                singleLine = true,
+                placeholder = { Text(stringResource(R.string.pairing_hint)) },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(
+                    onDone = {
+                        if (pairingCode.length >= 6 && !uiState.isPairingInProgress) {
+                            focusManager.clearFocus()
+                            viewModel.pairWithCode(pairingCode)
+                        }
+                    }
+                ),
+                trailingIcon = {
+                    if (pairingCode.isNotEmpty() && !uiState.isPairingInProgress) {
+                        IconButton(onClick = { pairingCode = "" }) {
+                            Icon(
+                                imageVector = Icons.Default.Clear,
+                                contentDescription = stringResource(R.string.clear_input)
+                            )
+                        }
+                    }
+                }
             )
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -824,15 +861,21 @@ private fun DiagnosticsCard(uiState: UiState) {
                     text = stringResource(R.string.diagnostics_title),
                     style = MaterialTheme.typography.titleMedium
                 )
-                Text(
-                    text = if (expanded) "▲" else "▼",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                val rotation by animateFloatAsState(
+                    targetValue = if (expanded) 180f else 0f,
+                    label = "expand_icon_rotation"
+                )
+                Icon(
+                    imageVector = Icons.Default.KeyboardArrowDown,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.rotate(rotation)
                 )
             }
 
-            if (expanded) {
-                Spacer(modifier = Modifier.height(12.dp))
+            AnimatedVisibility(visible = expanded) {
+                Column {
+                    Spacer(modifier = Modifier.height(12.dp))
 
                 val durationSec = uiState.connectionDurationMs / 1000
                 DiagnosticsRow(
@@ -896,6 +939,7 @@ private fun DiagnosticsCard(uiState: UiState) {
                         if (uiState.networkIsValidated) R.string.network_in_use else R.string.network_not_in_use
                     )
                 )
+                }
             }
         }
     }

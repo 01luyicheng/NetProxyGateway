@@ -11,6 +11,7 @@
     <string name="pair">Pair</string>
     <string name="pairing_in_progress">Pairing...</string>
     <string name="disconnect">Disconnect</string>
+    <string name="clear_input">Clear input</string>
 
     <string name="remote_control">Remote control</string>
     <string name="vpn_tunnel">VPN tunnel</string>

@@ -129,6 +129,15 @@
 - **问题**: read 锁内收集无效连接、write 锁外清理时状态可能已变
 - **缓解**: 于 `write` 锁内对 `!conn.inUse.get() && !conn.isValid()` 二次校验后再 `remove`/`close`
 
+### VPNLOG-IPV6-1: redactConnectionKey 使用 substringBefore(":") 错误截断 IPv6 地址
+- **提交哈希**: `623e369`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnLogRedaction.kt` (L94-95)
+- **问题**: `redactConnectionKey` 使用 `segments[0].substringBefore(":")` 从 "srcIp:srcPort" 中提取 IP。对 IPv4 正常（`192.168.1.100:12345` → `192.168.1.100`），但对 IPv6 会截断到第一个冒号前（`fe80::1ff:fe23:4567:890a:54321` → `fe80`）。截断后的字符串不是有效 IPv6 地址，`redactIp` 返回 `***`（REDACTED_UNKNOWN）而非 `****:****:...`（REDACTED_IPV6）。
+- **风险**: 低。IPv6 连接键在日志中被脱敏为 `***- ***` 而非 `****:****:****:****:****:****:****:****- ****:****:****:****:****:****:****:****`。不影响安全性（IP 仍被脱敏），但日志格式不一致，IPv6 流量无法与无效输入区分，影响日志分析与统计。
+- **修复难度**: 中。需区分 IPv4/IPv6 连接键格式；IPv6 地址+端口需用 `[ip]:port` 包裹或按最后冒号分隔端口。
+- **修复状态**: 未修复（pre-existing bug，超出 PR #93 范围）
+- **关联测试**: `VpnLogRedactionTest.redactConnectionKey_validFormatIpv6_returnsRedactedKey` 已记录此实际行为（期望 `***- ***`），并标注 TODO 指向本条目。
+
 ### L2: TODO注释未处理
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (L458)
 - **问题**: 存在未处理的TODO注释，涉及安全配置
@@ -815,6 +824,40 @@
 
 ---
 
+### N87: Android `testDebugUnitTest` 静默挂死
+- **状态**: 已降级（根因待查）
+- **首次发现**: CI run 28787711600（2026-07-06）
+- **位置**: `android/app/build.gradle.kts` — `testDebugUnitTest` 任务
+- **问题描述**: "Run unit tests" 步骤启动后无任何测试输出，持续挂死。T6 死锁已在 PR #65 修复，但 N87 是独立的挂死源。PR #68 尝试 `maxParallelForks=1` 串行化，**未能修复**（CI run 28844154645 确认单 fork 挂死 8h+ 无输出）。根因是某个测试在单 JVM fork 下死锁，而非 fork 间竞争。
+- **风险**: **高**。阻塞 Android CI 通过，是 dev 分支保护启用的唯一阻塞项。
+- **已采取措施**:
+  - `maxParallelForks=1` + JVM args（`-Xmx2g`, `-XX:MaxMetaspaceSize=512m`）— 排除 fork 竞争，未修复
+  - `bash timeout 15m`（ci.yml 步骤级命令包装）— 15 分钟后 SIGTERM 终止 Gradle 进程，exit code 124
+  - `continue-on-error: true`（ci.yml 步骤级）— 超时后 CI 流水线继续执行后续步骤
+  - JUnit `junit.jupiter.execution.timeout.default=5m` 系统属性 — 对 JUnit 4 测试无效（项目使用 JUnit 4）
+  - Job `timeout-minutes: 30` — 安全网兜底
+- **验证结果**: CI run 28847329722 确认降级生效 — 测试在 14m08s 后被 timeout kill（exit 124），步骤标记成功（continue-on-error），JaCoCo/Lint/Upload 步骤继续执行
+- **待调查**: 按 `--tests` 子包分段定位具体挂死的测试类；检查 Robolectric 初始化、Socket/Netty 阻塞、CountDownLatch 永不归零等场景
+
+### N88: CRLF 伪 diff（`server/api/main.go` + `MainScreen.kt` + `ci.yml`）
+- **状态**: 已修复
+- **提交哈希**: PR #67（squash merge 到 dev）
+- **位置**: `server/api/main.go`、`android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt`、`.github/workflows/ci.yml`
+- **问题描述**: `.gitattributes` 声明 `*.go text eol=lf`、`*.kt text eol=lf` 等规则，但上述文件的 git blob 实际存储为 CRLF。每次 checkout 都产生全文件伪 diff（`main.go` 2450 行、`MainScreen.kt` 1982 行、`ci.yml` 344 行），污染 `git diff` 输出且增加不必要的 merge 冲突风险。同时 `.gitattributes` 缺少 `*.yml`、`*.yaml`、`*.json`、`*.md`、`*.toml` 的规则。
+- **风险**: **低**。不影响运行时行为，仅影响开发体验。
+- **修复方案**: 补全 `.gitattributes` 缺失规则（`*.yml`/`*.yaml`/`*.json`/`*.md`/`*.toml`），执行 `git add --renormalize .` 将 blob 从 CRLF 转为 LF。
+
+### N89: GitHub Actions job-level env 不支持 `runner` context
+- **状态**: 已规避
+- **首次发现**: CI run 28858972894（2026-07-07，Step 1 实施过程中）
+- **位置**: `.github/workflows/ci.yml` — `go-build` job `env` 块
+- **问题描述**: GitHub Actions 不允许在 job-level `env` 块中使用 `${{ runner.* }}` context。设置 `GOMODCACHE: ${{ runner.temp }}/go-mod` 会导致 workflow 0 秒验证失败（无 jobs、无日志）。但 `${{ matrix.* }}` 在 job-level env 中可用，`/tmp` 等字面路径也可用。`runner.temp` 仅在 step-level `env`、`with`、`run` 中可用。
+- **风险**: **低**。不影响运行时行为，仅影响 CI workflow 编写方式。
+- **规避方案**: 使用 `/tmp/go-mod-${{ matrix.component }}` 代替 `${{ runner.temp }}/go-mod-${{ matrix.component }}`。`/tmp` 在 self-hosted runner 上跨 job 共享，但 `matrix.component` 后缀提供了 component 级隔离。
+- **待处理**: 确认 runner 上 gcc 可用性后启用 `CGO_ENABLED=1`（server/api sqlite3 依赖）
+
+---
+
 ## Panic Recovery 重构审查发现（2026-06-10，审查范围：server/shared/recovery + server/socks5-proxy/main.go）
 
 > 以下问题由 subagent 多维度代码审查发现；**待验证修复**。
@@ -1130,13 +1173,16 @@
 - **风险**: **高**。与 N37-B3 同类问题，心跳协程可能复制已清零的 token。
 - **修复方式**: 将 `startHeartbeat(deviceId, authToken, generation)` 改为 `startHeartbeat(deviceId, tokenSnapshot, generation)`。
 
-### C82: `pairWithCode()` 成功路径未清零局部 `authTokenArray`
-- **状态**: 待修复
-- **提交哈希**: `4c0cea6`
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (pairWithCode, L305-326)
-- **问题描述**: `pairWithCode()` 成功路径（蜂窝网络可用分支）中，`authTokenArray` 被传递给 `authSessionStore.update()` 和 `mqttConnectionManager.connect()`（两者内部会 copy），但 `authTokenArray` 本身在方法结束前从未被清零。只有 `else` 分支（失败路径）中执行了 `authTokenArray.fill('\u0000')`。
+### C82: `pairWithCode()` 成功路径未清零局部 `authTokenArray` [已修复]
+- **状态**: 已修复
+- **提交哈希**: `a629ba5`（原登记 `4c0cea6` 误记，该 commit 仅修改测试文件；实际回归由 `a629ba5` 引入）
+- **修复提交**: `c7875a1`（REV12 修复，重新引入 `finally { authTokenArray.fill('\u0000') }` 块）；`f433b6d`（重构：`fill('\u0000')` → `securelyClear()`，行为等价）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/viewmodel/MainViewModel.kt` (pairWithCode, L314-358)
+- **问题描述**: `pairWithCode()` 成功路径（蜂窝网络可用分支）中，`authTokenArray` 被传递给 `authSessionStore.update()` 和 `mqttConnectionManager.connect()`（两者内部会 copy），但 `authTokenArray` 本身在方法结束前从未被清零。只有 `else` 分支（失败路径）中执行了 `authTokenArray.fill('\u0000')`。该回归由 `a629ba5` 重构时移除 `finally` 块引入。
 - **风险**: **中**。配对成功后局部变量仍持有原始 token 引用，直到方法栈帧销毁。
-- **修复方式**: 在成功路径末尾（`mqttConnectionManager.connect()` 调用后）添加 `authTokenArray.fill('\u0000')`。
+- **修复难度**: 低
+- **修复方式**: `c7875a1` 将整个成功/失败路径包裹在 `try/catch/finally` 中，`finally` 块执行 `authTokenArray.fill('\u0000')`，确保成功、失败、异常路径均清零。`f433b6d` 将 `fill('\u0000')` 统一替换为 `securelyClear()` 扩展函数（`SecurityExt.kt`，对非 null 接收者行为等价）。
+- **验证**: `MainViewModelTest.pairWithCode_cellularConnected_zerosAuthTokenArrayInFinally` (L600-617) 通过 `slot<CharArray>` 捕获传给 `connect()` 的引用，断言 `tokenSlot.captured.all { it == '\u0000' }`，实测通过。
 
 ### T1: `Socks5ConnectionPoolTest` N37-B10 测试虚假通过
 - **状态**: 待修复
@@ -1181,13 +1227,15 @@
 - **风险**: **中**。安全行为缺乏回归保护，未来重构可能意外移除 zeroing 逻辑。
 - **修复方式**: 为上述三种场景补充直接测试，通过反射读取 `inMemoryToken` 或捕获返回的 `session.authToken` 引用进行验证。
 
-### T6: `Socks5ConnectionPoolTest` 并发测试存在 flaky 风险
-- **状态**: 待修复
-- **提交哈希**: `4c0cea6`
-- **位置**: `android/app/src/test/java/com/netproxy/gateway/proxy/Socks5ConnectionPoolTest.kt` (borrowConnection_cleanupInvalidConnections_doesNotCloseValidConnectionWhenInUseFlips, L24-L103)
-- **问题描述**: 测试使用真实 `Thread` 和 `ReentrantReadWriteLock`，依赖 `Thread.yield()` 和固定 2 秒超时做同步。在 CPU 负载高的 CI 环境或 Windows 系统上，线程调度顺序无法保证，可能因超时而失败。
-- **风险**: **中**。flaky test 会降低团队对 CI 的信任度，增加调试成本。
-- **修复方式**: 使用 `CountDownLatch` 或 `Semaphore` 替代 `Thread.yield()` 和固定超时，实现确定性同步。
+### T6: `Socks5ConnectionPoolTest` 并发测试存在 flaky 风险 [已修复]
+- **状态**: 已修复
+- **提交哈希**: `4c0cea6`（原登记）
+- **修复提交**: `e211cbd`（分支 `fix/ci-android-deadlock`，PR #65，2026-07-06）
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/proxy/Socks5ConnectionPoolTest.kt` (borrowConnection_cleanupInvalidConnections_doesNotCloseValidConnectionWhenInUseFlips, L24-L113)
+- **问题描述**: 测试使用真实 `Thread` 和 `ReentrantReadWriteLock`，依赖 `Thread.yield()` 和固定 2 秒超时做同步。在 CPU 负载高的 CI 环境或 Windows 系统上，线程调度顺序无法保证，可能因超时而失败。更严重的是：主线程持 read lock，borrowThread 在 cleanup 阶段需要 write lock 但拿不到——双方互相等待，`Thread.yield()` 在 CI 高负载下永远拿不到 CPU 切片，主线程空转 2 秒后 deadline 到，borrowThread 仍卡在 write lock 等待——测试挂死，且 workflow 无 `timeout-minutes` 导致 runner 被无限期占用（实测卡死 25 分钟靠手动取消才停）。
+- **风险**: **中**。flaky test 会降低团队对 CI 的信任度，增加调试成本；卡死时无限期占用 runner 消耗 Actions 额度。
+- **修复方式**: 用 `Thread.sleep(20)` 短间隔轮询替代 `Thread.yield()`（sleep 让出调度器时间片，yield 不保证），deadline 延长到 5 秒；同时给 CI workflow 加 `timeout-minutes: 30` 防止类似挂死无限期占用 runner。本地验证：T6 单跑通过、`Socks5ConnectionPoolTest` 全类通过、全量 473 测试仅 1 失败（`RootDetectorTest.checkBusyBox`，既存问题与本次修改无关）。
+- **交叉审查**: subagent `code_review` 审查通过（0 issues），审查中发现的 P3（注释与代码不一致）和 P2（queue lookup 在 try 外导致 read lock 泄漏）已修复。
 
 ### T7: `MainViewModelTest` 两个测试方法高度重复
 - **状态**: 待修复
@@ -1427,6 +1475,68 @@
 
 ---
 
+## 2026-07-06 CI 诊断新发现
+
+本次会话在修复 T6（PR #65）后触发 CI run `28787711600`，发现以下新问题。诊断提交哈希锚点：`a2dc331`（分支 `fix/ci-android-deadlock`）。
+
+### N63: Android `testDebugUnitTest` 在 CI 上挂住 27min 被 timeout 取消（另一既存 flaky 测试，非 T6）
+- **状态**: 待修复
+- **发现提交哈希**: `a2dc331`(worktree)（分支 `fix/ci-android-deadlock`，PR #65 触发的 CI run `28787711600`）
+- **位置**: `android/app/src/test/java/com/netproxy/gateway/` 下未知测试类（疑似 connection 或 vpn 包）
+- **问题描述**: PR #65 修复 T6 后再次触发 CI，Android job 在 `11:22:28` 启动 `> Task :app:testDebugUnitTest`，到 `11:49:57` 被 `timeout-minutes: 30` 取消——**27 分钟内 Gradle 未输出任何 `PASS:`/`FAIL`/`=== RUN` 行**，说明测试刚启动就挂住了（可能在加载某个测试类的初始化阶段）。这不是 T6——T6 本地单跑通过（1m30s）且全类通过；这是**另一个既存 flaky 测试**，之前被 T6 的死锁掩盖（T6 卡死时 unit test 步骤根本跑不到这个测试）。
+- **风险**: **高**。Android job 永远无法在 CI 上通过，阻塞所有 PR 的 required check。`timeout-minutes: 30` 防止了 runner 无限期占用，但失败结论不变。
+- **修复难度**: 中高。需在 CI 上启用 Gradle 实时输出（`--tests` 配合 `testOptions.reportPool` 或 `-Dorg.gradle.parallel.in-process=true`）多次单跑定位挂住的测试类；本地无法复现（本地 473 测试 9 分钟内完成）。
+- **修复方式**: (1) 在 CI workflow 的 `Run unit tests` 步骤追加 `--tests` 参数分段执行，或启用 `testDebugUnitTest` 的实时日志输出；(2) 在 `app/build.gradle.kts` 的 `testOptions` 加 `execution` 配置减少 fork 并发；(3) 定位后用确定性同步（`CountDownLatch`/`Semaphore`）替代挂住的 `Thread.yield()`/固定超时。
+- **关联**: 本条目与 T6 同类别（flaky 并发测试），但根因不同。T6 已修复，本条目是新暴露的下一层 flaky。
+
+### N64: `server/api/main.go` 在 git 中存储为 CRLF 但 `.gitattributes` 声明 `*.go text eol=lf`，导致每次 checkout 出现伪 diff
+- **状态**: 待修复
+- **发现提交哈希**: `a2dc331`(worktree)（分支 `fix/ci-android-deadlock`）
+- **位置**: `server/api/main.go`（git blob 内容为 CRLF）、`.gitattributes`（`*.go text eol=lf`）
+- **问题描述**: `git show HEAD:server/api/main.go | file -` 输出 `Unicode text, UTF-8 text, with CRLF line terminators`——该文件在 git 仓库 blob 中存储为 CRLF。但 `.gitattributes` 声明 `*.go text eol=lf`，要求 checkout 时强制转换为 LF。结果每次 `git checkout`/`git restore` 后，工作区文件被转为 LF，与 blob 的 CRLF 比对出现"全文修改"的伪 diff（实测显示 `2216 insertions / 2216 deletions`，即整个文件每一行都被"改了"）。本次会话中多次因 cherry-pick / stash / reset 触发该伪 diff，干扰变更审查。
+- **风险**: **低**。不影响构建或测试，但污染 `git status`/`git diff`，干扰 Agent 和开发者判断真实变更范围；可能让不该提交的"全文修改"被误 commit。
+- **修复难度**: 低。
+- **修复方式**: 一次性 normalize 该文件的行尾——`git rm --cached server/api/main.go && renormalize` 或 `dos2unix server/api/main.go && git add`，然后提交"normalize line endings"单提交。提交后 `.gitattributes` 的规则会对该文件生效，伪 diff 消失。
+- **关联**: 与 docs/CI_REFACTOR_PLAN.md 中"artifact 路径"等 bug 同源（都是 dev 分支历史遗留的配置不一致）。
+
+## 2026-07-10 提交后正确性检查发现（过去 24h 提交/PR 审查）
+
+### CI-PERM-1: PR #76 仅在 workflow 顶层加 `pull-requests: read` 被 job 级 `permissions:` 覆盖，paths-filter 仍 403（必需 CI 检查在所有 PR 事件上失败）[已修复]
+- **状态**: 已修复（本 PR `fix/pr76-paths-filter-job-perms`）
+- **发现位置**: PR #76 `fix/ci-paths-filter-permissions`（base: `dev`），提交 `8de3dfc`
+- **影响文件**: `.github/workflows/android-ci.yml`、`.github/workflows/go-ci.yml`
+- **问题描述**: PR #76 旨在修复 `dorny/paths-filter@v3` 在 `pull_request` 事件下的 "Resource not accessible by integration"（HTTP 403）错误，但仅在 workflow **顶层** `permissions:` 块加入 `pull-requests: read`。而 `android` 与 `go` 两个 job 各自声明了 **job 级** `permissions:` 块（`contents: read` + `actions: write`）。按 GitHub Actions 语义，job 级 `permissions:` 块会**完全替换**（而非合并）workflow 顶层块，未列出的 scope 一律降为 `none`。因此顶层新加的 `pull-requests: read` 对这两个 job 完全无效，paths-filter 仍在 `pull-requests: none` 下调用 GitHub REST API 拉取 PR 变更文件列表，触发 403。该步骤无 `continue-on-error`，导致 job 失败 → 两个被标为 "required check" 的检查（`Android Build & Test`、`Go Server Build (...)`）在**所有** PR 事件上持续红灯，PR 处于 `mergeable_state: blocked` 无法合并；若维护者为解阻塞而关闭必需检查，则 PR 事件 CI 形同虚设，缺陷将绕过审查流入主干。PR #76 对其声称目标而言是 no-op。
+- **触发场景**: 任意针对 `main`/`dev` 的 `pull_request`（opened/synchronize/reopened，未被 `paths-ignore` 排除）→ `Detect changes` 步骤调用 paths-filter → REST API 403 → 步骤失败 → 必需检查失败 → PR 无法合并。
+- **风险**: **高**（dev 工作流严重退化）。阻塞所有 PR 合并；或迫使维护者关闭必需检查，使 CI 失去对 PR 的把关能力。`push` 事件不受影响（paths-filter 在 push 时用 git diff，不调 PR API）。
+- **根因**: 对 GitHub Actions 权限 "job 级替换顶层级、不合并"（scope zeroing）语义的误解。
+- **验证**: 官方文档 [Assigning permissions to jobs](https://docs.github.com/en/actions/using-jobs/assigning-permissions-to-jobs) + [dorny/paths-filter README](https://github.com/dorny/paths-filter)（"Requires pull-requests: read permission"）。PR #76 的 `mergeable_state: blocked` 与该判断一致。
+- **修复方式**: 在两个 workflow 的 `android`/`go` job 的 **job 级** `permissions:` 块中加入 `pull-requests: read`（保留 `contents: read` 与 `actions: write`，维持最小权限；`actions: write` 仍为 `actions/cache@v4` 所需）。同时顶层也补 `pull-requests: read`（与已验证可用的 `palette-ux-keyboard-focus` 分支一致，并对未来未声明 job 级权限的 job 生效）。
+- **回归测试**: 新增 `scripts/check_ci_permissions.py`（纯 stdlib）+ `make ci-perms-check`。脚本解析两个 workflow，断言每个使用 `dorny/paths-filter` 的 job 在其 **job 级** `permissions:` 中包含 `pull-requests: read`，缺失即失败。已验证：修复后通过；在 `dev` 基线与 PR #76 版本（仅顶层）上均失败。
+- **关联**: 与 `palette-ux-keyboard-focus-17858698244994354345` 分支（PR #74）中已存在的等价 job 级修复一致；本 PR 为该问题的独立、定向修复，可取代 PR #76。
+
+## 提交后正确性检查发现（2026-07-07，审查过去 24h 提交 + Dockerfile 部署链路）
+
+> 审查范围：过去 24 小时内的提交（`aec1e89`、`935331e`、`7c38044`、`81e8624`、`0beecd6`、`8a9234e`、`507f2d3`，以及 PR #65 的 CI 修复 `e211cbd`/`399dcbd`/`a2dc331`/`976fea4`）和最近更新的 PR（#62、#63、#64、#65）。经多个独立子代理并行分析 + 两个子代理独立复现复审确认。
+
+### DEPLOY1: `server/api/Dockerfile` 以 `CGO_ENABLED=0` 构建导致 API 容器启动即崩溃 [已修复]
+- **状态**: 已修复（本审查提交的定向修复分支 `fix/api-dockerfile-cgo-sqlite-crash`）
+- **位置**: `server/api/Dockerfile` (L1, L8)；触发点 `server/api/main.go` (`NewServer` → `db.Ping()`, L188-L196；`main` 的 `log.Fatalf`, L1152-L1154)
+- **问题描述**: API 服务依赖 CGo-only 的 `github.com/mattn/go-sqlite3` 驱动（`main.go:20` 的 blank import，`main.go:188` 的 `sql.Open("sqlite3", ...)`），但 `server/api/Dockerfile` 使用 `RUN CGO_ENABLED=0 GOOS=linux go build -o api .`。`CGO_ENABLED=0` 时 go-sqlite3 编译为 stub 驱动，运行时 `sql.Open` 返回的 DB 在首次 `db.Ping()` 时报错：`"Binary was compiled with 'CGO_ENABLED=0', go-sqlite3 requires cgo to work. This is a stub"`。`NewServer` 把该错误向上返回，`main()` 以 `log.Fatalf("Failed to create server: %v", err)` 退出，容器启动即崩溃（exit 1）。`docker build` 能成功（stub 可编译），失败被推迟到运行时，因此只做构建校验的 CI 难以发现。此外构建基镜像 `golang:1.22-alpine` 与 `go.mod` 的 `go 1.25.0` 不匹配（依赖 `GOTOOLCHAIN=auto` 联网下载 1.25）。该缺陷虽早于本次 24h 窗口（Dockerfile 上次改动为 `55a1ba8`，2026-03-26），但它是过去 24h 大量 sqlite3/CGo 改动（含误判 "CGo incompatibility with Go 1.25" 而把严格类型检查退化为字符串匹配的 `81e8624`）一直绕开的真实根因，属代码审查遗漏的高影响缺陷。
+- **触发场景**: (1) `docker compose up` 或 `docker build -f server/api/Dockerfile`； (2) 容器启动执行 `./api`； (3) `NewServer()` 调用 `db.Ping()` 返回 stub 错误； (4) `log.Fatalf` 退出，容器进入 `restart: unless-stopped` 的无限重启循环，`/health` 永不就绪； (5) 由于 `socks5-proxy`/`tunnel` 均 `depends_on: api` 并调用其 `/api/session/validate`、`/api/device/status`，整个 compose 栈不可用。100% 可复现。
+- **风险**: **高**。部署即崩溃，API 服务（承载配对、JWT、认证、设备状态）完全不可用；非数据损坏或安全漏洞，而是确定性的全栈服务中断。
+- **修复难度**: 低
+- **修复方式**: `server/api/Dockerfile` 改为 `FROM golang:1.25-alpine AS builder`、新增 `RUN apk add --no-cache gcc musl-dev`（go-sqlite3 内嵌 SQLite amalgamation，只需 C 工具链，无需 `sqlite-dev`/`sqlite-libs`）、构建命令改为 `RUN CGO_ENABLED=1 GOOS=linux go build -o api .`。最终 `alpine:latest` 运行阶段已含 musl，CGo 二进制可直接运行。`socks5-proxy`/`tunnel` 不使用 sqlite 且 `go.mod` 为 `go 1.22`，保持 `CGO_ENABLED=0` 不变。
+- **验证**: 独立复现——`CGO_ENABLED=0` 构建的二进制启动即 `Failed to create server: failed to ping database: ... go-sqlite3 requires cgo to work. This is a stub`（exit 1）；`CGO_ENABLED=1` 构建的二进制正常启动并返回 `{"db_status":"ok",...}`。新增 `make api-smoke` 目标以 Dockerfile 等价标志（`CGO_ENABLED=1`）构建并校验 `/health` 返回 `db_status:"ok"`，作为回归守卫。`go build ./...`、`go vet ./...`、`go test ./...` 全部通过。
+- **后续建议**: 现有 CI `go-build` 作业只对源码执行 `go build`/`go test`（runner 上 CGO 默认开启，故一直通过），从不构建 Docker 镜像——这正是本缺陷长期未被 CI 捕获的原因。建议后续在 self-hosted runner（具备 docker）上增加 `docker build` + `docker run` + `/health` 冒烟作业（可先 `continue-on-error: true`，确认稳定后改为阻塞），作为镜像层的回归守卫。
+
+### 24h 窗口内提交的其余审查结论
+- `7c38044` 曾用错误的 SQLite 扩展码 `2301`（正确值 `sqlite3.ErrConstraintPrimaryKey` = `1555`）替换符号常量，会导致 `code TEXT PRIMARY KEY` 冲突（实际 ExtendedCode=1555）不被识别为配对码冲突而直接返回 500；该缺陷为**瞬态**，同日被 `81e8624` 改为 `strings.Contains(err.Error(), "UNIQUE constraint")` 取代（对当前 schema 行为正确，真实冲突消息为 `"UNIQUE constraint failed: pairing_sessions.code"`），故在 dev HEAD 上不存在现存可触发缺陷。
+- `81e8624`/`8a9234e` 将 `isPairingCodeUniqueConstraintError` 从 `errors.As` + 严格类型码检查退化为字符串匹配，并移除了 `733c883`（PR #64，未合入 dev）新增的回归测试 `TestIsPairingCodeUniqueConstraintError`。当前行为对现有 schema 等价、无即时可触发缺陷，但失去类型安全与回归保护；建议后续重新采用 `733c883` 的类型化严格检查并恢复测试（已验证该写法在 Go 1.25 + CGo 下可正常编译运行，所谓 "CGo incompatibility with Go 1.25" 前提不成立）。
+- PR #65 的 CI 修复（runner 标签大小写、`fail-fast` YAML 层级、`Thread.yield()`→`Thread.sleep(20)`）均为正确且必要，未掩盖生产并发缺陷；`go test` 仍为阻塞作业。
+- PR #62/#63 的 Palette 清除按钮 UI 改动未发现崩溃/安全/功能退化类缺陷（输入仍强制 6 位数字过滤；测试未削弱）。
+
+---
+
 ## 提交后审查发现（2026-07-01，审查提交 97b4a3c 和 abd1603）
 
 > 以下问题由多 subagent 对过去 24 小时内各分支的提交进行深度审查发现。
@@ -1500,3 +1610,553 @@
 - **风险**: **高**。工程师可通过域名访问公网资源，完全绕过私有网络访问策略
 - **修复方式**: 对域名目标返回 `false`，拒绝所有域名连接，确保安全策略一致。更新注释说明拒绝原因
 
+### REV31: server/api `markSessionExpired` 并发过期标记回退语义错误 [已修复]
+- **修复状态**: 已修复
+- **修复日期**: 2026-07-02
+- **修复模型**: Kimi-K2.7-Code
+- **修复难度**: 中
+- **位置**: `server/api/main.go` (`getPairingSession`, L891-L905)
+- **问题描述**: `markSessionExpired` 触发 `ErrConcurrentModification` 后，重新查询会话失败时返回 410 Gone，掩盖真实的数据库错误；查询成功但会话仍过期时返回 200 OK，与正常过期行为不一致。回退路径的 HTTP 语义和错误处理需要重新审视。
+- **风险**: **中**。错误状态码不一致会误导客户端重试逻辑，且 DB 错误被隐藏不利于运维排查
+- **修复方式**:
+  - 并发冲突后重新查询失败：记录真实错误并返回 500 Internal Server Error（`ErrFailedToQueryDatabase`）。
+  - 重新查询成功但会话仍过期（或已被删除）：返回 410 Gone（`ErrSessionExpired`），与正常过期路径一致。
+  - 仅当并发请求将会话刷新为未过期状态时，才返回 200 OK 及当前会话数据。
+  - 新增 `Server.testHookGetPairingSessionDB` 测试钩子以注入 `getPairingSessionDB` 返回值，覆盖上述三种分支。
+
+### REV32: server/tunnel 离线通知可能覆盖新建立的在线状态 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 高
+- **位置**: `server/tunnel/main.go` (`Unregister`、`cleanupDeadTunnelsOnce`、`notifyDeviceStatus`)
+- **问题描述**: `Unregister` 和 `cleanupDeadTunnelsOnce` 在删除旧隧道后直接发送 `offline` 通知，未重新检查是否已有新的 replacement tunnel 注册。`notifyDeviceStatus` 的重试机制也可能在延迟期间把后来写入的 `online` 覆盖为 `offline`，造成设备状态与实际情况相反。
+- **风险**: **高**。工程师端可能看到设备已离线，但实际上隧道已重建，导致远程协助中断或误判
+- **修复方式**:
+  - `server/tunnel/main.go`: `Unregister` 和 `cleanupDeadTunnelsOnce` 在关闭旧隧道后、发送 `offline` 前，重新检查 `m.tunnels[deviceID]` 是否存在活跃隧道；若存在则跳过 `offline` 通知。
+  - 补充测试覆盖：替换隧道在 `Unregister`/`cleanupDeadTunnelsOnce` 的删除-通知窗口中注册时不发送 `offline`；无替换隧道时正常发送 `offline`。
+  - `notifyDeviceStatus` 的重试延迟风险由 REV33 的毫秒级 `last_seen` 与 API upsert 的 `excluded.last_seen > device_status.last_seen` 保护覆盖，过期的 `offline` 不会覆盖较新的 `online`。
+- **剩余风险**: 检查与通知之间仍存在极小的时间窗口；在此窗口内新隧道注册且旧 `offline` 已决定发送，则仍会发出一次 `offline` 通知。**该残余竞态在 REV51 之前未完全闭合**：REV33 当时的实现在通知 goroutine 内部捕获 `time.Now().UnixMilli()`，受调度延迟影响，其时间戳可能晚于并发 `Register` 发出的 `online` 时间戳，从而绕过 API 的严格 `last_seen >` 保护并把设备错误地持久化为离线。REV51 将 `last_seen` 的捕获提前到 re-check 时刻（`m.mu` 锁下），保证 `offline` 的 `last_seen` 严格早于任何后续 `Register` 的 `online` `last_seen`，使 API 保护真正生效。
+
+### REV33: server/api + server/tunnel 秒级 `last_seen` 导致同秒重连状态丢失 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 中
+- **位置**: `server/api/main.go` (`updateDeviceStatus` / `upsertDeviceStatusDB` / `getDeviceStatusDB`)、`server/tunnel/main.go` (`notifyDeviceStatus`)
+- **问题描述**: `server/api/main.go` 写入设备状态时仍使用秒级 `Unix()` 作为 `last_seen`，且 `upsertDeviceStatusDB` 当前为无条件 `ON CONFLICT DO UPDATE`，没有 `excluded.last_seen > device_status.last_seen` 保护。`server/tunnel/main.go` 的 `notifyDeviceStatus` 带指数退避重试，旧的 `offline` 通知可能延迟到达 API，加上同秒内 `last_seen` 相同，无法判断事件先后顺序，导致过期的 `offline` 覆盖较新的 `online`。
+- **风险**: **高**。高频重连场景下状态机不可靠，可能把在线设备判定为离线
+- **修复方式**:
+  - `server/api/main.go`：`last_seen` 改用毫秒级 `UnixMilli()`；`upsertDeviceStatusDB` 的 `ON CONFLICT DO UPDATE` 增加 `WHERE excluded.last_seen > device_status.last_seen` 保护；`getDeviceStatusDB` 按毫秒解析；`updateDeviceStatus` 接受请求体中的可选 `last_seen`（毫秒 Unix 时间戳），未提供时回落为当前时间。
+  - `server/tunnel/main.go`：`notifyDeviceStatus` 通过 `last_seen` 字段将捕获的时间戳发送给 API，使延迟到达的 `offline` 携带原始时间戳。**注**：REV33 当时的实现仍在通知 goroutine 内部捕获 `time.Now().UnixMilli()`，并未真正做到"事件发生时"捕获；该缺陷由 REV51 修正（捕获点提前到 re-check 时刻的 `m.mu` 锁下，严格早于任何并发 `Register` 的 `online` 时间戳）。
+  - 测试覆盖：毫秒时间戳写入、过期 `offline` 不覆盖较新的 `online`、同毫秒事件不覆盖、`updateDeviceStatus` 按请求时间戳处理、`notifyDeviceStatus` 携带 `last_seen`。
+- **迁移说明**: 数据库表结构不变（`last_seen INTEGER`）。`getDeviceStatusDB` 已添加向后兼容逻辑：读取到小于 `1e12` 的值时自动视为秒级并乘以 1000 转换为毫秒，因此无需停机即可兼容旧数据。若需要一次性统一存量数据的单位为毫秒，可执行：`UPDATE device_status SET last_seen = last_seen * 1000;`。
+
+### REV34: server/api GET `/api/pair/:code` 缺少限流 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 低
+- **位置**: `server/api/main.go` (`GET /api/pair/:code` 路由, `rateLimitMiddleware`, `rateLimitKey`)
+- **问题描述**: REV28 已为该路由补充认证，但仍无速率限制。已认证用户仍可高频枚举 6 位配对码，存在信息泄露和会话探测风险。
+- **风险**: **中**。认证后仍可遍历配对码空间，获取其他工程师/设备的配对会话信息
+- **修复方式**:
+  - 新增 `rateLimitMiddleware` Gin 中间件，复用 `Server.rateLimiter`（`server/shared/ratelimit/ratelimit.go`）。
+  - 限流 key 优先取认证身份：JWT `sub` 用 `jwt:<sub>` 作 key；Internal API Key 用 `internal` 作 key；无身份时回退 `ClientIP()`。
+  - 在 `GET /api/pair/:code` 路由上挂载 `internalOrUserAuthMiddleware()` + `rateLimitMiddleware()` + `getPairingSession`。
+  - 超限时返回 `429 Too Many Requests`，响应体包含 `ErrRateLimitExceeded` 错误信息。
+  - 在 `server/api/main_test.go` 中补充测试：正常请求通过、超限返回 429、JWT 与 Internal API Key 分别限流、不同身份使用独立限流桶。
+
+### REV35: Android `DebugDetector.getprop` 超时顺序失效 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 低
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt` (`getprop` 回退路径)
+- **问题描述**: `getprop` 回退路径先调用 `reader.readLine()` 再调用 `process.waitFor(timeout)`。如果 `getprop` 子进程卡住或不输出换行，`readLine()` 会无限阻塞，超时参数无法生效。
+- **风险**: **中**。调试检测可能冻结 UI 线程或后台检测协程，影响应用响应
+- **修复方式**: 将 `getprop` 读取封装到 `readProcessOutput(command)`：在独立守护线程中执行 `BufferedReader.readLine()`，通过 `Future.get(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)` 限制读取本身；超时或异常时取消 Future 并强制销毁子进程与线程池，避免 `readLine()` 无限阻塞。
+
+### REV36: server/api `compareAndUpdatePairingSessionDB` 未校验会话是否已过期 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 低
+- **位置**: `server/api/main.go` (`compareAndUpdatePairingSessionDB`)
+- **问题描述**: `compareAndUpdatePairingSessionDB` 的乐观锁 WHERE 条件仅检查 `code = ? AND status = ? AND engineer_id = ?`，未包含 `expires_at > ?`。如果会话在读取后已经过期，并发请求仍可能将其成功更新为 `connected`，绕过过期检查。
+- **风险**: **高**。过期的配对会话可能被错误地激活，导致安全风险
+- **修复方式**: 在 WHERE 条件中增加 `AND expires_at > ?` 并使用当前时间作为参数；返回 `ErrConcurrentModification` 时同时覆盖"已过期"场景。补充针对过期会话的单元测试。
+
+### REV37: server/shared/recovery example_test 示例质量 [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 低
+- **位置**: `server/shared/recovery/example_test.go`
+- **问题描述**: Copilot review 指出 `ExampleRecover` 使用 `WithNamedReturn(&n, &err, ...)` 但接收的是普通局部变量而非命名返回值，示例误导；`ExampleRecoverAction` 的 action 函数没有可观察行为，示例失去演示意义。
+- **风险**: **低**。仅影响文档/示例可读性
+- **修复方式**: 修正 `ExampleRecover` 使用真正的命名返回值；为 `ExampleRecoverAction` 的 action 添加可观察副作用并补充 `// Output:`。
+
+### REV38: DebugDetector 异常处理与测试稳定性 [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 低
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt`、`DebugDetectorTest.kt`
+- **问题描述**: Copilot/CodeRabbit review 指出 `DebugDetector` 中 `catch (e: Exception)` 可能触发 detekt `SwallowedException`；`DebugDetectorTest.checkDebugProperties_doesNotThrow_inUnitTestEnvironment` 断言 `assertFalse(...)`，受宿主机属性影响，测试可能不稳定。
+- **风险**: **低**。代码风格与测试稳定性问题
+- **修复方式**: 具体化捕获的异常类型或为 `catch` 块添加注释说明；将受环境影响的测试改为注入可控属性或使用更稳定的断言。
+
+### REV39: `TestUpdatePairingSession_ConcurrentModificationReturns409` 可能不稳定 [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 中
+- **位置**: `server/api/main_test.go` (`TestUpdatePairingSession_ConcurrentModificationReturns409`)
+- **问题描述**: Copilot review 指出该测试使用 "至少一次 409" 断言，并发赛跑结果依赖调度，存在 CI 不稳定风险。
+- **风险**: **低**。测试偶发失败会增加维护成本
+- **修复方式**: 使用确定性同步（如 barrier 或 hook）替代概率性断言，或增加重试次数并明确失败阈值。
+
+### PR16-1: `server/api/Dockerfile` 使用 `CGO_ENABLED=0` 导致 SQLite 驱动无法运行 [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 低
+- **提交哈希**: `7fbe5e9`
+- **位置**: `server/api/Dockerfile` (L8)
+- **问题描述**: PR #16 的 Codex review 指出，API 服务依赖 `mattn/go-sqlite3`，该驱动需要 CGO。`Dockerfile` 中使用 `CGO_ENABLED=0` 编译出的二进制在容器内启动时会因无法加载 SQLite 驱动而失败。
+- **风险**: **高**。服务端 Docker 镜像无法运行，阻塞容器化部署。
+- **修复方式**: 移除 `CGO_ENABLED=0`，或迁移到纯 Go 的 SQLite 驱动（如 `modernc.org/sqlite`）。
+
+### PR16-2: `server/docker-compose.yml` build context 未包含 `shared` 本地模块 [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 低
+- **提交哈希**: `7fbe5e9`
+- **位置**: `server/docker-compose.yml` (L12, L44)
+- **问题描述**: PR #16 的 Codex review 指出，各服务的 `build.context` 仅指向各自子目录（如 `./api`），但 `go.mod` 通过 `replace` 依赖上层或同层的 `shared` 模块，导致 `docker compose build` 时找不到本地替换模块而失败。
+- **风险**: **高**。Docker Compose 无法构建服务。
+- **修复方式**: 将 `build.context` 设置为 `server/` 根目录，并在各 `Dockerfile` 中调整 `COPY` 路径；或重新组织模块以消除本地 `replace`。
+
+### PR16-3: `server/docker-compose.yml` TLS 健康检查仍默认使用 HTTP [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 低
+- **提交哈希**: `7fbe5e9`
+- **位置**: `server/docker-compose.yml` (L35)
+- **问题描述**: PR #16 的 Codex review 指出，`healthcheck` 的默认 URL 是 `http://localhost:8080/health`。当 `ENABLE_TLS=true` 时，HTTP 请求会被拒绝，健康检查始终失败。
+- **风险**: **中**。启用 TLS 后容器被误判为不健康，导致服务反复重启。
+- **修复方式**: 健康检查根据 `ENABLE_TLS` 自动切换 `https://` 协议，或单独提供 `/health` 的 HTTP _plain_ 端点。
+
+### PR16-4: Release 构建未强制要求 `MQTT_TLS_PUBLIC_KEY_PINS_RELEASE` [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 低
+- **提交哈希**: `7fbe5e9`
+- **位置**: `android/app/build.gradle.kts` (L60-L62, L95)
+- **问题描述**: PR #16 的 Codex review 指出，`mqttTlsPublicKeyPinsRelease` 在未配置时会静默回退到 `mqttTlsPublicKeyPinsDebug`（L61），release 构建不会失败。虽然运行时 `MqttConnectionManager` 会抛异常阻止启动，但缺少构建期强制检查。
+- **风险**: **中**。Release 包可能因配置遗漏在运行时崩溃，应像 `MQTT_BROKER_URL_TLS_RELEASE` 一样在构建阶段 fail-fast。
+- **修复方式**: 在 `validateReleaseConfig` 中增加对 `MQTT_TLS_PUBLIC_KEY_PINS_RELEASE` 非空校验，未配置时抛出 `GradleException`。
+
+### PR16-5: `VpnService` 核心路径存在多处设计缺陷 [未修复]
+- **修复状态**: 未修复
+- **修复难度**: 高
+- **提交哈希**: `7fbe5e9`
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt`、`ConnectionSessionManager.kt`、`VpnPacketProcessor.kt`
+- **问题描述**: PR #16 的 Codex review 指出 VPN 核心路径存在多项基础缺陷：TCP SYN 无 payload 被丢弃、DNS 响应未回注、UDP 走 SOCKS CONNECT、源 IP 硬编码 10.0.0.1、TCP 逐包开新 Socket 等。这些问题与 `docs/TECH_DEBT.md` 中 C1/C3 多网络风险一致。
+- **风险**: **高**。VPN 核心功能不稳定，多网络/双 WiFi/Link Turbo 等场景下可能出现路由异常或连接失败。
+- **修复方式**: 统一评估 VPN 数据路径，引入 `Network.bindSocket()` 与多网络感知路由；将大文件拆分为 `PacketParser`、`ConnectionManager` 等模块（参见 `docs/TECH_DEBT.md` C1/C3 与 `docs/ISSUES.md` N2）。
+
+---
+
+## 提交后正确性检查发现（2026-07-03，审查 PR #57/#58 分支）
+
+> 以下问题由提交后正确性检查在 `fix/rev31-36-post-commit-review`（PR #58）和
+> `fix/post-commit-review-rev43-rev47`（PR #57）分支上发现。REV34/REV36 的"修复"
+> 本身引入了新的回归缺陷，经多个独立 subagent 复审确认。
+
+### REV48: REV34 限流修复导致合法轮询被封锁 [已修复]
+- **修复状态**: 已修复（本分支）
+- **提交哈希**: `c514fc3`（引入），本分支修复
+- **修复难度**: 低
+- **位置**: `server/api/main.go` (`getPairingSession`, `rateLimitMiddleware`)
+- **问题描述**: REV34 为 `GET /api/pair/:code` 挂载了 `rateLimitMiddleware`，复用的
+  `server/shared/ratelimit` 是**失败计数器**语义（`Allow` 每次调用都递增计数，
+  `Success` 才清零）。但 `getPairingSession` 在任何返回路径（200/410/404/500）都**未
+  调用 `rateLimiter.Success`**，导致每次合法轮询都累加失败计数。默认配置
+  `MaxAttempts=5, Window=5m, BlockDuration=15m`：工程师在前端轮询配对码状态时，5 次
+  请求后即被封锁 15 分钟，远程协助流程完全中断。
+- **触发场景**: 工程师打开配对页面，前端每 2-3 秒轮询 `GET /api/pair/:code` 获取会话
+  状态。约 10-15 秒后（5 次请求）即收到 429，且封锁持续 15 分钟。这是**正常使用路
+  径**下的必然触发，非边缘情况。
+- **风险**: **严重**。100% 的合法轮询用户在 15 秒内被封锁 15 分钟，远程协助功能基
+  本不可用。测试 `TestGetPairingSessionRateLimitedByJWTIdentity` 将此破坏性行为锁定
+  为预期（5×200 后 429），进一步掩盖了问题。
+- **修复方式**:
+  - 在 `getPairingSession` 找到会话时（200 和 410 路径）调用
+    `s.rateLimiter.Success(rateLimitKey(c))`，重置失败计数器。
+  - 404（会话不存在）路径不清零计数器，保留暴力枚举配对码的防护能力。
+  - 更新测试：`TestGetPairingSessionRateLimit_AllowsLegitimatePolling` 验证 20 次合
+    法轮询不被限流；`TestGetPairingSessionRateLimit_BlocksBruteForce` 验证 5 次 404
+    后第 6 次被限流。
+
+### REV49: REV36 `expires_at > ?` 条件导致 `markSessionExpired` 永久失败 [已修复]
+- **修复状态**: 已修复（本分支）
+- **提交哈希**: `f189aac`（引入），本分支修复
+- **修复难度**: 低
+- **位置**: `server/api/main.go` (`compareAndUpdatePairingSessionDB`, `markSessionExpired`)
+- **问题描述**: REV36 在 `compareAndUpdatePairingSessionDB` 的 WHERE 条件中增加了
+  `AND expires_at > ?`（`now`），声称"防止过期的配对会话被错误地激活"。但
+  `markSessionExpired` 的唯一调用时机是 `time.Now().After(session.ExpiresAt)` 为真
+  （即会话已过期）时，此时 `expires_at > now` **恒为假**，导致 UPDATE 影响 0 行，
+  永远返回 `ErrConcurrentModification`。后果：
+  1. 会话状态永远不会被写入为 `"expired"`（DB 中保持原状态如 `"pending"`）。
+  2. `updatePairingSession` 的过期分支将 `ErrConcurrentModification` 映射为 **409
+     Conflict**，而非预期的 **410 Gone**——这是用户可感知的状态码回归。
+  3. `getPairingSession` 的过期分支走 REV31 的回退路径（重新查询），虽然最终能返回
+     410，但多了一次 DB 查询且 `markSessionExpired` 仍未生效。
+- **触发场景**: 配对码 5 分钟过期后，工程师或客户端尝试更新该会话（PUT
+  `/api/pair/:code`），收到 409 Conflict 而非 410 Gone，客户端可能误判为并发冲突
+  并重试，形成无效重试循环。
+- **风险**: **高**。过期会话状态不持久化导致数据不一致；`updatePairingSession` 状态
+  码回归（410→409）影响客户端逻辑。测试
+  `TestCompareAndUpdatePairingSessionDB_ExpiredSessionReturnsConcurrentModification`
+  将此破坏性行为锁定为预期，进一步掩盖了问题。
+- **修复方式**:
+  - 从 `compareAndUpdatePairingSessionDB` 的 WHERE 条件中移除 `AND expires_at > ?`
+    及对应的 `now` 变量，恢复为仅检查乐观锁不变量（`code + status + engineer_id`）。
+  - 过期保护由调用方的显式 `time.Now().After(session.ExpiresAt)` 检查提供（所有调用
+    点在调用 `compareAndUpdatePairingSessionDB`/`markSessionExpired` 前均有此检查）。
+  - 更新测试：`TestCompareAndUpdatePairingSessionDB_DoesNotRejectExpiredSession` 验证
+    过期会话可被成功更新；`TestMarkSessionExpired_SucceedsForExpiredSession` 验证
+    `markSessionExpired` 成功写入 `"expired"` 状态；
+    `TestUpdatePairingSession_ExpiredReturns410Gone` 验证 HTTP 层返回 410 Gone。
+- **注**: PR #57（`fix/post-commit-review-rev43-rev47`）的
+  `compareAndUpdatePairingSessionDB` 本就没有 `expires_at > ?` 条件，因此不受此问题
+  影响。两个 PR 在此函数上存在合并冲突，需协调合并顺序。
+
+### REV50: PR #57/#58 合并冲突需协调 [未修复]
+- **修复状态**: 未修复（需人工协调）
+- **位置**: `server/api/main.go`, `server/tunnel/main.go`,
+  `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt` 等 7 个文件
+- **问题描述**: PR #57（REV43-47）和 PR #58（REV31-36）在以下关键区域存在冲突：
+  1. `compareAndUpdatePairingSessionDB`：PR #57 无 `expires_at > ?`（正确），
+     PR #58 有（REV49 缺陷）。
+  2. `getPairingSession`：PR #57 的 REV44 将 `ErrConcurrentModification` 分支直接返
+     回 410；PR #58 的 REV31 采用重新查询回退逻辑。两者语义不同。
+  3. `createSessionToken`：PR #57 的 REV43 增加过期检查+乐观锁；PR #58 无此变更。
+  4. `cleanupDeadTunnelsOnce`：PR #58 有 REV32 替换检查但缺 REV45 的循环内 `stopMu`
+     保护；PR #57 有 REV45 但缺 REV32。
+  5. `DebugDetector.kt`：PR #57 的 REV47 改变了 3 个测试的契约但未更新测试。
+- **风险**: **中**。直接合并会导致部分修复丢失或编译失败。
+- **建议**: 以 PR #58 为基础合并 PR #57，逐文件解决冲突，确保：
+  - `compareAndUpdatePairingSessionDB` 不含 `expires_at > ?`（采用 PR #57 版本或本分
+    支修复）。
+  - `getPairingSession` 采用 REV31 的重新查询回退逻辑（更健壮）。
+  - `cleanupDeadTunnelsOnce` 同时包含 REV32 替换检查和 REV45 循环内 `stopMu` 保护。
+  - 更新 DebugDetector 的 3 个测试以匹配 REV47 的新契约。
+
+---
+
+## 提交后正确性检查发现（2026-07-02，审查过去 24 小时提交）
+
+> 以下问题由多 subagent 对过去 24 小时内各分支的提交进行深度审查发现。
+
+### REV43: `createSessionToken` 缺少过期检查 + TOCTOU 竞态可致已失效会话颁发令牌 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 中
+- **位置**: `server/api/main.go` (`createSessionToken`, L1021-1100)
+- **问题描述**: `createSessionToken` 存在两个缺陷：(1) 完全缺少 `session.ExpiresAt` 过期检查，与 `getPairingSession` 和 `updatePairingSession` 的行为不一致。已过期但尚未被清理的 session（status 仍为 "connected"）可成功创建 token。(2) 读取-验证与 token 创建之间无乐观锁保护，session 状态可能在此窗口内被并发修改（如过期、断开）。`session_tokens` 表无外键约束关联 `pairing_sessions`，token 一旦创建即独立有效，不交叉验证 pairing session 状态。
+- **触发场景**: (1) Session 在时间 T 过期，清理 worker 每 5 分钟运行一次；(2) 在 T 到 T+5min 的窗口内，session 仍存在于数据库中，status 仍为 "connected"；(3) 工程师调用 POST `/api/session/token`，`createSessionToken` 不检查 `ExpiresAt`，成功创建 token；(4) 清理 worker 删除过期 session 后，token 仍然有效（session_tokens 表独立，无外键）
+- **风险**: **中高**。可为已失效的 pairing session 创建有效 token，token 在 15 分钟 TTL 内对 SOCKS5 代理服务有效，违背"session 无效则不应颁发 token"的安全不变量
+- **修复方式**: (1) 添加 `time.Now().After(session.ExpiresAt)` 过期检查，与其他 handler 保持一致；(2) 在创建 token 前使用 `compareAndUpdatePairingSessionDB` 乐观锁验证 session 状态未变，检测到并发修改返回 HTTP 409 Conflict
+
+### REV44: `getPairingSession` 并发修改路径为过期 session 返回 200 OK [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 低
+- **位置**: `server/api/main.go` (`getPairingSession`, L834-871)
+- **问题描述**: `getPairingSession` 在检测到 session 过期后调用 `markSessionExpired`，当 `markSessionExpired` 因乐观锁返回 `ErrConcurrentModification` 时（session 被并发修改，如另一个请求将 status 改为 "connected"），代码重新从 DB 获取 session 并返回 200 OK。但此时 session 的 `ExpiresAt` 已过，在业务语义上不应返回 200。客户端可能误认为 session 仍然有效。
+- **触发场景**: (1) Session 的 `expires_at` 已过去，状态为 "pending"；(2) GET `/api/pair/:code` 判断已过期，调用 `markSessionExpired`；(3) 并发的 PUT 请求将 session 更新为 `status=connected`；(4) `markSessionExpired` 因 WHERE 条件不匹配返回 `ErrConcurrentModification`；(5) 代码重新获取 session，得到 `status=connected, expires_at=已过期`；(6) 返回 200 OK，附带时间上已过期但状态为 connected 的 session
+- **风险**: **中**。客户端可能误用过期 session，尤其在 `internalOrUserAuthMiddleware` 保护下，认证用户获取到看似有效的过期 session 信息
+- **修复方式**: `ErrConcurrentModification` 分支中直接返回 410 Gone，因为已经确定 session 按 `ExpiresAt` 已过期，无论并发修改了什么字段
+
+### REV45: `cleanupDeadTunnelsOnce` 中 `wg.Add(1)` 无 `stopMu` 保护导致 WaitGroup 重用 panic [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 低
+- **位置**: `server/tunnel/main.go` (`cleanupDeadTunnelsOnce`, L476-517)
+- **问题描述**: `cleanupDeadTunnelsOnce` 在函数入口检查 `m.stopped` 后释放 `stopMu`，但在后续循环中调用 `m.wg.Add(1)` 时未重新检查 `m.stopped`。如果 `Stop()` 在 `stopMu.Unlock()` (L483) 和 `wg.Add(1)` (L506) 之间被调用，`Stop()` 设置 `stopped=true` 并调用 `wg.Wait()`。若 `wg.Wait()` 返回（计数器归零）后 `cleanupDeadTunnelsOnce` 才执行 `wg.Add(1)`，将触发 `panic: sync: WaitGroup is reused before previous Wait has returned`。与 `Register`/`Unregister` 中已修复的同类问题（REV26）模式一致，但 `cleanupDeadTunnelsOnce` 遗漏了修复。
+- **触发场景**: (1) 后台清理 goroutine 调用 `cleanupDeadTunnelsOnce`，通过 stopped 检查；(2) 在 `stopMu.Unlock()` 和 `wg.Add(1)` 之间，服务关闭调用 `Stop()`；(3) `Stop()` 设置 `stopped=true`，调用 `wg.Wait()` 并返回；(4) `cleanupDeadTunnelsOnce` 的 `wg.Add(1)` 在 `wg.Wait()` 返回后执行 → panic
+- **风险**: **高**。服务关闭时可能 panic，不可恢复
+- **修复方式**: 在 `wg.Add(1)` 前获取 `m.stopMu` 并检查 `m.stopped`，若已停止则 `continue` 跳过。与 `Register`/`Unregister` 模式一致
+
+### REV46: DebugDetector `readLine()` 阻塞导致超时机制失效 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 中
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt` (`readPropertyViaProcess`, L329-365)
+- **问题描述**: `readPropertyViaProcess` 中 `reader.readLine()` 在 `process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)` 之前执行。如果 `getprop` 子进程挂起且不产生任何输出（如系统属性服务 `init` 进程无响应），`readLine()` 将无限期阻塞，3 秒超时机制完全失效，调用线程被永久阻塞。
+- **触发场景**: (1) 系统异常（如属性服务 `init` 进程无响应），`getprop` 命令挂起；(2) `readLine()` 阻塞等待子进程输出；(3) `waitFor(3s)` 永远不被执行，超时机制失效；(4) 调用线程被永久阻塞，可能导致 ANR
+- **风险**: **中高**。实际触发概率较低（`getprop` 通常很快返回），但一旦触发，调用线程被永久阻塞且无恢复手段
+- **修复方式**: 将输出读取放在独立线程中执行，主线程先调用 `waitFor(timeout)` 实现真正的超时控制。超时后调用 `destroyForcibly()` 终止子进程并 `waitFor()` 回收僵尸进程
+
+### REV47: DebugDetector 反射返回非 null 值时跳过 getprop 交叉验证，Frida hook 可绕过 debug 检测 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 中
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt` (`resolveDebugPropertiesState`, L272-306; `readDebugPropertyValue`, 原 L301-319)
+- **问题描述**: 原 `readDebugPropertyValue` 在反射调用成功且返回非 null 值时，直接返回该值，永远不会调用 getprop 子进程做交叉验证。攻击者可通过 Frida hook `android.os.SystemProperties.get()` 对三个 debug 属性返回安全值（如 `ro.debuggable="0"`, `ro.secure="1"`, `persist.sys.usb.config="mtp"`），反射调用成功（不抛异常）且返回非 null 值，代码直接采用，getprop 回退路径不可达，完全绕过 debug 属性检测。
+- **触发场景**: (1) 攻击者在 root 设备上使用 Frida hook `android.os.SystemProperties.get()`；(2) 对三个 debug 属性返回安全值；(3) `readDebugPropertyValue` 中反射返回非 null → 直接返回，getprop 不被调用；(4) debug 检测被完全绕过
+- **风险**: **高**。安全关键功能被绕过，攻击者可在不被检测的情况下进行调试
+- **修复方式**: 重构 `resolveDebugPropertiesState` 为始终同时调用反射和 getprop，取两者的"并集"结果——任一来源检测到 debug 特征即报告。新增 `isDebugPropertyValue` 和 `readPropertyValueViaReflection` 方法替代原有的 `readDebugPropertyValue`
+
+## 2026-07-13 提交后正确性检查发现（过去 24h 提交/PR 审查）
+
+### CI-MASK-1: `go-ci.yml` 单步 `continue-on-error: true` 静默吞没 `go build` + `go test` 失败，破坏 Go 侧合并门禁 [已修复]
+- **状态**: 已修复（分支 `fix/pr80-ci-masking-regression`）
+- **发现位置**: PR #80 `palette/diagnostics-card-ux-improvement-9614842658949896577`（base: `main`）；CI 重构提交 `19b8434`/`dbf2f9d`（亦存在于 PR #79 `palette/auto-submit-pairing-code-11146188363273715457`）
+- **影响文件**: `.github/workflows/go-ci.yml`（步骤 "CI checks for ${{ matrix.component }}"，原 L110-115）、`Makefile`（`go-ci-component` 目标，原 L182-197）
+- **问题描述**: PR #80 将原 `ci.yml` 中**分步且无 `continue-on-error`** 的 `go build` 与 `go test` 步骤合并为单个 `make go-ci-component` 调用，并在该步骤上加 `continue-on-error: true`。Makefile 中 `go-ci-component` 目标在**同一 recipe** 内用 `&&` 链接 `go build -v ./... && go test -v ... && gofmt && go vet && go mod tidy`。因此 `continue-on-error: true` 不仅掩盖 fmt/vet/tidy（ADR-006 L294 声明的基线收集意图），**也掩盖 `go build` 与 `go test` 的失败**。结果：任何破坏 Go 编译或单元测试的 PR 仍能绿灯合并，`Go Server Build (<component>)` 这个 required check 形同虚设。步骤内联注释 `# quality checks (fmt/vet/tidy) still collecting baseline` 与 ADR-006 L294 都明确将掩盖范围限定为 fmt/vet/tidy，实现与文档/意图不一致。
+- **触发场景**: 贡献者提交一个破坏 `server/api` 编译的 PR（如引入语法错误、删除被引用的符号）→ `make go-ci-component COMPONENT=api` 中的 `go build` 失败 → recipe 退出非零 → 步骤因 `continue-on-error: true` 被标记为 success → job 结论为 success → required check `Go Server Build (api)` 绿灯 → PR 合并 → 主干构建损坏。
+- **风险**: **严重**。Go 侧合并门禁完全失效；编译错误、单元测试回归、数据完整性问题、并发缺陷等均可绕过审查流入主干。与 `main` 基线相比是明确退化（`main` 的 `ci.yml` 中 `go build`/`go test` 为独立硬门禁步骤，无 `continue-on-error`）。
+- **根因**: Makefile recipe 的 `&&` 链式语义与 workflow 步骤级 `continue-on-error` 的作用域混淆——前者使整个 recipe 成为一个退出码，后者将该退出码映射为步骤成功。
+- **验证**: `git show origin/main:.github/workflows/ci.yml | grep -B2 -A2 continue-on-error` 确认 `main` 上 Go build/test 步骤无 `continue-on-error`。`git show origin/palette/...:Makefile | sed -n '182,198p'` 确认 `go-ci-component` 在单一 recipe 内 `&&` 链接 build+test+quality。`git show origin/palette/...:.github/workflows/go-ci.yml | sed -n '110,115p'` 确认 `continue-on-error: true` 覆盖整个 `make go-ci-component` 调用。
+- **修复方式**:
+  1. `Makefile`: 将 `go-ci-component` 拆分为三个独立目标——`go-build-component`（仅 `go build`，硬门禁）、`go-test-component`（仅 `go test`，硬门禁，生成 `coverage.out`）、`go-quality-component`（gofmt+vet+tidy，按 ADR-006 保留 `continue-on-error`）。保留原 `go-ci-component` 用于本地聚合。
+  2. `go-ci.yml`: 将单个 "CI checks" 步骤拆为三步——"Build" 与 "Test" 无 `continue-on-error`（硬门禁），"Quality checks" 保留 `continue-on-error: true`（ADR-006 基线）。Test 步骤加 `if: success()` 避免 build 失败后无意义执行；Quality 步骤用 `if: always()` 以便即使 test 失败仍收集基线。coverage 上传加 `if-no-files-found: ignore`（build/test 失败时不产生 coverage.out）。
+- **回归测试**: 扩展 `scripts/check_ci_permissions.py` 新增 `check_masking()` 函数，断言 `go-ci.yml` 中运行 `go-build-component`/`go-test-component` 的步骤、以及 `android-ci.yml` 中运行 `lintDebug`/`dependencyCheckAnalyze` 的步骤**不得**有 `continue-on-error: true`。已在 `pr-checks.yml` 新增 `ci-config-guard` job 运行 `make ci-perms-check`，使该回归 guard 在每个 PR 上强制执行。已验证：修复后通过；临时恢复 masking 后 guard 报错。
+- **关联**: ADR-006 L294（声明 fmt/vet/tidy 基线掩盖意图）、CI-PERM-1（同一 guard 脚本的权限检查）。
+
+### CI-MASK-2: `android-ci.yml` 对 `lintDebug` 与 `dependencyCheckAnalyze` 误加 `continue-on-error: true`，关闭 Lint 与 CVSS≥9.0 漏洞的硬门禁 [已修复]
+- **状态**: 已修复（分支 `fix/pr80-ci-masking-regression`）
+- **发现位置**: PR #80 `palette/diagnostics-card-ux-improvement-9614842658949896577`（base: `main`）；CI 重构提交（亦存在于 PR #79）
+- **影响文件**: `.github/workflows/android-ci.yml`（L100-113，四个连续 Gradle 步骤）
+- **问题描述**: `android-ci.yml` 在四个连续 Gradle 步骤上加 `continue-on-error: true`：
+  - L98 `testDebugUnitTest` —— **有 N87 注释**，文档授权降级（测试挂死根因待查）。✓
+  - L103 `jacocoTestReport` —— 无注释、无授权。
+  - L108 `lintDebug` —— 无注释、无授权。
+  - L113 `dependencyCheckAnalyze` —— 无注释、无授权。这是 OWASP Dependency-Check，`build.gradle.kts` 配置 `failBuildOnCVSS = 9.0f`，即仅 CVSS≥9.0 的严重漏洞才失败。
+  N87（`docs/ISSUES.md` L818-832）与 ADR-006（`docs/DECISIONS.md` L292）**仅授权** `testDebugUnitTest` 步骤的降级。JaCoCo/Lint/dep-check 的 masking 完全未文档化。与 `main` 基线相比是退化——`main` 的 `ci.yml` 中这三步均为 `continue-on-error: false`（硬门禁）。`security.yml` 的 `android-dep-check` job 文件头明确标注 "NOT a required check" 且按 `paths:` 触发，故 `dependencyCheckAnalyze` 是 Android 侧**唯一**的 CVSS≥9.0 漏洞硬门禁；masking 后无任何硬门禁拦截严重漏洞依赖。
+- **触发场景**: 贡献者提交一个 PR，将 Android 依赖升级到含已知 CVE（CVSS≥9.0）的版本（如 Paho MQTT、Netty、Bouncy Castle）→ `dependencyCheckAnalyze` 失败 → 步骤因 `continue-on-error: true` 被标记 success → `Android Build & Test` required check 绿灯 → PR 合并 → 含严重漏洞的依赖流入 release 构建。
+- **风险**: **高**（安全）。严重漏洞依赖（CVSS≥9.0）可绕过 CI 合并；同时 `security.yml` 不作为 required check，故无任何地方硬门禁。Lint masking 风险较低（`build.gradle.kts` 设 `abortOnError = false`，`lintDebug` 始终退出 0），但移除 masking 可作为 defense-in-depth：若未来有人将 `abortOnError` 改为 `true`，masking 会静默吞没 Lint 错误。
+- **根因**: CI 重构时将 `ci.yml` 拆分为 `android-ci.yml`，复制了 N87 的 `continue-on-error: true` 到相邻步骤但未加注释或文档说明。
+- **验证**: `git show origin/main:.github/workflows/ci.yml | grep -B1 -A1 continue-on-error` 确认 `main` 上 JaCoCo/Lint/dep-check 为 `continue-on-error: false`。`git show origin/palette/...:.github/workflows/android-ci.yml | grep -n continue-on-error` 确认 PR #80 上四处 `continue-on-error: true`，仅 L98 有 N87 注释。`git show origin/palette/...:.github/workflows/security.yml | head -1` 确认 "NOT a required check"。`git show origin/palette/...:android/app/build.gradle.kts | grep -E "abortOnError|failBuildOnCVSS"` 确认 `abortOnError = false` 与 `failBuildOnCVSS = 9.0f`。
+- **修复方式**:
+  1. `lintDebug`（L108）：移除 `continue-on-error: true`。`abortOnError = false` 保证 `lintDebug` 退出 0，不会阻塞 PR；移除 masking 仅作为 defense-in-depth。
+  2. `dependencyCheckAnalyze`（L113）：移除 `continue-on-error: true`。`failBuildOnCVSS = 9.0f` 仅在 CVSS≥9.0 时失败，是合理的保守阈值；self-hosted runner 缓存 NVD 数据库后首次运行慢的问题可由 `timeout-minutes: 45` 兜底。
+  3. `jacocoTestReport`（L103）：**保留** `continue-on-error: true`，添加注释说明为 N87 下游影响（test 被 timeout kill 后 `.exec` 数据可能不完整，coverage 报告生成是装饰性而非合并门禁）。
+- **回归测试**: 同 CI-MASK-1，`scripts/check_ci_permissions.py` 的 `check_masking()` 同时断言 `android-ci.yml` 中 `lintDebug` 与 `dependencyCheckAnalyze` 步骤不得有 `continue-on-error: true`。
+- **关联**: N87（testDebugUnitTest 降级授权）、ADR-006 L292（Android 测试降级）、CI-MASK-1（同一修复 PR 的 Go 侧对应问题）。
+
+### CI-MASK-3: `go-ci.yml` 的 `govulncheck` 步骤 `continue-on-error: true`，Go 侧无任何严重漏洞硬门禁 [待评估]
+- **状态**: 待评估（本 PR 暂未修复——需先收集 Go 漏洞基线，避免一次性阻塞所有 PR）
+- **发现位置**: PR #80 `palette/diagnostics-card-ux-improvement-9614842658949896577`（base: `main`）
+- **影响文件**: `.github/workflows/go-ci.yml`（L128-132，"Run vulnerability check" 步骤）
+- **问题描述**: `go-ci.yml` 的 `govulncheck ./...` 步骤带 `continue-on-error: true`，无注释说明。`security.yml`（"NOT a required check"）的 Go 侧 `govulncheck` 同样非硬门禁。结合 CI-MASK-2，整个项目（Android + Go）无任何地方对依赖漏洞做硬门禁。`govulncheck` 报告所有已知漏洞（非仅 CVSS≥9.0），直接移除 masking 可能因既有漏洞一次性阻塞所有 Go PR。
+- **风险**: **中-高**（安全）。Go 依赖的已知漏洞可绕过 CI 合并。
+- **建议修复**: 先在 CI 上收集 `govulncheck` 基线（保留 `continue-on-error` 但记录输出），清零后收紧为硬门禁。或对 `govulncheck` 添加 `fail-on-severity` 类过滤（仅 CVSS≥9.0 失败），与 Android 侧 `failBuildOnCVSS = 9.0f` 对齐。ADR-006 L294 的 "质量检查渐进收紧" 策略应明确包含 `govulncheck`。
+- **关联**: CI-MASK-1、CI-MASK-2、ADR-006 L294。
+
+### CACHE-RESTORE-1: self-hosted runner 上 `actions/cache@v4` 恢复 Go module/build cache 时 tar 解压 "Cannot open: File exists" 警告 [已修复]
+- **状态**: 已修复（PR #81 unmask CI-MASK-1 后暴露并修复）
+- **影响文件**: `.github/workflows/go-ci.yml`（L88-97，新增 "Clean residual Go cache directories" step）
+- **问题描述**: self-hosted runner（`runs-on: [self-hosted, Linux, X64, do-sfo3]`）上 `/tmp/go-mod-${component}` 与 `/tmp/go-build-${component}` 在 job 之间持久存在（`/tmp` 不像 GitHub-hosted runner 那样每次清理）。`actions/cache@v4` 在 cache hit 时用 `tar -xzf` 解压缓存到目标路径，遇到已存在的同名文件会输出 `##[error]/usr/bin/tar: .../xxx.go: Cannot open: File exists` 并以 exit code 2 失败，但 `actions/cache@v4` 把它降级为 `##[warning]Failed to restore`（cache step conclusion 仍为 success，不阻塞 build）。后果是 cache 未恢复，每次 build 都重新下载 Go modules（约 30s 浪费）。
+- **触发场景**: 任何 self-hosted runner 上 `actions/cache@v4` 恢复到非空目标目录；`Cleanup build cache` step 只删除 `GOCACHE`（`/tmp/go-build-*`）保留 `GOMODCACHE`（`/tmp/go-mod-*`），放大了下次 cache restore 的冲突概率。
+- **修复**: 在 `Cache Go modules and build cache` step 之前新增 `Clean residual Go cache directories` step，无条件 `rm -rf /tmp/go-mod-${component} /tmp/go-build-${component}`，确保 cache restore 从空目录开始。
+- **验证**: 修复前 PR #81 的 7 个 Go Server Build job 全部 FAILURE（但**根因是 MAKE-MISSING-1 而非本条目**——cache step 实际仍为 success，build step 因 `make: command not found` 失败）。修复后预期 cache warning 消除、module cache 正常恢复。
+- **修复难度**: 低。新增 1 个 step，3 行 YAML（含 7 行注释，外加 chmod 一行）。
+- **关联**: CI-MASK-1（unmask 暴露此问题）、MAKE-MISSING-1（真正导致 Go CI 失败的根因）、CI-MASK-3（同 mask 链路上的 govulncheck）。
+
+### MAKE-MISSING-1: self-hosted runner 上 `make` 命令未安装且 sudo 无 NOPASSWD 导致 Go CI 与 ci-config-guard 失败 [已修复]
+- **状态**: 已修复（PR #81 unmask CI-MASK-1 后暴露并修复）
+- **影响文件**: `.github/workflows/go-ci.yml`（L128-176，删除 "Ensure make is installed" step，Build/Test/Quality step 改为直接调用 go 命令）、`.github/workflows/pr-checks.yml`（L48-64，ci-config-guard 改为直接调用 python3）
+- **问题描述**: self-hosted runner（`runs-on: [self-hosted, Linux, X64, do-sfo3]`）上未预装 `make` 命令，且 `runner` 用户没有 NOPASSWD sudo 权限（`sudo: a password is required`）。`go-ci.yml` 原本调用 `make go-build-component` / `make go-test-component` / `make go-quality-component`（Makefile 通过 `comp_path()` 解析 `server/shared/*` 与 `server/*` 的路径），每个 Go matrix job 的 build step 报 `line 1: make: command not found` 并以 exit code 127 失败。`pr-checks.yml` 的 `ci-config-guard` 调用 `make ci-perms-check` 同样失败。CI-MASK-1 unmask 后立刻暴露为 7 个 Go matrix job + ci-config-guard 全部 FAILURE。
+- **触发场景**: 任何调用 `make go-*-component` 的 Go CI job 或调用 `make ci-perms-check` 的 ci-config-guard job。
+- **修复**: 不再依赖 make，直接在 workflow 中内联等价命令：
+  - `go-ci.yml` Build step：`working-directory: ${{ matrix.path }}` + `go build -v ./...`（matrix.path 已提供完整路径，无需 Makefile 的 `comp_path()`）
+  - `go-ci.yml` Test step：`working-directory: ${{ matrix.path }}` + `go test -v -coverprofile=coverage.out ./...`
+  - `go-ci.yml` Quality step：内联 gofmt/vet/mod-tidy 逻辑（与 Makefile `go-quality-component` 一致）
+  - `pr-checks.yml` ci-config-guard：`python3 scripts/check_ci_permissions.py`（Makefile `ci-perms-check` 的等价命令）
+- **验证**: 修复前 7 个 Go matrix job 的 build step 全部 `exit code 127` + ci-config-guard `sudo: a password is required`（已通过 `gh run view 29589488519 --log-failed` 与 `gh run view 29589488535 --log-failed` 交叉验证）。修复后预期所有 Go matrix job 与 ci-config-guard 通过。
+- **修复难度**: 中。删除 1 个 step（Ensure make），重写 3 个 step 的 run 命令（Build/Test/Quality），1 个 step 改用 python3。
+- **根因**: runner provision 缺口（do-sfo3 droplet 镜像未包含 build-essential，且 runner 用户无 NOPASSWD sudo）。长期方案是在 runner provision 脚本中预装 `build-essential` 并配置 NOPASSWD sudo，本 PR 的"绕过 make"是更可靠的永久方案——CI 不应依赖 runner provision，workflow 应自包含。
+- **关联**: CI-MASK-1（unmask 暴露此问题）、CACHE-RESTORE-1（同 PR 同步修复的次要 warning）。
+
+### DEP-REVIEW-1: dependency-review job 失败因为 GitHub Dependency Graph 与 Advanced Security 未启用 [待评估]
+- **状态**: 待评估（PR #81 暴露但未修复，需仓库管理员在 GitHub Settings 启用）
+- **影响文件**: `.github/workflows/pr-checks.yml`（L32-42，dependency-review job）、GitHub 仓库 `01luyicheng/NetProxyGateway` 的 Settings → Security → Security overview
+- **问题描述**: `pr-checks.yml` 的 `dependency-review` job 调用 `actions/dependency-review-action@v4`，但仓库未启用 GitHub Dependency Graph 与 Advanced Security，导致 action 报错：`Dependency review is not supported on this repository. Please ensure that Dependency graph is enabled along with GitHub Advanced Security`。
+- **触发场景**: 任何触发 dependency-review job 的 PR。
+- **风险**: **中-高**（安全）。dependency-review 是检测 PR 引入新依赖漏洞的关键门禁，未启用等同于无依赖审查。
+- **建议修复**: 在 GitHub Settings → Code & automation → Code security → Security overview 启用：
+  1. Dependency graph（免费功能，所有 public repo 应启用）
+  2. GitHub Advanced Security（需付费 license 或 public repo 免费）
+  - 或：如果暂时无法启用 GHAS，把 `dependency-review` job 改为 `continue-on-error: true` 并加注释说明，但这样会失去依赖审查能力。
+- **关联**: CI-DEP-1（required status checks 未启用是此问题长期未被发现的结构性原因之一）。
+
+### MAINSCREEN-DUP-IMPORT-1: `MainScreen.kt` 存在重复 import 导致 `compileDebugKotlin` 失败 [已修复]
+- **状态**: 已修复（PR #81 unmask CI-MASK-2 后暴露并修复）
+- **影响文件**: `android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt`（删除 L22 重复 `KeyboardActions` import 与 L43 重复 `LocalFocusManager` import）
+- **问题描述**: `MainScreen.kt` 同时存在两组重复 import（基于 dev 分支原始行号）：
+  - L20 与 L22：`import androidx.compose.foundation.text.KeyboardActions`
+  - L43 与 L45：`import androidx.compose.ui.platform.LocalFocusManager`
+  Kotlin 编译器报 `Conflicting import: imported name 'KeyboardActions' is ambiguous.`（CI 日志只输出第一处冲突，第二处 LocalFocusManager 因 Kotlin 编译器去重策略未单独报错但客观存在），`compileDebugKotlin` FAILED → `assembleDebug` FAILED → Android CI 红。dev 分支最近 5 次 Android CI run 全部 failure（自 PR #78 `🎨 Palette: 改进配对码输入的键盘交互` 起即开始失败），但被 `lintDebug`/`dependencyCheckAnalyze` 的 `continue-on-error: true`（CI-MASK-2）掩盖为"绿"——实际 `Build with Gradle` step 从未加 `continue-on-error`，但 PR 合并时未把 Android CI 列入 required status checks，故仍能合并。
+- **触发场景**: 任何触发 `./android/gradlew -p android assembleDebug` 的 PR；自 PR #78 起每个 Android PR 的 CI 都失败，但因 required status checks 未启用而未阻塞合并。
+- **修复**: 删除 L22（重复 `KeyboardActions`）与 L43（重复 `LocalFocusManager` 第一处），保留 L20 `KeyboardActions` 与 L45 `LocalFocusManager`（删除 L22 与 L43 后 L45 上移到 L43，共 -2 行位移，仍保持 `LocalContext` 在前 `LocalFocusManager` 在后的字母序）。`git diff` 共 -2 行，无新增逻辑。
+- **验证**: 修复前 `e: file:///.../MainScreen.kt:20:41 Conflicting import` × 2，`compileDebugKotlin FAILED`；修复后预期 `assembleDebug` 通过。
+- **修复难度**: 低。删除 2 行重复 import。
+- **关联**: CI-MASK-2（unmask 暴露此问题）、CI-DEP-1（required status checks 缺口是此问题长期未被发现的结构性原因之一）。
+
+### CI-DEP-1: GitHub required status checks 未启用，允许 CI 失败的 PR 合并 [待评估]
+- **状态**: 待评估（PR #81 暴露但未修复，需独立 PR 处理 branch protection 配置）
+- **影响文件**: GitHub 仓库 `01luyicheng/NetProxyGateway` 的 branch protection rules（不在仓库代码内）
+- **问题描述**: `dev`/`main` 分支的 branch protection 未把 `Go CI`/`Android CI` 列为 required status checks。这导致 MAINSCREEN-DUP-IMPORT-1 自 PR #78（2026-07-11 合并）起让 dev 分支最近 5 次 Android CI 全部 failure，但 PR 仍能合并。同样地，CACHE-RESTORE-1 与 MAKE-MISSING-1 在 dev 上长期被 CI-MASK-1 掩盖（CI 显示为 success），即便 required status checks 启用也无法发现。
+- **触发场景**: 任何 PR 合并到 `dev` 或 `main`。
+- **风险**: **高**。CI 失败的 PR 可直接合并，违背 AGENTS.md 第 7 节"验证门禁（必须通过）"约定。
+- **建议修复**: 在 GitHub Settings → Branches → Branch protection rules 中为 `dev`/`main` 启用 "Require status checks to pass before merging"，并把 `Go Server Build (api)`、`Go Server Build (socks5-proxy)`、`Go Server Build (tunnel)`、`Go Server Build (httpclient)`、`Go Server Build (ratelimit)`、`Go Server Build (recovery)`、`Go Server Build (stringutil)`、`Android Build & Test`、`ci-config-guard` 列为 required。注意必须先让 dev 上的 CI 全绿才能启用，否则现有失败 PR 会全部阻塞。**前置依赖**：(1) 需先修复 DEP-REVIEW-1（dependency-review job 当前失败），否则启用 required 后所有 PR 会被 dependency-review 阻塞；(2) 需等 self-hosted runner 切换回 GitHub runners 后 CGO-DETECT-1 自动消失，否则 `Go Server Build (api)` 的 Test step 会持续失败阻塞所有修改 `server/api/**` 的 PR。
+- **关联**: CI-MASK-1、CI-MASK-2、MAINSCREEN-DUP-IMPORT-1、CACHE-RESTORE-1、MAKE-MISSING-1、DEP-REVIEW-1、CGO-DETECT-1。
+
+### CGO-DETECT-1: self-hosted runner 缺少 gcc，导致 server/api 的 go-sqlite3 测试在 CI 中失败 [无需修复 — 临时 runner 问题]
+- **状态**: 无需修复。当前 self-hosted runner 是临时使用，下个月将切换回 GitHub 提供的 Ubuntu runners（预装 build-essential/gcc），切换后此问题自动消失。
+- **修复难度**: 无需投入。两条路径均**不应执行**：(a) 不在 self-hosted runner 上安装 gcc（临时环境不值得改动）；(b) 不切换 sqlite 驱动（避免不必要的代码变更和 SQL 占位符语法调整）。
+- **影响文件**: `.github/workflows/go-ci.yml` 的 `Check gcc availability` step（保留不动，已正确）+ `server/api/` 的 sqlite 驱动选择（**不修改**）
+- **问题描述**: PR #81 unmask CI-MASK-1 后，dev 上 `Go Server Build (api)` job 的 `Test api` step 持续失败（CI run 29603650822）。22+ 个数据库测试（TestServerCloseStopsCleanupWorkers、TestValidateSessionExpiredTokenDeleteFailureDoesNotLogRawToken、TestCreatePairingSession* 等）报 `Binary was compiled with 'CGO_ENABLED=0', go-sqlite3 requires cgo to work. This is a stub`。**Build step 通过**，仅 Test step 失败。
+- **诊断证据**:
+  - CI run 29603650822（dev commit `552f93e`）：`Go Server Build (api)` job 中 `Build api` ✅，`Test api` ❌。其他 6 个 Go 组件 ✅。
+  - CI run 29595665762（PR #81 commit `1fc9f64`）：`go env` 输出 `CC='gcc'`（**Go 默认值，不代表 gcc 真的存在**）和 `CGO_ENABLED='0'`。
+  - CI run 29627525005（PR #98 commit `2ec1408`，尝试硬编码 `CGO_ENABLED=1`）：`Build api` 直接失败，错误 `cgo: C compiler "gcc" not found: exec: "gcc": executable file not found in $PATH`。`Build tunnel` 和 `Build socks5-proxy` 同样失败（`runtime/cgo` 包需要 gcc）。
+- **根因**: self-hosted runner 上**没有 gcc**。`go env` 输出 `CC='gcc'` 只是 Go 的默认配置值，不代表 gcc 真的存在于 PATH。GitHub 提供的 ubuntu-latest runners 预装 build-essential（包括 gcc），切换后 `Check gcc availability` step 会自动检测到 gcc 并设置 `CGO_ENABLED=1`。
+- **`Check gcc availability` step 行为正确**: PR #81 的 `Check gcc availability` step 用 `command -v gcc &>/dev/null` 检测 gcc，因为 gcc 不存在所以返回非零退出码，执行 `else` 分支输出 `available=false`。表达式 `${{ steps.gcc.outputs.available == 'true' && '1' || '0' }}` 正确解析为 `'0'`，`Build api` 的 env `CGO_ENABLED: 0` 是正确的。Build 通过（go-sqlite3 用 stub 编译），Test 失败（stub 不能用）。**该 step 在切换回 GitHub runners 后将自动恢复正常工作**。
+- **PR #98 第三轮诊断的错误**: 之前误以为 `steps.gcc.outputs.available` 未被 Build step 正确读取。这是错的。`Check gcc availability` step 实际工作正常，PR #98 试图硬编码 `CGO_ENABLED=1` 反而让 dev 从"1 个组件失败"退化到"3 个组件失败"（api/tunnel/socks5-proxy 的 Build 都失败）。PR #98 已关闭。
+- **教训**: `go env` 输出的 `CC` 字段是 Go 的默认配置，**不能作为 gcc 是否存在的证据**，应该用 `command -v gcc` 或 `which gcc` 验证。
+- **触发场景**: 任何修改 `server/api/**`、`Makefile`、`.github/workflows/go-ci.yml` 的 PR 在 self-hosted runner 期间会看到 `Go Server Build (api)` job 失败。**这是已知噪音，不应阻塞 PR 合并**（CI-DEP-1 required status checks 未启用，所以失败 job 不阻塞合并）。
+- **风险**: 低。仅影响 `server/api` 的 Test step；Build 通过，不影响产物正确性。CI 红色噪音直到 runner 切换。
+- **AI 执行决策指引**: **不要尝试修复此问题**。如果有人提议"硬编码 CGO_ENABLED=1"、"安装 gcc"、"切换到 modernc.org/sqlite"，应指向本条目并拒绝。等到 self-hosted runner 切换回 GitHub runners 即可。
+- **关联**: CI-MASK-1（unmask 暴露此问题）、MAKE-MISSING-1（同 PR #81 CI 修复链）、CI-DEP-1（required status checks 未启用让此问题不阻塞合并，反而让 dev 能继续推进）。
+
+### CI-GUARD-BYPASS-S1to3: `check_ci_permissions.py` 的 3 个边缘绕过路径 [未修复 — 低风险]
+- **状态**: 未修复。H1-H5（5 个主要绕过路径）已通过本 PR（基于 PR #96 rebase）关闭并合入 dev；S1-S3 是 subagent 审查发现的边缘绕过，风险低，暂不修复。
+- **修复难度**: 中。需要扩展 `check_dependency_review()` 函数的 YAML 解析逻辑，处理引号键、冒号前空格、伪前置 step 三种边缘情况。
+- **影响文件**: `scripts/check_ci_permissions.py` 的 `check_dependency_review()` 和 `_parse_steps()` 函数 + `scripts/test_check_ci_permissions.py` 新增 3 个测试用例
+- **绕过路径**:
+  - **S1（引号键）**: `'continue-on-error': true`（键用单引号包裹）。YAML 规范允许引号键，PyYAML 解析时作为字符串键。当前 `_parse_steps()` 用 `line.strip().startswith('continue-on-error')` 匹配，引号键会绕过。
+  - **S2（冒号前空格）**: `continue-on-error : true`（键与冒号间有空格）。YAML 规范允许冒号前后空格，PyYAML 接受。当前匹配逻辑不处理这种情况。
+  - **S3（伪前置 step 误导）**: 在 `dependency-review` step 之前放置一个无关 step（如 `- name: Print config` + `run: echo "fail-on-severity: high"`），让 `_parse_steps()` 从无关 step 中提取 `fail-on-severity`，从而让真正的 dependency-review step 缺失该字段也能通过。
+- **风险评估**: 低。三种绕过都需要恶意构造，实际 CI 配置中罕见。`dependency-review` job 当前在 dev 上存在且未被 mask，紧迫性低。
+- **触发场景**: 攻击者（或恶意 bot）提交 PR 试图绕过 dependency-review guard。考虑到 PR #79/#82 的 palette bot 越界删除先例，理论上可能复发，但 palette bot 不会用引号键/冒号空格等边缘语法。
+- **AI 执行决策指引**: 暂不修复。如果未来发现实际绕过尝试，再优先处理。当前 guard 已覆盖 H1-H5 主要绕过路径，足以防止常见的 palette bot 越界。
+- **关联**: CI-DEP-1（dependency-review job 删除防护的原始需求）、CI-MASK-1/2/3（CI masking 系列）。
+
+
+---
+
+## 提交后正确性检查发现（2026-07-18，审查 PR #95 / #91 / #96 / #92 / #86）
+
+> 由 5 个并行 subagent 一审 + 2 个独立 subagent 二审交叉确认。所有发现均未在合并基线
+> 的 `docs/` 中记录过，符合"仅报告尚未被记录在文档中的问题"的门槛。
+
+### PR-95-TIMING-REGRESSION: 反调试时序检测被静默禁用 [已在本分支修复]
+
+- **状态**: 已在本分支修复（`fix/pr95-timing-attack-workload-restore`）
+- **提交哈希**: PR #95 分支 `582966e`（origin/jules-3397389426294637075-40b8fe73）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt` (`checkTimingAttack`, L453-L466 在 main 上；PR #95 删除 L456-L460)
+- **问题描述**: PR #95 "⚡ 性能优化: 移除 checkTimingAttack 中的无意义死循环" 误将
+  `for (i in 0 until 1000000) sum += i` 循环判为"死代码"删除。该循环是**被测量的
+  工作负载**——删除后函数体变为两次相邻的 `System.currentTimeMillis()` 调用，毫秒
+  粒度上差值几乎总是 0，在默认 `thresholdMs = 1000` 下 `0 > 1000` 恒为 false。该
+  检测是 `DebugDetector` 中**唯一**基于时序的动态分析检测，专门捕获能绕过静态检查
+  （TracerPid、`/proc/self/status`）的自定义调试器或插桩工具。删除循环等于完全
+  禁用这一检测通道。
+- **执行路径**: `NetProxyApp.onCreate` → `performSecurityChecks` →
+  `SecurityManager.performSecurityCheck` (`SecurityManager.kt:98`) →
+  `DebugDetector.check` (`DebugDetector.kt:90`) → `checkTimingAttack` →
+  `detectedMethods.add("timing-attack")` → `isDebugged = true` →
+  `SecurityCheckResult.isSecure = false`。
+- **触发场景**: 攻击者附加自定义调试器或 Frida 在单步/断点密集模式下逆向应用启动
+  阶段的 MQTT 凭证或代理配置。PR #95 之前：1M 次迭代在单步下膨胀到数秒 →
+  `diff > 1000` → 触发检测；PR #95 之后：`startTime` 与 `endTime` 相邻，`diff ≈ 0`，
+  永不触发——攻击者甚至无需绕过该检查。
+- **风险**: **Medium-High**。当前 `handleSecurityRisk` 仅记录日志（`NetProxyApp.kt:64-73`），
+  但代码 TODO（`NetProxyApp.kt:68-72`，"退出应用（在 release 模式下可考虑）"）一旦
+  落地，此破损的检测将成为静默漏洞。其他 9 个静态检测（debugger-connected、
+  being-debugged、ptrace-status、frida、xposed 等）仍工作，所以不是完全失守，
+  但 defense-in-depth 中时序维度被关闭。
+- **PR #95 添加的测试反而固化了回归**:
+  - `checkTimingAttack_returnsFalse_underNormalExecution` → 回归后 diff 恒为 0，
+    该测试 trivially 通过，名为"正常执行"实际无法区分正常/异常。
+  - `checkTimingAttack_returnsTrue_whenExecutionExceedsThreshold` 用 `thresholdMs = -1`
+    调用，`0 > -1` 恒真，是 tautology——任何实现都会通过。
+  两条测试均未模拟"调试器减速的时钟"或断言工作负载耗时，无法捕获回归。
+- **修复方式**（本分支）:
+  1. 恢复 100 万次整数累加工作负载。
+  2. 通过 `@Volatile var workloadFingerprint: Int` 写入 `sum`，使循环具备可观测
+     副作用，防止 JIT DCE 删除（也使未来的"无意义死循环"误判需要明确删除该字段，
+     触发编译失败提醒）。
+  3. 新增 `@Volatile var timingCheckInvocationCount: Long`，在循环之后递增，作为
+     函数体完成执行的锚点。
+  4. 新增 `now: () -> Long = { System.currentTimeMillis() }` 参数，使时序逻辑可被
+     注入式测试确定性验证（不依赖真实时序或实际调试器附加）。
+  5. 添加 5 条测试：
+     - `returnsFalse_underNormalExecution`：真实时钟 + 默认阈值（基线）
+     - `returnsTrue_whenClockSimulatesDebuggerSlowdown`：注入 fake clock，diff=2000ms
+       → true（确定性验证阈值逻辑）
+     - `returnsFalse_whenClockSimulatesFastExecution`：注入 fake clock，diff=10ms
+       → false
+     - `returnsFalse_whenDiffEqualsThreshold`：边界 `diff == threshold`（严格 `>`）
+     - `executesObservableWorkload`：断言 `timingCheckInvocationCount` 递增且
+       `workloadFingerprint` 等于 `0 until 1_000_000` 的累加和——循环若被删除，
+       fingerprint 不会更新，断言失败。
+- **关联**: PR #91 / PR #96 / PR #92 的审查评论已分别留在各 PR；本分支只修复
+  PR #95，因为它是唯一可在新分支上独立、最小化、高置信度修复的问题（PR #91 / #96
+  是他人 PR 的活体分支，只能评论不能直接修改；PR #92 标题与 diff 不符属于沟通问题）。
+
+---
+
+## PR #91 / #92 审查与 self-hosted runner CI 问题（2026-07-18 补充）
+
+> 3 个新条目记录今日 PR 审查与 CI 基础设施状态：CI-DEP-1-RELAPSE-3（PR #91 第 3 次
+> 复发）、HEALTH-RATELIMIT-1（PR #92 设计缺陷）、SELF-HOSTED-RUNNER-1（临时 runner
+> 期间已知 CI 问题）。
+
+### CI-DEP-1-RELAPSE-3: PR #91 第 3 次尝试删除 dependency-review job + 削弱 commitlint [已记录 — PR 已关闭]
+
+- **状态**: 已记录（PR #91 closed，未合并；CI-DEP-1 守卫已生效）
+- **修复难度**: 低（PR 已关闭，无需修复；保留记录作为复发模式证据）
+- **修复状态**: 已记录
+- **位置**: PR #91（已关闭）— diff 涉及 `.github/workflows/pr-checks.yml`（删除 dependency-review job）、`.commitlintrc.json`（body-max-line-length 设为 severity=0）、`android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt`（与 PR #87 字节级相同）
+- **问题描述**: PR #91 标题声称是 UX 改进，但 diff 包含 3 个无关的安全回归：
+  (a) 删除了 `.github/workflows/pr-checks.yml` 中的 `dependency-review` job，继 PR #79/#82 后第 3 次尝试删除该 job，违反 CI-DEP-1 守卫；
+  (b) 将 `.commitlintrc.json` 的 `body-max-line-length` 规则设为 severity=0（禁用），削弱 commit message 长度检查；
+  (c) 改动 `MainScreen.kt`，与 PR #87 字节级完全相同（PR #87 已合并到 dev）。
+  PR 描述掩盖实际改动，属于"恶意/疏忽的 PR 描述掩盖实际改动"模式。
+- **触发场景**: 恶意/疏忽的 PR 描述掩盖实际改动；palette bot 或类似自动化工具的越界删除行为复发。
+- **风险**: **High**。如果合并：(a) 会静默移除 dependency-review 安全门，让依赖漏洞检测失效；(b) 削弱 commitlint body-max-line-length 规则，让超长 commit message 通过；(c) MainScreen.kt 重复改动可能引入冲突或回退 PR #87 的修复。
+- **修复方式**: PR 已关闭；CI-DEP-1 守卫已生效（`scripts/check_ci_permissions.py` 拦截了 dependency-review job 的删除）。建议后续遇到类似 PR（标题声称改进但 diff 包含 dependency-review 删除或 commitlint 削弱）应直接关闭，并在 PR 评论中指向本条目与 CI-DEP-1。
+- **关联**: CI-DEP-1（required status checks / dependency-review 守卫的原始需求）、N90、PR #79、PR #82（前两次复发）、PR #87（PR #91 的 UX 部分已被 PR #87 合并到 dev）。
+
+### HEALTH-RATELIMIT-1: PR #92 健康检查接口速率限制实现有 3 个设计缺陷 [未修复 — 待重做]
+
+- **状态**: 未修复 — 待重做（PR #92 已关闭，未合并）
+- **修复难度**: 中
+- **修复状态**: 未修复
+- **位置**: PR #92（已关闭，未合并）— diff 涉及 `server/api/` 健康检查接口的速率限制实现
+- **问题描述**: PR #92 标题"添加健康检查接口的速率限制机制"，但实现有 3 个关键缺陷：
+  (a) **K8s readiness 误伤**：复用 `s.rateLimiter`（与 login 共享），会导致 K8s readiness probe 被限流，造成 Pod 误判不健康并重启；
+  (b) **X-Forwarded-For 可伪造**：gin 默认 `TrustedProxies=["0.0.0.0/0","::/0"]`，攻击者可伪造 IP 绕过限流；
+  (c) **共享限流桶**：健康检查不应与登录共享限流桶——健康检查是基础设施探针，登录是用户认证，二者的限流语义和阈值不同。
+- **触发场景**: K8s 部署环境下，readiness probe 频繁调用健康检查接口，被限流后导致 Pod 被误判不健康并触发重启循环。
+- **风险**: **Medium**。仅在 K8s 部署 + 高频 readiness probe 场景下显现，但一旦显现会导致服务不稳定。
+- **修复方式**: 重做 PR，使用独立的限流桶（如 `s.healthRateLimiter`），不依赖 X-Forwarded-For，只基于 RemoteIP（gin 的 `c.ClientIP()` 在 `TrustedProxies=[]` 时返回 RemoteAddr）。如果需要支持反向代理场景，应显式配置 `TrustedProxies` 为可信代理列表，而非默认的全网信任。
+- **关联**: 无
+
+### SELF-HOSTED-RUNNER-1: 临时 self-hosted runner 期间 3 个已知 CI 问题 [未修复 — 等待基础设施切换]
+
+- **状态**: 临时基础设施问题 — 切回 GitHub-hosted runners 后自动缓解
+- **修复难度**: 低（无需修复代码，等切换 runner）
+- **修复状态**: 未修复 — 等待基础设施切换
+- **位置**: `.github/workflows/pr-checks.yml`（dependency-review job）+ `.github/workflows/android-ci.yml`（"Run dependency vulnerability check" step）+ self-hosted runner 容量配置
+- **问题描述**: 当前使用临时 self-hosted runner（用户提示下个月切回 GitHub-hosted runners），期间有 3 个已知 CI 基础设施问题：
+  (a) **dependency-review job 失败**：错误信息 `Dependency review is not supported on this repository. Please ensure that Dependency graph is enabled along with GitHub Advanced Security`。根本原因是仓库为 private 且未启用 GitHub Advanced Security（GHAS），dependency-review-action 无法工作。**与 runner 无关**：即使切回 GitHub-hosted runners 也会失败（private 仓库需要 GHAS 才能使用 dependency-review-action）。当前用 admin merge 绕过（与 PR #99/#100 一致），与代码无关。
+  (b) **Android CI "Run dependency vulnerability check" 步骤 cancelled**：现象为步骤 13（OWASP Dependency-Check）跑了 28 分钟后被 cancelled。根本原因是 self-hosted runner 网络问题，OWASP Dependency-Check 拉取 NVD 数据库超时。**与 runner 相关**：切回 GitHub-hosted runners 后会自动解决（GitHub 网络好）。当前用 admin merge 绕过，因为关键 Build/Test/Lint/JaCoCo 步骤都已通过。
+  (c) **Runner 容量问题**：多个 CI job 长时间 queued 无法获取 runner。根本原因是 self-hosted runner 数量有限，单个 Android CI job 可能卡住 1.5+ 小时占用 runner。**与 runner 相关**：切回 GitHub-hosted runners 后会自动解决。
+- **触发场景**: 所有 PR。
+- **风险**: **Low**。仅 CI 基础设施问题，不影响代码正确性；用 admin merge 绕过。
+- **修复方式**: (a) 切回 GitHub-hosted runners 后 Android CI 网络问题（b/c）自动解决；(b) dependency-review 即使切回 GitHub-hosted runners 也会失败——需启用 GHAS 或修改 CI 配置，但当前用 admin merge 绕过（同 DEP-REVIEW-1 的处理思路）；(c) 切回后 runner 容量自动解决。
+- **关联**: CGO-DETECT-1（同样是临时 runner 问题，已标记 no-fix needed）、DEP-REVIEW-1（dependency-review job 失败的根本原因相同：未启用 GHAS）、CI-DEP-1（required status checks 未启用让这些 CI 问题不阻塞合并）。
+
+### REV51: server/tunnel `offline` 通知 `last_seen` 在 goroutine 内捕获，可与并发 `online` 竞争导致设备被错误持久化为离线 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 中
+- **位置**: `server/tunnel/main.go` (`Register`、`Unregister`、`cleanupDeadTunnelsOnce`、`notifyDeviceStatus`)
+- **问题描述**: REV32 的替换 re-check 在"未发现 replacement"时会决定发送 `offline` 通知，但 `last_seen` 时间戳是在 `notifyDeviceStatus` goroutine 内部通过 `time.Now().UnixMilli()` 捕获的（而非在 re-check 决策时刻捕获）。当 `offline` goroutine 因调度延迟晚于一个并发的 `Register`（`online`）执行时，`offline` 的 `last_seen` 可能 **晚于** `online` 的 `last_seen`，从而绕过 REV33 在 API 端设置的严格 `excluded.last_seen > device_status.last_seen` 保护，把已经回到在线状态的设备错误地写回 `offline`。设备会保持错误的离线状态直到下一次完整重连触发新的 `online` 通知（无自纠正心跳）。该残余竞态是 PR #58 引入 `last_seen` 字段后特有的：main 分支的 `notifyDeviceStatus` 不发送 `last_seen`，API 回落为当前时间，问题不存在。
+- **风险**: **中**。窗口较小（需 re-check 后、goroutine 实际执行前恰好有并发 `Register`），不影响实际 SOCKS5 连通性，但会导致工程师端设备状态显示与实际不符，且无法自纠正。属于 REV32/REV33 修复后声称已闭合但实际未闭合的残余竞态——文档（REV32 剩余风险、REV33 修复方式）此前错误地断言该路径已被 `last_seen` 保护覆盖。
+- **触发场景**: 设备网络抖动导致旧隧道断开（触发 `Unregister`）的同时客户端立即重连（触发 `Register`）。`Unregister` 的 re-check 在 `Register` 之前完成（未观测到 replacement），于是决定发送 `offline`；但 `offline` goroutine 实际执行 `time.Now()` 的时刻晚于 `Register` 捕获 `online` 时间戳的时刻，导致 `offline.last_seen > online.last_seen`，API 接受该 `offline` 写入。
+- **修复方式**:
+  - 将 `last_seen` 的捕获从 `notifyDeviceStatus` goroutine 内部提前到事件决策时刻，并在 `m.mu` 锁下完成：
+    - `Register`：在 `m.mu.Lock()` 下捕获 `online` 的 `last_seen`，作为参数传入 `go m.notifyDeviceStatus(..., lastSeen)`。
+    - `Unregister`：在 re-check 的 `m.mu.RLock()` 下捕获 `offline` 的 `last_seen`（re-check 未发现 replacement 的瞬间），再 spawn goroutine 转发该值。
+    - `cleanupDeadTunnelsOnce`：同样在 re-check 的 `m.mu.RLock()` 下捕获 `last_seen`。
+  - `notifyDeviceStatus` 签名改为接收 `lastSeen int64` 参数，移除内部的 `time.Now().UnixMilli()` 重捕获，确保 caller 在锁下捕获的值被原样转发。
+  - 不变式：由于 `offline` 的 `last_seen` 在 re-check 时刻（`m.mu` 锁下）捕获，而任何后续 `Register` 必须先获取 `m.mu` 写锁才能捕获 `online` 的 `last_seen`，故 `offline.last_seen` 严格早于 `online.last_seen`，API 的严格 `>` 保护必然拒绝该 `offline`。
+  - 新增测试钩子 `testRecheckHook`（`reached` buffered(1) + `hold` 阻塞通道）与 `TunnelManager.testHookAfterUnregisterRecheck` / `testHookAfterDeadTunnelsRecheck` 字段，用于确定性复现 re-check 后、goroutine spawn 前的竞态窗口。生产代码中这些字段为 nil，零开销。
+- **测试覆盖**:
+  - `TestNotifyDeviceStatusIncludesLastSeenTimestamp`：重写为传入固定 `last_seen`，断言 payload 原样转发 caller 捕获的值（不再内部重捕获）。
+  - `TestUnregisterOfflineLastSeenStrictlyOlderThanConcurrentRegister`：新增确定性回归测试。利用 `testHookAfterUnregisterRecheck` 在 re-check 捕获 `offline` `last_seen` 后暂停 `Unregister`，在暂停窗口内 `Register` 替换隧道（其 `online` `last_seen` 严格更新），随后释放并断言 `offline.last_seen < online.last_seen`。已验证：模拟缺陷（在 hold 释放后重捕获 `last_seen`）时该测试确定性失败；修复后确定性通过。
+  - 其余 7 处 `notifyDeviceStatus` 调用点更新为 4 参数签名。
+- **关联**: 修正 REV32"剩余风险"与 REV33"修复方式"中关于 `last_seen` 保护已生效的不准确断言。本修复基于 `fix/rev31-36-post-commit-review` 分支（PR #58），因为该竞态是 PR #58 引入 `last_seen` 字段后特有的。
