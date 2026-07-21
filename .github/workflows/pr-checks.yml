@@ -56,8 +56,6 @@ jobs:
         uses: actions/dependency-review-action@v4
         with:
           fail-on-severity: high
-        # Temporary bypass for DEP-REVIEW-1 as GHAS is not enabled yet
-        'continue-on-error': true
 
   # Regression guard for CI-PERM-1 (paths-filter permissions) and
   # CI-MASK-1 / CI-MASK-2 (build/test/lint/dep-check must not be masked).
