@@ -1847,3 +1847,21 @@ func TestGetPairingSession_ConcurrentModificationReturns410(t *testing.T) {
 		t.Fatalf("expected 410 Gone for expired session with concurrent modification, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 }
+
+func TestGenerateCode(t *testing.T) {
+	for i := 0; i < 1000; i++ {
+		code, err := generateCode()
+		if err != nil {
+			t.Fatalf("generateCode() returned error: %v", err)
+		}
+		if len(code) != 6 {
+			t.Errorf("generateCode() returned code of length %d, expected 6: %s", len(code), code)
+		}
+		for _, ch := range code {
+			if ch < '0' || ch > '9' {
+				t.Errorf("generateCode() returned non-numeric character in code: %s", code)
+				break
+			}
+		}
+	}
+}
