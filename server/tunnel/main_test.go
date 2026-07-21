@@ -2,9 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1497,5 +1501,86 @@ func TestCleanupDeadTunnelsSendsOfflineWhenNotReplaced(t *testing.T) {
 	_, ok := manager.Get("device-cleanup-dead")
 	if ok {
 		t.Fatal("expected dead tunnel to be removed")
+	}
+}
+
+// getFreePort asks the kernel for a free open port that is ready to use.
+func getFreePort() (int, error) {
+	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	if err != nil {
+		return 0, err
+	}
+
+	l, err := net.ListenTCP("tcp", addr)
+	if err != nil {
+		return 0, err
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port, nil
+}
+
+func TestServerRunGracefulShutdown(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SIGINT not supported on Windows")
+	}
+
+	port, err := getFreePort()
+	if err != nil {
+		t.Fatalf("failed to get free port: %v", err)
+	}
+
+	config := &Config{
+		Addr:              fmt.Sprintf("127.0.0.1:%d", port),
+		APIEndpoint:       "http://localhost:8080",
+		InternalAPIKey:    "test-key",
+		HeartbeatInterval: 1 * time.Second,
+		HeartbeatTimeout:  3 * time.Second,
+	}
+
+	server := NewServer(config)
+	errCh := make(chan error, 1)
+
+	go func() {
+		errCh <- server.Run()
+	}()
+
+	// Wait for server to start with a retry loop
+	url := fmt.Sprintf("http://127.0.0.1:%d/health", port)
+	serverStarted := false
+	for i := 0; i < 20; i++ {
+		resp, err := http.Get(url)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				serverStarted = true
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if !serverStarted {
+		t.Fatalf("server failed to start within timeout")
+	}
+
+	// Trigger graceful shutdown
+	process, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatalf("failed to find process: %v", err)
+	}
+
+	err = process.Signal(os.Interrupt)
+	if err != nil {
+		t.Fatalf("failed to send SIGINT: %v", err)
+	}
+
+	// Wait for Run to return
+	select {
+	case err := <-errCh:
+		if err != http.ErrServerClosed {
+			t.Errorf("expected http.ErrServerClosed, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server.Run() did not return within timeout")
 	}
 }
