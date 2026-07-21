@@ -1,6 +1,5 @@
 package com.netproxy.gateway.vpn
 
-import com.netproxy.gateway.proxy.PooledSocks5Connection
 import com.netproxy.gateway.proxy.Socks5ConnectionPool
 import org.slf4j.LoggerFactory
 import java.io.FileOutputStream
