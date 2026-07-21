@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	_ "github.com/mattn/go-sqlite3"
@@ -1315,6 +1316,54 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 	}
 }
 
+// defaultCORSAllowedOrigins is used when API_ALLOWED_ORIGINS is unset or empty.
+// Preserves the dev-only defaults shipped with PR #108 so local frontends on
+// :3000 / :8080 keep working without extra configuration.
+var defaultCORSAllowedOrigins = []string{"http://localhost:3000", "http://localhost:8080"}
+
+// buildCorsConfig constructs the CORS middleware config.
+//
+// allowedOriginsEnv is the raw value of the API_ALLOWED_ORIGINS environment
+// variable (comma-separated list of origins, e.g.
+// "https://app.example.com,https://admin.example.com"). Empty entries are
+// dropped. When the env var is unset or contains no valid origins, the
+// dev-only localhost defaults are used so local development keeps working.
+//
+// Without this env-var-driven allowlist, gin-contrib/cors@v1.7.7 would
+// `AbortWithStatus(http.StatusForbidden)` for every cross-origin request
+// whose Origin is not localhost, hard-breaking any non-dev deployment.
+// See docs/ISSUES.md CORS-HARDCODED-ORIGINS-1.
+func buildCorsConfig(allowedOriginsEnv string) cors.Config {
+	corsConfig := cors.DefaultConfig()
+	corsConfig.AllowOrigins = parseCORSAllowedOrigins(allowedOriginsEnv)
+	corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
+	corsConfig.AllowHeaders = []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Requested-With"}
+	corsConfig.ExposeHeaders = []string{"Content-Length"}
+	corsConfig.AllowCredentials = true
+	corsConfig.MaxAge = 12 * time.Hour
+	return corsConfig
+}
+
+// parseCORSAllowedOrigins splits a comma-separated origin list, trimming
+// whitespace and dropping empty entries. Returns the dev-only localhost
+// defaults when the input contains no valid origin.
+func parseCORSAllowedOrigins(raw string) []string {
+	if raw == "" {
+		return defaultCORSAllowedOrigins
+	}
+	origins := make([]string, 0, 4)
+	for _, item := range strings.Split(raw, ",") {
+		origin := strings.TrimSpace(item)
+		if origin != "" {
+			origins = append(origins, origin)
+		}
+	}
+	if len(origins) == 0 {
+		return defaultCORSAllowedOrigins
+	}
+	return origins
+}
+
 func main() {
 	// Set Gin mode
 	gin.SetMode(gin.ReleaseMode)
@@ -1330,6 +1379,10 @@ func main() {
 
 	r := gin.New()
 	r.Use(gin.Recovery())
+	// Configure CORS
+	corsConfig := buildCorsConfig(os.Getenv("API_ALLOWED_ORIGINS"))
+	r.Use(cors.New(corsConfig))
+
 	r.Use(gin.Logger())
 
 	// Health check (public)
