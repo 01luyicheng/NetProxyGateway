@@ -2214,7 +2214,8 @@
 > 以下问题由多 subagent 对过去 24 小时提交与更新 PR 的深度审查发现，经独立 subagent 交叉验证确认。
 
 ### REV52: PR #112 提交 `84c0691` 大规模回退 dev 已修复的安全/数据完整性缺陷 [待修复 — 阻塞合并]
-- **状态**: 待修复（已在 PR #112 留下阻塞评论；PR 尚未合并）
+- **修复状态**: 待修复（已在 PR #112 留下阻塞评论；PR 尚未合并）
+- **修复难度**: 高（需丢弃回退提交并恢复多项安全、数据完整性及资源管理修复）
 - **提交哈希**: `84c0691`（分支 `fix-pairing-session-db-perf-91002509196936996`）
 - **位置**: `server/api/main.go`
 - **问题描述**: PR #112 标题为“使用预编译语句优化 `compareAndUpdatePairingSessionDB` 性能”。真正实现预编译语句的提交 `c62aa5e` 是正确的（完整保留 dev 全部修复）。但随后的提交 `84c0691`（commit message 同样写作 perf 优化）实际用一份旧版 `main.go` 快照覆盖文件，diff 高达 **65 文件 +491/−7089**，把 dev 上已修复的多个问题全部回退。`git merge-base origin/dev <PR分支>` == `origin/dev` HEAD (`af16a54`)，证实这些代码缺失是被本 PR 删除，而非“dev 有更新但分支未跟上”。
@@ -2230,7 +2231,8 @@
 - **交叉验证**: 两个独立 subagent 复核确认（merge-base = dev HEAD；六项逐一用 `git show origin/dev:server/api/main.go` 与 PR 分支 grep 比对）。
 
 ### REV53: `RateLimiter.Stop()` 非幂等，二次调用 panic（`close of closed channel`）[已修复]
-- **状态**: 已修复（本审查批次，分支 `fix/ratelimit-stop-idempotent-rev53`）
+- **修复状态**: 已修复（本审查批次，分支 `fix/ratelimit-stop-idempotent-rev53`）
+- **修复难度**: 低（使用 `sync.Once` 保护关闭通道，并补充幂等性回归测试）
 - **提交哈希**: `1b64bd0`（PR #122 修复 cleanupLoop goroutine 泄漏时，`Stop()` 本身未一并加固；该缺陷为既有问题，非 PR #122 引入）
 - **位置**: `server/shared/ratelimit/ratelimit.go` (`Stop()`, L65-67 修复前)
 - **问题描述**: `Stop()` 直接 `close(rl.stopCh)`，无 `sync.Once` 保护。第二次调用 `Stop()` 会 panic：`close of closed channel`。`Stop()` 与 `cleanupLoop` 属同一区域（PR #122 评审范围），但评审遗漏了 `Stop()` 自身的幂等性。
