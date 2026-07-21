@@ -97,8 +97,9 @@ type DeviceStatus struct {
 
 // Server is the API server.
 type Server struct {
-	db                   *sql.DB
-	pairingCodeGenerator func() (string, error)
+	db                       *sql.DB
+	updatePairingSessionStmt *sql.Stmt
+	pairingCodeGenerator     func() (string, error)
 
 	rateLimiter *ratelimit.RateLimiter
 
@@ -210,14 +211,21 @@ func NewServer() (*Server, error) {
 		return nil, fmt.Errorf("failed to init schema: %w", err)
 	}
 
+	updateStmt, err := db.Prepare(`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ? AND status = ? AND engineer_id = ?`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare update statement: %w", err)
+	}
+
+
 	return &Server{
-		db:                   db,
-		pairingCodeGenerator: generateCode,
-		rateLimiter:          ratelimit.NewRateLimiterWithDefaults(),
-		jwtSecret:            []byte(jwtSecret),
-		internalAPIKey:       []byte(internalAPIKey),
-		expectedUserHash:     expectedUserHash,
-		expectedPassHash:     expectedPassHash,
+		db:                       db,
+		updatePairingSessionStmt: updateStmt,
+		pairingCodeGenerator:     generateCode,
+		rateLimiter:              ratelimit.NewRateLimiterWithDefaults(),
+		jwtSecret:                []byte(jwtSecret),
+		internalAPIKey:           []byte(internalAPIKey),
+		expectedUserHash:         expectedUserHash,
+		expectedPassHash:         expectedPassHash,
 	}, nil
 }
 
@@ -279,6 +287,11 @@ func (s *Server) Close() error {
 		close(s.cleanupStop)
 		s.cleanupWorkers.Wait()
 	}
+
+	if s.updatePairingSessionStmt != nil {
+		s.updatePairingSessionStmt.Close()
+	}
+
 
 	if s.db != nil {
 		return s.db.Close()
@@ -504,15 +517,29 @@ func (s *Server) compareAndUpdatePairingSessionDB(session *PairingSession, expec
 		s.testHookCompareAndUpdatePairingSessionDB()
 	}
 
-	result, err := s.db.Exec(
-		`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ? AND status = ? AND engineer_id = ?`,
-		session.Status,
-		session.EngineerID,
-		boolToInt(session.Used),
-		session.Code,
-		expectedStatus,
-		expectedEngineerID,
-	)
+	var result sql.Result
+	var err error
+	if s.updatePairingSessionStmt != nil {
+		result, err = s.updatePairingSessionStmt.Exec(
+			session.Status,
+			session.EngineerID,
+			boolToInt(session.Used),
+			session.Code,
+			expectedStatus,
+			expectedEngineerID,
+		)
+	} else {
+		// Fallback for tests or if preparation failed
+		result, err = s.db.Exec(
+			`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ? AND status = ? AND engineer_id = ?`,
+			session.Status,
+			session.EngineerID,
+			boolToInt(session.Used),
+			session.Code,
+			expectedStatus,
+			expectedEngineerID,
+		)
+	}
 	if err != nil {
 		return err
 	}
