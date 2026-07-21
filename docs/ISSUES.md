@@ -1997,7 +1997,7 @@
 - **关联**: CI-MASK-1（unmask 暴露此问题）、MAKE-MISSING-1（同 PR #81 CI 修复链）、CI-DEP-1（required status checks 未启用让此问题不阻塞合并，反而让 dev 能继续推进）。
 
 ### CI-GUARD-BYPASS-S1to3: `check_ci_permissions.py` 的 3 个边缘绕过路径 [S1+S2 已修复（REV54）；S3 未修复]
-- **状态**: S1（引号键）+ S2（冒号前空格）已通过 REV54 修复（本 PR，分支 `fix/ci-guard-quoted-key-rev54`）。H1-H5（5 个主要绕过路径）此前已关闭并合入 dev。**S1 的“低风险”评级已被 PR #129 实证证伪**——详见下方 REV54。S3（伪前置 step 误导）仍未修复。
+- **修复状态**: S1（引号键）+ S2（冒号前空格）已通过 REV54 修复（本 PR，分支 `fix/ci-guard-quoted-key-rev54`）。H1-H5（5 个主要绕过路径）此前已关闭并合入 dev。**S1 的“低风险”评级已被 PR #129 实证证伪**——详见下方 REV54。S3（伪前置 step 误导）仍未修复。
 - **修复难度**: S1+S2 已修复（引入 `_key_line_pattern()` 正则匹配，处理引号键与冒号前空格）。S3 仍需扩展 `_parse_steps()` 的 step 归属逻辑，暂不修复。
 - **影响文件**: `scripts/check_ci_permissions.py` 的 `_step_get_value()`、`check_dependency_review()` job 级扫描 + `scripts/test_check_ci_permissions.py` 新增 5 个回归测试（S1 单/双引号、S1 job 级、S2、值提取）
 - **绕过路径**:
@@ -2010,7 +2010,8 @@
 - **关联**: CI-DEP-1（dependency-review job 删除防护的原始需求）、CI-MASK-1/2/3（CI masking 系列）、REV54（S1 被利用 + 修复的完整记录，见下方）。
 
 ### REV54: PR #129 用引号键 `'continue-on-error': true` 绕过 dependency-review 安全门 + `check_ci_permissions.py` S1 守卫盲区 [待修复 PR #129；守卫已在本分支加固]
-- **状态**: PR #129 待修复（已留阻塞评论 https://github.com/01luyicheng/NetProxyGateway/pull/129#issuecomment-5038190476 ，PR 尚未合并）。`check_ci_permissions.py` S1+S2 守卫盲区已在本分支（`fix/ci-guard-quoted-key-rev54`）修复并加回归测试。
+- **修复状态**: PR #129 待修复（已留阻塞评论 https://github.com/01luyicheng/NetProxyGateway/pull/129#issuecomment-5038190476 ，PR 尚未合并）。`check_ci_permissions.py` S1+S2 守卫盲区已在本分支（`fix/ci-guard-quoted-key-rev54`）修复并加回归测试。
+- **修复难度**: 低。PR #129 需移除绕过配置；守卫侧通过统一匹配引号键、冒号前空格并补充回归测试即可完成加固。
 - **提交哈希**: `e41f70f`（分支 `ux/crossfade-status-icons-2792098693352437974`，PR #129 head）
 - **位置**: `.github/workflows/pr-checks.yml` L59-60；守卫盲区在 `scripts/check_ci_permissions.py` `_step_get_value()` L223 与 job 级扫描 L290/296（修复前）
 - **问题描述**: PR #129 标题为“🎨 Palette: 优化状态图标切换的过渡动画”（纯 UI），却在 `pr-checks.yml` 的 `dependency-review` step 上新增引号键 `'continue-on-error': true`，并附注释“Temporary bypass for DEP-REVIEW-1 as GHAS is not enabled yet”。该 step 旁的内联 `SECURITY GATE` 注释（L47-52）与文件头注释（L4-7）明令禁止在此加 `continue-on-error`——这会把 CVSS≥7.0 依赖 CVE 的红色信号静默翻绿。基线 `dev` **没有**这一行（`git show origin/dev:.github/workflows/pr-checks.yml` 确认），故为本 PR 新引入。
