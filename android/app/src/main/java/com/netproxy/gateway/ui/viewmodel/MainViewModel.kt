@@ -24,7 +24,6 @@ import com.netproxy.gateway.connection.MqttConnectionState
 import com.netproxy.gateway.connection.NetworkStateManager
 import com.netproxy.gateway.connection.NetworkType
 import com.netproxy.gateway.i18n.AppLocale
-import com.netproxy.gateway.utils.securelyClear
 import com.netproxy.gateway.vpn.GatewayVpnService
 import com.netproxy.gateway.vpn.VpnState
 import com.netproxy.gateway.vpn.VpnStatus
@@ -248,7 +247,7 @@ class MainViewModel @Inject constructor(
                                 authToken = CharArray(0)
                             )
                         }.authToken
-                        tokenToZero.securelyClear()
+                        tokenToZero?.fill('\u0000')
                     }
                     is MqttConnectionState.Error -> {
                         connectionStartTime = 0
@@ -265,7 +264,7 @@ class MainViewModel @Inject constructor(
                                 authToken = CharArray(0)
                             )
                         }.authToken
-                        tokenToZero.securelyClear()
+                        tokenToZero?.fill('\u0000')
                     }
                 }
             }
@@ -332,19 +331,19 @@ class MainViewModel @Inject constructor(
                     val tokenToZero = _uiState.getAndUpdate { current ->
                         current.copy(authToken = authTokenArray.copyOf())
                     }.authToken
-                    tokenToZero.securelyClear()
+                    tokenToZero?.fill('\u0000')
                 } else {
                     val tokenToZero = _uiState.getAndUpdate { current ->
                         current.copy(isPairingInProgress = false, errorMessage = AppLocale.getString(context, R.string.error_cellular_required), authToken = CharArray(0))
                     }.authToken
-                    tokenToZero.securelyClear()
+                    tokenToZero?.fill('\u0000')
                 }
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 val tokenToZero = _uiState.getAndUpdate { current ->
                     current.copy(isPairingInProgress = false, errorMessage = e.message, authToken = CharArray(0))
                 }.authToken
-                tokenToZero.securelyClear()
+                tokenToZero?.fill('\u0000')
                 if (sessionUpdated) {
                     val clearResult = authSessionStore.clearWithResult()
                     if (clearResult is com.netproxy.gateway.result.AppResult.Error) {
@@ -352,7 +351,7 @@ class MainViewModel @Inject constructor(
                     }
                 }
             } finally {
-                authTokenArray.securelyClear()
+                authTokenArray.fill('\u0000')
             }
         }
     }
@@ -423,7 +422,7 @@ class MainViewModel @Inject constructor(
                     authToken = CharArray(0)
                 )
             }.authToken
-            tokenToZero.securelyClear()
+            tokenToZero?.fill('\u0000')
         }
         toggleVpn(false)
     }
@@ -433,6 +432,6 @@ class MainViewModel @Inject constructor(
         val tokenToZero = _uiState.getAndUpdate { current ->
             current.copy(authToken = CharArray(0))
         }.authToken
-        tokenToZero.securelyClear()
+        tokenToZero?.fill('\u0000')
     }
 }

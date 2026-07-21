@@ -5,7 +5,6 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.netproxy.gateway.di.ApplicationScope
 import com.netproxy.gateway.result.AppResult
-import com.netproxy.gateway.utils.securelyClear
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
@@ -56,7 +55,7 @@ class AuthSessionStore @Inject constructor(
 
     @Synchronized
     fun update(deviceId: String, authToken: CharArray) {
-        inMemoryToken.securelyClear()
+        inMemoryToken?.fill('\u0000')
         inMemoryToken = authToken.copyOf()
         inMemoryDeviceId = deviceId
         inMemoryInstallationDeviceId = deviceId
@@ -72,13 +71,12 @@ class AuthSessionStore @Inject constructor(
     @Synchronized
     fun updateWithResult(deviceId: String, authToken: CharArray): AppResult<Unit> {
         return try {
-            inMemoryToken.securelyClear()
+            inMemoryToken?.fill('\u0000')
             inMemoryToken = authToken.copyOf()
             inMemoryDeviceId = deviceId
             inMemoryInstallationDeviceId = deviceId
 
-            // 当前限制：EncryptedSharedPreferences 的 putString 只接受 String，
-            // 这会导致临时的 String 对象。后续可考虑迁移到支持 ByteArray 的加密存储。
+            // EncryptedSharedPreferences API 限制：putString 只接受 String，无法避免中间 String 转换
             encryptedPrefs.edit()
                 .putString(KEY_INSTALLATION_DEVICE_ID, deviceId)
                 .putString(KEY_DEVICE_ID, deviceId)
@@ -93,7 +91,7 @@ class AuthSessionStore @Inject constructor(
 
     @Synchronized
     fun clear() {
-        inMemoryToken.securelyClear()
+        inMemoryToken?.fill('\u0000')
         inMemoryToken = null
         inMemoryDeviceId = null
         inMemoryInstallationDeviceId = null
@@ -107,7 +105,7 @@ class AuthSessionStore @Inject constructor(
     @Synchronized
     fun clearWithResult(): AppResult<Unit> {
         return try {
-            inMemoryToken.securelyClear()
+            inMemoryToken?.fill('\u0000')
             inMemoryToken = null
             inMemoryDeviceId = null
             inMemoryInstallationDeviceId = null
@@ -148,7 +146,7 @@ class AuthSessionStore @Inject constructor(
             if (session.deviceId != username) false
             else constantTimeEquals(session.authToken, password)
         } finally {
-            session.authToken.securelyClear()
+            session.authToken.fill('\u0000')
         }
     }
 
@@ -164,7 +162,7 @@ class AuthSessionStore @Inject constructor(
                     AppResult.success(constantTimeEquals(session.authToken, password))
                 }
             } finally {
-                session.authToken.securelyClear()
+                session.authToken.fill('\u0000')
             }
         } catch (e: Exception) {
             AppResult.error(e)

@@ -118,17 +118,6 @@ android {
     testOptions {
         unitTests {
             isIncludeAndroidResources = true
-            all {
-                // N87: serialize test forks to prevent deadlock under CI CPU contention.
-                it.maxParallelForks = 1
-                it.jvmArgs(
-                    "-Xmx2g",
-                    "-XX:MaxMetaspaceSize=512m",
-                    "-XX:+HeapDumpOnOutOfMemoryError"
-                )
-                // Set per-test timeout via JUnit system properties (5 min per test method)
-                it.systemProperty("junit.jupiter.execution.timeout.default", "5m")
-            }
         }
     }
 

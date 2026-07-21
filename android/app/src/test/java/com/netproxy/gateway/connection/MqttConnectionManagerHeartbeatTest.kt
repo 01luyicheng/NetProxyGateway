@@ -7,7 +7,6 @@ import io.mockk.slot
 import io.mockk.spyk
 import io.mockk.unmockkAll
 import io.mockk.verify
-import com.netproxy.gateway.utils.securelyClear
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -141,7 +140,7 @@ class MqttConnectionManagerHeartbeatTest {
             )
 
             // Zero the original token (simulating disconnect or reconnect cleanup)
-            originalToken.securelyClear()
+            originalToken.fill('\u0000')
 
             // Advance time past the reconnect delay
             advanceTimeBy(INITIAL_RECONNECT_DELAY)

@@ -18,11 +18,7 @@ abstract class AppModule {
 
     @Binds
     @Singleton
-    abstract fun bindCommunicationCommandHandler(impl: CommunicationModuleImpl): CommunicationCommandHandler
-
-    @Binds
-    @Singleton
-    abstract fun bindCommunicationQueryHandler(impl: CommunicationModuleImpl): CommunicationQueryHandler
+    abstract fun bindCommunicationModule(impl: CommunicationModuleImpl): CommunicationModule
 
     @Binds
     @Singleton

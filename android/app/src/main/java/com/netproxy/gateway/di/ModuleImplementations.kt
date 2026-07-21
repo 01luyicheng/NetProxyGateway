@@ -53,7 +53,7 @@ class CoreModuleImpl @Inject constructor(
 @Singleton
 class CommunicationModuleImpl @Inject constructor(
     private val mqttConnectionManager: MqttConnectionManager
-) : CommunicationCommandHandler, CommunicationQueryHandler {
+) : CommunicationModule, CommunicationCommandHandler, CommunicationQueryHandler {
 
     override fun connect(deviceId: String, authToken: CharArray): Boolean {
         mqttConnectionManager.connect(deviceId, authToken)
