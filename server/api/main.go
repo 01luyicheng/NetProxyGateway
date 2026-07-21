@@ -216,7 +216,6 @@ func NewServer() (*Server, error) {
 		return nil, fmt.Errorf("failed to prepare update statement: %w", err)
 	}
 
-
 	return &Server{
 		db:                       db,
 		updatePairingSessionStmt: updateStmt,
@@ -291,7 +290,6 @@ func (s *Server) Close() error {
 	if s.updatePairingSessionStmt != nil {
 		s.updatePairingSessionStmt.Close()
 	}
-
 
 	if s.db != nil {
 		return s.db.Close()

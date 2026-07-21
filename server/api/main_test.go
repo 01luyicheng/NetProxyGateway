@@ -71,16 +71,20 @@ func newPairingTestServer(t *testing.T) *Server {
 		t.Fatalf("failed to init schema: %v", err)
 	}
 
-	t.Cleanup(func() {
-		_ = db.Close()
-	})
+	updateStmt, err := db.Prepare(`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ? AND status = ? AND engineer_id = ?`)
+	if err != nil {
+		db.Close()
+		t.Fatalf("failed to prepare update statement: %v", err)
+	}
 
 	server := &Server{
-		db:          db,
-		rateLimiter: ratelimit.NewRateLimiterWithDefaults(),
+		db:                       db,
+		updatePairingSessionStmt: updateStmt,
+		rateLimiter:              ratelimit.NewRateLimiterWithDefaults(),
 	}
+
 	t.Cleanup(func() {
-		server.rateLimiter.Stop()
+		_ = server.Close()
 	})
 
 	return server
