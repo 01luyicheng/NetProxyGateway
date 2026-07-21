@@ -582,20 +582,28 @@
 - **风险**: 低。该修复点缺乏测试保护，未来容易被误改回双重释放
 - **修复难度**: 低。增加一个模拟 write 失败的 Netty 回归测试
 
-### C78: VpnService 回包路径缺少TCP状态机
+### C78: VpnService 回包路径缺少TCP状态机 [已修复]
+- **状态**: 已修复
 - **提交哈希**: 1f9acee
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L582-L624, L649-L726)
-- **问题描述**: `processTcpReturn()` 仅在有数据可读时构造回包（`available > 0 && read > 0`），无法发送纯TCP控制包（ACK/FIN/RST）。`constructReturnPacket()` 固定设置 `PSH+ACK` flags，序列号和确认号固定为0。这导致TCP连接建立/终止流程不完整，依赖对端容忍非标准行为。
-- **风险**: 中。与严格TCP实现不兼容，可能导致连接建立失败或异常断开
-- **修复难度**: 高。需要实现完整的TCP状态机，正确管理序列号、确认号和标志位
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/ConnectionSession.kt` (L8-102)、`ConnectionSessionManager.kt` (L138-197)、`VpnPacketProcessor.kt` (L106-130)
+- **修复说明**: 原 `VpnService.kt` 中的回包逻辑已拆分到三个文件：
+  - `ConnectionSession.kt`: `TcpState` 枚举（CLOSED/SYN_SENT/ESTABLISHED/FIN_WAIT/CLOSE_WAIT/LAST_ACK 等）、`seqNum`/`ackNum` 字段、`resolveTcpFlags()` 按状态返回 SYN+ACK/FIN+ACK/PSH+ACK、`advanceSeq`/`advanceAck`、`pendingControlFlags` + `needsControlPacket()` + `consumePendingFlags()`
+  - `VpnPacketProcessor.constructReturnPacket` (L130): `val flags = if (tcpFlags != 0) tcpFlags else session.resolveTcpFlags()` 使用动态 flags
+  - `ConnectionSessionManager.processTcpReturn` (L186-190): 即使无数据可读，只要 `session.needsControlPacket()` 为真仍构造 0 长度控制包注入
+- **残余风险**: 无（见关联问题 H14）
 - **关联问题**: ISSUES.md H14, N36
 
-### C79: StreamConn deadline 方法空实现导致 goroutine 泄漏
+### C79: StreamConn deadline 方法空实现导致 goroutine 泄漏 [部分已修复]
+- **状态**: 部分已修复
 - **提交哈希**: 9f4b1b9
-- **位置**: `server/socks5-proxy/main.go` (L464-L476)
-- **问题描述**: 详见 ISSUES.md N56。`SetReadDeadline`、`SetDeadline`、`SetWriteDeadline` 三个方法均为空实现，`Read()` 阻塞 select 无超时保护，远端静默时永久阻塞导致 goroutine 泄漏。
-- **风险**: 高
-- **修复难度**: 中
+- **位置**: `server/socks5-proxy/main.go` (L514-532)
+- **问题描述**: 详见 ISSUES.md N56。原报告：`SetReadDeadline`、`SetDeadline`、`SetWriteDeadline` 三个方法均为空实现，`Read()` 阻塞 select 无超时保护，远端静默时永久阻塞导致 goroutine 泄漏。
+- **当前实现**:
+  - `SetReadDeadline` (L522-526): 已实现，通过 `s.readDeadline.Store(&t)` 存储 `*time.Time`
+  - `SetDeadline` (L514-520): 已实现，调用 `SetReadDeadline` + `SetWriteDeadline`
+  - `Read()` (L288-303): 已使用 `readDeadline`，非零 deadline 时构造 `time.NewTimer(time.Until(*t))` 并在 select 中等待，超时返回 `os.ErrDeadlineExceeded`
+  - `SetWriteDeadline` (L528-532): **仍为空实现（no-op）**。注释说明：WebSocket 写入由 `writeMu` + `streamWriteLimit` 保护，`StreamConn.Write` 不涉及需要 deadline 控制的阻塞 I/O
+- **残余风险**: 低。读路径 goroutine 泄漏已修复；写路径因 WebSocket 写入已有独立超时保护，空实现可接受
 - **关联问题**: ISSUES.md N56
 
 ### C80: processReturnTraffic 单协程串行处理模型 [已修复]
