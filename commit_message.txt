@@ -1,8 +1,0 @@
-🎨 Palette: 优化状态图标切换的过渡动画
-
-* 💡 **What**: 在 `MainScreen` 的 `ConnectionStatusCard` 中，为连接状态图标的切换添加了 `Crossfade` 平滑过渡动画。
-* 🎯 **Why**: 之前连接状态（如“连接中”、“已连接”、“未连接”等）发生变化时，对应的图标是瞬间切换的，视觉上显得比较突兀和跳跃。使用 `Crossfade` 过渡能让这种微交互（micro-interaction）显得更加精致流畅，提升整体界面的高级感。
-* 📸 **Before/After**:
-  - *Before*: 状态变化时，旧图标瞬间消失，新图标瞬间出现（或进度条）。
-  - *After*: 状态变化时，旧图标平滑淡出，新图标（或进度条）平滑淡入。
-* ♿ **Accessibility**: 本次主要为视觉体验提升。由于状态图标纯粹为装饰性目的（已经配合了文字说明并在 Icon 上设置了 `contentDescription = null`），本次动画改进不影响原本已有的辅助功能状态读取。
