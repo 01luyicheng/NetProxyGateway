@@ -1,6 +1,5 @@
 package com.netproxy.gateway.proxy
 
-import com.netproxy.gateway.utils.securelyClear
 import org.slf4j.LoggerFactory
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -300,7 +299,7 @@ class Socks5ConnectionPool(
             return null
         } finally {
             // Zero credential CharArray immediately after use to prevent token leakage
-            credentialPassword.securelyClear()
+            credentialPassword?.fill('\u0000')
             // 统一在 finally 块中管理连接计数，确保一致性
             if (slotReserved && !connectionEstablished) {
                 totalConnections.decrementAndGet()
@@ -401,7 +400,7 @@ class Socks5ConnectionPool(
             require(authResponse[1].toInt() == 0x00) { "SOCKS5 authentication failed" }
         } finally {
             // 立即清除临时转换的密码字节数组
-            passBytes.securelyClear()
+            passBytes.fill(0)
         }
 
         // 3. CONNECT请求

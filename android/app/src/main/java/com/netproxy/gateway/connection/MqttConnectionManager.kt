@@ -16,7 +16,6 @@ import kotlinx.coroutines.withContext
 
 import java.security.KeyStore
 import java.security.SecureRandom
-import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
@@ -49,7 +48,6 @@ import com.netproxy.gateway.debug.AppAuditLogStore
 import com.netproxy.gateway.debug.DebugSettingsStore
 import com.netproxy.gateway.di.ApplicationScope
 import com.netproxy.gateway.result.AppResult
-import com.netproxy.gateway.utils.securelyClear
 
 sealed class MqttConnectionState {
     object Disconnected : MqttConnectionState()
@@ -271,11 +269,9 @@ class MqttConnectionManager @Inject constructor(
     private fun createDevSocketFactory(): SSLSocketFactory {
         val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
             override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {
-                if (!BuildConfig.DEBUG) throw CertificateException("Trust-all manager is only allowed in debug builds")
                 // debug 构建：信任所有客户端证书
             }
             override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {
-                if (!BuildConfig.DEBUG) throw CertificateException("Trust-all manager is only allowed in debug builds")
                 // debug 构建：信任所有服务器证书（包括自签名）
             }
             override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
@@ -287,7 +283,7 @@ class MqttConnectionManager @Inject constructor(
         var generation = 0L
         lateinit var jobToStart: Job
         synchronized(this@MqttConnectionManager) {
-            activeTokenSnapshot.securelyClear()
+            activeTokenSnapshot?.fill('\u0000')
             activeTokenSnapshot = authToken.copyOf()
             shouldStayConnected = true
             reconnectJob?.cancel()
@@ -498,12 +494,12 @@ class MqttConnectionManager @Inject constructor(
                         }
                     }
                 } finally {
-                    tokenSnapshot.securelyClear()
+                    tokenSnapshot.fill('\u0000')
                     // CR14-1: Paho MqttConnectOptions.setPassword() internally copies the
                     // CharArray via Arrays.copyOf(), so options.password and tokenSnapshot
                     // are independent.  Clear the copy held by MqttConnectOptions so that
                     // the password does not linger in heap memory after the client is closed.
-                    connectOptions?.password?.securelyClear()
+                    connectOptions?.password?.fill('\u0000')
                 }
             }
 
@@ -546,7 +542,7 @@ class MqttConnectionManager @Inject constructor(
                     }
                     connect(deviceId, tokenCopy)
                 } finally {
-                    tokenCopy.securelyClear()
+                    tokenCopy.fill('\u0000')
                 }
             }
             reconnectJob = jobToStart
@@ -697,7 +693,7 @@ class MqttConnectionManager @Inject constructor(
             connectJob = null
             reconnectDelay = INITIAL_RECONNECT_DELAY
 
-            activeTokenSnapshot.securelyClear()
+            activeTokenSnapshot?.fill('\u0000')
             activeTokenSnapshot = null
 
             val c = mqttClient

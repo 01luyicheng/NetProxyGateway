@@ -51,6 +51,18 @@ interface CommunicationQueryHandler {
     fun getConnectionState(): StateFlow<MqttConnectionState>
 }
 
+/**
+ * Communication模块接口（向后兼容）
+ * @deprecated 使用CommunicationCommandHandler和CommunicationQueryHandler替代
+ */
+@Deprecated("使用CommunicationCommandHandler和CommunicationQueryHandler替代")
+interface CommunicationModule : CommunicationCommandHandler, CommunicationQueryHandler {
+    override fun connect(deviceId: String, authToken: CharArray): Boolean
+    override fun publish(topic: String, payload: String, qos: Int)
+    override fun subscribe(topic: String, qos: Int, callback: ((String) -> Unit)?)
+    override fun getConnectionState(): StateFlow<MqttConnectionState>
+    override fun disconnect()
+}
 
 // ==================== Network Module ====================
 

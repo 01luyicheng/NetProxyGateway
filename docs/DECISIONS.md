@@ -259,65 +259,6 @@ private fun connectUsingLegacyConfig(ssid: String, password: String?, securityTy
 
 ---
 
-## ADR-006: CI 架构 — 持久 Self-hosted Runner + 多 Workflow 拆分
-
-**日期**: 2026-07-07
-
-**状态**: 已实施
-
-### 背景
-
-项目原先使用单一 `ci.yml` workflow，包含 Android 和 Go 两个 job（Go 使用 matrix 3 组件）。CI 通过率 0%，原因包括 Android 测试死锁（N87）、CRLF 伪 diff（N88）、CGO/sqlite3 编译失败等。需要重构 CI 使其可靠运行，同时为持久 self-hosted runner（`ar-npg-sfo3`）做好长期配置。
-
-### 决策
-
-1. **持久 Self-hosted Runner 作为长期方案**：不使用 `ubuntu-latest`，所有 CI 修改不假设未来切回 GitHub-hosted runner。Runner 迁移决策由 `docs/RUNNER_DECISION.md` 维护。
-
-2. **Workflow 拆分为 6 个文件**：
-   - `android-ci.yml` — required check，Android 构建测试
-   - `go-ci.yml` — required check，Go 7 组件 matrix（3 server + 4 shared）
-   - `pr-checks.yml` — commitlint + dependency-review
-   - `security.yml` — govulncheck + Android dep-check + Docker 构建验证
-   - `secret-scan.yml` — gitleaks 密钥扫描
-   - `runner-cleanup.yml` — 每日磁盘清理（定时任务）
-
-3. **路径过滤策略**：required check 的 workflow 使用 `paths-ignore`（而非 `paths`），确保 workflow 始终触发并产生 success 结论。job 内部使用 `dorny/paths-filter@v3` 检测变更，无变更时输出 success（非 skipped）。
-
-4. **Go matrix 使用 `matrix.include`**：避免两个独立数组产生笛卡尔积。每个 component 与 path 一一对应。
-
-5. **Go cache 隔离**：`GOMODCACHE`/`GOCACHE` 按 component 分到 `/tmp/` 目录（因 GitHub Actions job-level `env` 不支持 `runner.temp` context，见 N89）。
-
-6. **CI 统一调用 Makefile**：`go-ci.yml` 通过 `make go-ci-component COMPONENT=xxx` 调用，确保本地与 CI 行为一致。Android 因 N87 降级需要 `timeout` 包装，暂不统一。
-
-7. **Android 测试降级**：N87 根因未查明前，使用 `timeout 15m` + `continue-on-error: true` 确保流水线不阻塞。
-
-8. **质量检查渐进收紧**：gofmt/go vet/go mod tidy 初始以 `continue-on-error: true` 收集基线，违规量清零后收紧为硬门禁。
-
-### 后果
-
-**正面**:
-- CI 通过率从 0% 提升至 Go 7/7 + Android 核心步骤全部通过
-- cancel-in-progress 避免排队
-- 路径过滤减少无关 runner 启动
-- Makefile 统一本地与 CI 行为
-
-**负面**:
-- N87 测试挂死根因未查，仍需后续调查
-- api 组件因 runner 缺 gcc 无法启用 CGO（sqlite3 测试不通过）
-- dependency-check 首次运行极慢（下载漏洞数据库）
-
-**已知 GitHub Actions 限制**:
-- Job-level `env` 不支持 `${{ runner.* }}` context（N89）
-- Job-level `permissions` 完全替换 workflow-level（非合并）
-- `cancel-in-progress` 可能无法终止卡死的 Gradle 进程
-
-### 关联
-
-- ISSUES.md: N87（测试挂死降级）、N88（CRLF 修复）、N89（runner context 限制）
-- RUNNER_DECISION.md: runner 选型与长期配置
-
----
-
 ## 决策演进路线图
 
 | 决策 | 当前状态 | 建议行动 | 优先级 | 时间线 |
@@ -327,7 +268,6 @@ private fun connectUsingLegacyConfig(ssid: String, password: String?, securityTy
 | ADR-003 虚拟 IP 分配 | 存在问题 | 修复线程安全问题，考虑 IP 池管理 | 高 | 短期 |
 | ADR-004 MQTT TLS | 已接受 | 加强生产环境安全检查 | 中 | 中期 |
 | ADR-005 WiFi API | 已改进 | 已实现双路径支持，继续优化用户体验 | 中 | 中期 |
-| ADR-006 CI 架构拆分 | 已实施 | 质量检查收紧 + N87 根因调查 + CGO 启用 | 中 | 短期 |
 
 ### 优先级说明
 
@@ -350,7 +290,6 @@ private fun connectUsingLegacyConfig(ssid: String, password: String?, securityTy
 | 2026-03-31 | 初始创建，从原ISSUES.md和代码注释中提取架构决策 | AI Agent |
 | 2026-03-31 | 初始创建，从原ISSUES.md和代码注释中提取架构决策 | AI Agent |
 | 2026-05-03 | 修正ISSUE引用：ADR-002的ISSUE-014改为ISSUES.md N4/N1；ADR-003的ISSUE C3改为ISSUES.md H17；ADR-004的ISSUE H7改为ISSUES.md H8；ADR-005的ISSUE M7/A1改为ISSUES.md N13，ISSUE M20改为ISSUES.md N13；删除不存在的ISSUE L12/L17引用；更新ADR-003代码示例与实际实现一致 | AI Agent (Kimi-K2.6) |
-| 2026-07-07 | 新增 ADR-006：CI 架构拆分决策（6 workflow + Makefile 统一 + 路径过滤 + 持久 runner 配置） | AI Agent |
 
 ---
 

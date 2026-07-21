@@ -154,16 +154,6 @@ func (rl *RateLimiter) cleanupLoop() {
 			}
 		}()
 
-		// G1 (issue #90): if Stop() closed stopCh during the inner func,
-		// exit the outer loop. Otherwise the next iteration creates a new
-		// ticker then immediately reads from the closed stopCh and returns
-		// from the inner func, spinning forever (100% CPU + goroutine leak).
-		select {
-		case <-rl.stopCh:
-			return
-		default:
-		}
-
 		if atomic.LoadInt32(&rl.restartCount) > maxRestarts {
 			return
 		}

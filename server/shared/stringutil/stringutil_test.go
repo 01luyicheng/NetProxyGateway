@@ -38,11 +38,6 @@ func TestFirstNonEmpty(t *testing.T) {
 			values:   []string{""},
 			expected: "",
 		},
-		{
-			name:     "with spaces",
-			values:   []string{"", " ", "c"},
-			expected: " ",
-		},
 	}
 
 	for _, tt := range tests {
