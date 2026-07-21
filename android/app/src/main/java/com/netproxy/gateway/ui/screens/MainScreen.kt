@@ -11,6 +11,7 @@ import android.content.ContextWrapper
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.ui.draw.rotate
 import androidx.compose.foundation.layout.*
@@ -487,19 +488,22 @@ private fun ConnectionStatusCard(uiState: UiState, onRetry: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                if (uiState.mqttState == MqttUiState.Connecting) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(24.dp),
-                        color = contentColor,
-                        strokeWidth = 2.dp
-                    )
-                } else if (statusIcon != null) {
-                    Icon(
-                        imageVector = statusIcon,
-                        contentDescription = null,
-                        modifier = Modifier.size(24.dp),
-                        tint = contentColor
-                    )
+                Crossfade(targetState = statusData, label = "status_icon_crossfade") { currentStatusData ->
+                    val currentIcon = currentStatusData.icon
+                    if (currentStatusData.icon == null) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(24.dp),
+                            color = contentColor,
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Icon(
+                            imageVector = currentIcon!!,
+                            contentDescription = null,
+                            modifier = Modifier.size(24.dp),
+                            tint = contentColor
+                        )
+                    }
                 }
                 Text(
                     text = stringResource(statusTextRes),
