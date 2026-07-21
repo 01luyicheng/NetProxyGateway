@@ -1847,3 +1847,112 @@ func TestGetPairingSession_ConcurrentModificationReturns410(t *testing.T) {
 		t.Fatalf("expected 410 Gone for expired session with concurrent modification, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 }
+
+func TestGenerateCode(t *testing.T) {
+	for i := 0; i < 1000; i++ {
+		code, err := generateCode()
+		if err != nil {
+			t.Fatalf("generateCode() returned error: %v", err)
+		}
+		if len(code) != 6 {
+			t.Errorf("generateCode() returned code of length %d, expected 6: %s", len(code), code)
+		}
+		for _, ch := range code {
+			if ch < '0' || ch > '9' {
+				t.Errorf("generateCode() returned non-numeric character in code: %s", code)
+				break
+			}
+		}
+	}
+}
+
+func TestValidateJWTSecret(t *testing.T) {
+	tests := []struct {
+		name      string
+		secret    string
+		wantErr   bool
+		errMsgStr string
+	}{
+		{
+			name:      "empty secret",
+			secret:    "",
+			wantErr:   true,
+			errMsgStr: "JWT_SECRET environment variable is not set",
+		},
+		{
+			name:      "short secret",
+			secret:    strings.Repeat("a", MinJWTSecretLength-1),
+			wantErr:   true,
+			errMsgStr: fmt.Sprintf("JWT_SECRET must be at least %d characters long", MinJWTSecretLength),
+		},
+		{
+			name:    "exact length secret",
+			secret:  strings.Repeat("a", MinJWTSecretLength),
+			wantErr: false,
+		},
+		{
+			name:    "long secret",
+			secret:  strings.Repeat("a", MinJWTSecretLength+10),
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateJWTSecret(tt.secret)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateJWTSecret() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantErr && !strings.Contains(err.Error(), tt.errMsgStr) {
+				t.Errorf("validateJWTSecret() error msg = %v, want to contain %v", err.Error(), tt.errMsgStr)
+			}
+		})
+	}
+}
+
+func TestGenerateSecureRandomString(t *testing.T) {
+	tests := []struct {
+		name   string
+		length int
+	}{
+		{"length 0", 0},
+		{"length 1", 1},
+		{"length 32", 32},
+		{"length 100", 100},
+		{"length 1000", 1000},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			str, err := generateSecureRandomString(tt.length)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if len(str) != tt.length {
+				t.Errorf("expected length %d, got %d", tt.length, len(str))
+			}
+
+			for _, char := range str {
+				if !((char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9')) {
+					t.Errorf("string contains invalid character: %c in %q", char, str)
+				}
+			}
+		})
+	}
+
+	t.Run("uniqueness", func(t *testing.T) {
+		seen := make(map[string]bool)
+		for i := 0; i < 1000; i++ {
+			str, err := generateSecureRandomString(32)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if seen[str] {
+				t.Fatalf("generated duplicate string: %s", str)
+			}
+			seen[str] = true
+		}
+	})
+}
