@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -97,6 +98,9 @@ func TestPostJSONInvalidJSONResponse(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid JSON response")
 	}
+	if !strings.Contains(err.Error(), "failed to decode response") {
+		t.Errorf("expected error containing 'failed to decode response', got %v", err)
+	}
 }
 
 func TestPostJSONInvalidPayload(t *testing.T) {
@@ -111,5 +115,36 @@ func TestPostJSONInvalidPayload(t *testing.T) {
 	err := PostJSON(client, ts.URL, "", make(chan int), &result)
 	if err == nil {
 		t.Fatal("expected error for invalid payload")
+	}
+	if !strings.Contains(err.Error(), "failed to encode request body") {
+		t.Errorf("expected error containing 'failed to encode request body', got %v", err)
+	}
+}
+
+func TestPostJSONRequestCreationError(t *testing.T) {
+	client := &http.Client{}
+	var result map[string]string
+
+	// http.NewRequest will fail if endpoint contains invalid control character
+	err := PostJSON(client, string([]byte{0x7f}), "", map[string]string{}, &result)
+	if err == nil {
+		t.Fatal("expected error for invalid request creation")
+	}
+	if !strings.Contains(err.Error(), "failed to create request") {
+		t.Errorf("expected error containing 'failed to create request', got %v", err)
+	}
+}
+
+func TestPostJSONRequestSendError(t *testing.T) {
+	client := &http.Client{}
+	var result map[string]string
+
+	// Unreachable endpoint URL will cause client.Do to fail
+	err := PostJSON(client, "http://127.0.0.1:0", "", map[string]string{}, &result)
+	if err == nil {
+		t.Fatal("expected error for failed request send")
+	}
+	if !strings.Contains(err.Error(), "failed to send request") {
+		t.Errorf("expected error containing 'failed to send request', got %v", err)
 	}
 }
