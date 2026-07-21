@@ -336,6 +336,7 @@ private fun AuditLogsScreen(
         DateTimeFormatter.ofPattern("HH:mm:ss", Locale.getDefault())
             .withZone(ZoneId.systemDefault())
     }
+    var showClearDialog by rememberSaveable { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -345,13 +346,42 @@ private fun AuditLogsScreen(
     ) {
         OutlinedButton(
             onClick = {
-                AppAuditLogStore.clear()
-            }
+                showClearDialog = true
+            },
+            enabled = visibleEntries.isNotEmpty()
         ) {
             Text(stringResource(R.string.clear_logs))
         }
 
         Spacer(modifier = Modifier.height(12.dp))
+
+        if (showClearDialog) {
+            AlertDialog(
+                onDismissRequest = { showClearDialog = false },
+                title = { Text(stringResource(R.string.clear_logs_confirm_title)) },
+                text = { Text(stringResource(R.string.clear_logs_confirm_text)) },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            AppAuditLogStore.clear()
+                            showClearDialog = false
+                        }
+                    ) {
+                        Text(
+                            text = stringResource(R.string.action_clear),
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = { showClearDialog = false }
+                    ) {
+                        Text(stringResource(R.string.action_cancel))
+                    }
+                }
+            )
+        }
 
         if (visibleEntries.isEmpty()) {
             Text(
