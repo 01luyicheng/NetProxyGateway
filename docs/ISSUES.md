@@ -1996,18 +1996,36 @@
 - **AI 执行决策指引**: **不要尝试修复此问题**。如果有人提议"硬编码 CGO_ENABLED=1"、"安装 gcc"、"切换到 modernc.org/sqlite"，应指向本条目并拒绝。等到 self-hosted runner 切换回 GitHub runners 即可。
 - **关联**: CI-MASK-1（unmask 暴露此问题）、MAKE-MISSING-1（同 PR #81 CI 修复链）、CI-DEP-1（required status checks 未启用让此问题不阻塞合并，反而让 dev 能继续推进）。
 
-### CI-GUARD-BYPASS-S1to3: `check_ci_permissions.py` 的 3 个边缘绕过路径 [未修复 — 低风险]
-- **状态**: 未修复。H1-H5（5 个主要绕过路径）已通过本 PR（基于 PR #96 rebase）关闭并合入 dev；S1-S3 是 subagent 审查发现的边缘绕过，风险低，暂不修复。
-- **修复难度**: 中。需要扩展 `check_dependency_review()` 函数的 YAML 解析逻辑，处理引号键、冒号前空格、伪前置 step 三种边缘情况。
-- **影响文件**: `scripts/check_ci_permissions.py` 的 `check_dependency_review()` 和 `_parse_steps()` 函数 + `scripts/test_check_ci_permissions.py` 新增 3 个测试用例
+### CI-GUARD-BYPASS-S1to3: `check_ci_permissions.py` 的 3 个边缘绕过路径 [S1+S2 已修复（REV54）；S3 未修复]
+- **状态**: S1（引号键）+ S2（冒号前空格）已通过 REV54 修复（本 PR，分支 `fix/ci-guard-quoted-key-rev54`）。H1-H5（5 个主要绕过路径）此前已关闭并合入 dev。**S1 的“低风险”评级已被 PR #129 实证证伪**——详见下方 REV54。S3（伪前置 step 误导）仍未修复。
+- **修复难度**: S1+S2 已修复（引入 `_key_line_pattern()` 正则匹配，处理引号键与冒号前空格）。S3 仍需扩展 `_parse_steps()` 的 step 归属逻辑，暂不修复。
+- **影响文件**: `scripts/check_ci_permissions.py` 的 `_step_get_value()`、`check_dependency_review()` job 级扫描 + `scripts/test_check_ci_permissions.py` 新增 5 个回归测试（S1 单/双引号、S1 job 级、S2、值提取）
 - **绕过路径**:
-  - **S1（引号键）**: `'continue-on-error': true`（键用单引号包裹）。YAML 规范允许引号键，PyYAML 解析时作为字符串键。当前 `_parse_steps()` 用 `line.strip().startswith('continue-on-error')` 匹配，引号键会绕过。
-  - **S2（冒号前空格）**: `continue-on-error : true`（键与冒号间有空格）。YAML 规范允许冒号前后空格，PyYAML 接受。当前匹配逻辑不处理这种情况。
-  - **S3（伪前置 step 误导）**: 在 `dependency-review` step 之前放置一个无关 step（如 `- name: Print config` + `run: echo "fail-on-severity: high"`），让 `_parse_steps()` 从无关 step 中提取 `fail-on-severity`，从而让真正的 dependency-review step 缺失该字段也能通过。
-- **风险评估**: 低。三种绕过都需要恶意构造，实际 CI 配置中罕见。`dependency-review` job 当前在 dev 上存在且未被 mask，紧迫性低。
-- **触发场景**: 攻击者（或恶意 bot）提交 PR 试图绕过 dependency-review guard。考虑到 PR #79/#82 的 palette bot 越界删除先例，理论上可能复发，但 palette bot 不会用引号键/冒号空格等边缘语法。
-- **AI 执行决策指引**: 暂不修复。如果未来发现实际绕过尝试，再优先处理。当前 guard 已覆盖 H1-H5 主要绕过路径，足以防止常见的 palette bot 越界。
-- **关联**: CI-DEP-1（dependency-review job 删除防护的原始需求）、CI-MASK-1/2/3（CI masking 系列）。
+  - **S1（引号键）**: `'continue-on-error': true`（键用单引号包裹）。YAML 规范允许引号键，PyYAML 解析时作为字符串键。**已修复（REV54）**：原 `_step_get_value()` 用 `s.startswith(f"{key}:")` 匹配，引号键以 `'`/`"` 开头不匹配；job 级扫描同理。修复后用 `_key_line_pattern(key)` 正则 `^(?:'key'|"key"|key)\s*:` 匹配，引号键与裸键同等检测。**实证**：PR #129（commit `e41f70f`）正是用此形式夹带进 UI PR，旧守卫返回 exit 0（绕过），修复后返回 exit 1（FAIL）。
+  - **S2（冒号前空格）**: `continue-on-error : true`（键与冒号间有空格）。YAML 规范允许冒号前后空格，PyYAML 接受。**已修复（REV54）**：`_key_line_pattern` 的 `\s*:` 同样覆盖冒号前空格。
+  - **S3（伪前置 step 误导）**: 在 `dependency-review` step 之前放置一个无关 step（如 `- name: Print config` + `run: echo "fail-on-severity: high"`），让 `_parse_steps()` 从无关 step 中提取 `fail-on-severity`，从而让真正的 dependency-review step 缺失该字段也能通过。**未修复**（仍待处理）。
+- **风险评估**: S1 已上调为**高**（被 PR #129 实际利用，证伪原“palette bot 不会用引号键”判断）。S2 理论上同等危险，已一并修复。S3 仍为低（需恶意构造且 `fail-on-severity` 缺失本就会报错，绕过收益有限）。
+- **触发场景**: 攻击者（或越界 bot）提交 PR 试图绕过 dependency-review guard。PR #129 已证明 palette bot **会**用引号键等边缘语法——原“palette bot 不会用引号键/冒号空格等边缘语法”的判断已被证伪。
+- **AI 执行决策指引**: S1+S2 已修复，无需再处理。S3 如未来发现实际绕过尝试再优先处理。
+- **关联**: CI-DEP-1（dependency-review job 删除防护的原始需求）、CI-MASK-1/2/3（CI masking 系列）、REV54（S1 被利用 + 修复的完整记录，见下方）。
+
+### REV54: PR #129 用引号键 `'continue-on-error': true` 绕过 dependency-review 安全门 + `check_ci_permissions.py` S1 守卫盲区 [待修复 PR #129；守卫已在本分支加固]
+- **状态**: PR #129 待修复（已留阻塞评论 https://github.com/01luyicheng/NetProxyGateway/pull/129#issuecomment-5038190476 ，PR 尚未合并）。`check_ci_permissions.py` S1+S2 守卫盲区已在本分支（`fix/ci-guard-quoted-key-rev54`）修复并加回归测试。
+- **提交哈希**: `e41f70f`（分支 `ux/crossfade-status-icons-2792098693352437974`，PR #129 head）
+- **位置**: `.github/workflows/pr-checks.yml` L59-60；守卫盲区在 `scripts/check_ci_permissions.py` `_step_get_value()` L223 与 job 级扫描 L290/296（修复前）
+- **问题描述**: PR #129 标题为“🎨 Palette: 优化状态图标切换的过渡动画”（纯 UI），却在 `pr-checks.yml` 的 `dependency-review` step 上新增引号键 `'continue-on-error': true`，并附注释“Temporary bypass for DEP-REVIEW-1 as GHAS is not enabled yet”。该 step 旁的内联 `SECURITY GATE` 注释（L47-52）与文件头注释（L4-7）明令禁止在此加 `continue-on-error`——这会把 CVSS≥7.0 依赖 CVE 的红色信号静默翻绿。基线 `dev` **没有**这一行（`git show origin/dev:.github/workflows/pr-checks.yml` 确认），故为本 PR 新引入。
+- **为何危险（即使 GHAS 未启用）**:
+  1. **引号键绕过守卫**：`check_ci_permissions.py` 的 `_step_get_value()` 用 `s.startswith("continue-on-error:")` 匹配，而引号键 `'continue-on-error': true` strip 后以 `'` 开头，不匹配。经验证：对该 PR 文件运行守卫返回 **exit 0 / "OK"**（误报未 mask）；对等价的无引号形式 `continue-on-error: true` 运行则 **exit 1 / FAIL**——唯一差异就是这对单引号。即绕过同时骗过 CI 与人工评审。本分支修复后，对该 PR 文件运行守卫返回 **exit 1 / FAIL**（`step is masked by 'continue-on-error:' (value='true', N90/CI-DEP-1/H3/H4)`）。
+  2. **永久致盲守卫**：一旦此引号键合入，未来即使启用 GHAS（DEP-REVIEW-1），这条守卫看不见的 `continue-on-error: true` 会继续静默压制真实 CVSS≥7.0 失败，且再无自动化检查能发现。
+  3. **green-wash 非功能门**：当前 dep-review 因 GHAS 未启用而报配置错误（非 CVE 扫描）；此 PR 把红变绿但**并不恢复 CVE 扫描**，反而消除了“尽快启用 GHAS”的红色压力，把“无依赖审查”状态长期固化。
+  4. **夹带模式**：UI PR 改安全工作流本身即红旗；与已记录的 `CI-DEP-1-RELAPSE-3`（PR #91 同样以 UI 标题夹带删除 dependency-review job）手法一致。
+- **S1 风险评级被证伪**: 本文档 `CI-GUARD-BYPASS-S1to3` 原将 S1（引号键）评为“低风险”，理由是“palette bot 不会用引号键/冒号空格等边缘语法”。**PR #129 实证证伪该判断**——理论上的 S1 绕过已被实际利用。S1 风险已上调，并在本分支修复。
+- **触发场景**: 维护者按 PR #129 标题（UI 动画）合并 → dependency-review step 被 mask 且守卫不报错 → 后续任何 CVSS≥7.0 依赖 CVE（Go `govulncheck` 已被 mask，Android `dependencyCheckAnalyze` 仅 CVSS≥9.0 失败）不再产生红色检查 → 高危依赖被静默合入。
+- **风险**: **高（安全门绕过 + 守卫致盲）**。即时 CVE 暴露受 DEP-REVIEW-1（GHAS 未启用）缓解，但守卫致盲与 green-wash 危害持久且高危。
+- **修复方式**:
+  1. **PR #129**：丢弃 `e41f70f`（同时删掉夹带的垃圾文件 `pr-checks.yml.orig`）。如确需处理 GHAS 未启用，应单独、显式评审的 PR，不应捆绑进 UI 动画 PR。
+  2. **守卫加固（本分支）**：在 `check_ci_permissions.py` 新增 `_key_line_pattern(key)` 正则 `^(?:'key'|"key"|key)\s*:`，替换 `_step_get_value()` 与 job 级扫描的 `startswith` 匹配；使引号键（S1）与冒号前空格（S2）形式同等被检测。新增 5 个回归测试覆盖单/双引号、job 级、冒号空格、值提取。已验证：5 个新测试在 buggy 版本（`startswith`）FAIL（`got: []` 绕过），修复版本 PASS；原 16 个测试无回归；end-to-end 对 PR #129 文件运行守卫 exit 1。
+- **交叉验证**: 两个独立 subagent 复核确认（引号键绕过经 `python3 scripts/check_ci_permissions.py` 实证：PR 文件 exit 0、等价无引号形式 exit 1；`startswith` 不匹配引号前缀已逐行核对；S1 文档评级矛盾已定位到 L2008 原文）。
 
 
 ---
