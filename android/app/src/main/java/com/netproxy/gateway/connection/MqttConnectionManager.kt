@@ -16,6 +16,7 @@ import kotlinx.coroutines.withContext
 
 import java.security.KeyStore
 import java.security.SecureRandom
+import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
@@ -270,9 +271,11 @@ class MqttConnectionManager @Inject constructor(
     private fun createDevSocketFactory(): SSLSocketFactory {
         val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
             override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {
+                if (!BuildConfig.DEBUG) throw CertificateException("Trust-all manager is only allowed in debug builds")
                 // debug 构建：信任所有客户端证书
             }
             override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {
+                if (!BuildConfig.DEBUG) throw CertificateException("Trust-all manager is only allowed in debug builds")
                 // debug 构建：信任所有服务器证书（包括自签名）
             }
             override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()

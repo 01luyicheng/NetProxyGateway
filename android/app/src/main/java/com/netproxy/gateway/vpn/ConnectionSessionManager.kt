@@ -1,6 +1,5 @@
 package com.netproxy.gateway.vpn
 
-import com.netproxy.gateway.proxy.PooledSocks5Connection
 import com.netproxy.gateway.proxy.Socks5ConnectionPool
 import org.slf4j.LoggerFactory
 import java.io.FileOutputStream
@@ -312,12 +311,12 @@ internal class ConnectionSessionManager(
             if (!trimmed.contains("\"type\"")) return false
 
             // 简单解析：提取 type 字段
-            val typeMatch = Regex("\"type\"\\s*:\\s*\"([^\"]+)\"").find(trimmed)
+            val typeMatch = TYPE_REGEX.find(trimmed)
             val msgType = typeMatch?.groupValues?.get(1)
             if (msgType != "disconnect") return false
 
             // 提取 stream_id
-            val streamIdMatch = Regex("\"stream_id\"\\s*:\\s*\"([^\"]+)\"").find(trimmed)
+            val streamIdMatch = STREAM_ID_REGEX.find(trimmed)
             val streamId = streamIdMatch?.groupValues?.get(1)
             if (streamId.isNullOrBlank()) {
                 logger.warn("N80: disconnect message missing stream_id")
@@ -334,4 +333,9 @@ internal class ConnectionSessionManager(
 
     private fun redactIp(ip: String): String = com.netproxy.gateway.vpn.redactIp(ip)
     private fun redactConnectionKey(key: String): String = com.netproxy.gateway.vpn.redactConnectionKey(key)
+
+    companion object {
+        private val TYPE_REGEX = Regex("\"type\"\\s*:\\s*\"([^\"]+)\"")
+        private val STREAM_ID_REGEX = Regex("\"stream_id\"\\s*:\\s*\"([^\"]+)\"")
+    }
 }
