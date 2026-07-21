@@ -206,8 +206,9 @@ go-ci-component:
 	fi && \
 	(cd $$dir && go vet ./...) && \
 	(cd $$dir && go mod tidy) && \
-	(cd $$dir && git diff --exit-code -- go.mod go.sum >/dev/null 2>&1; \
-	 git checkout -- go.mod go.sum 2>/dev/null || true) && \
+	(cd $$dir && git diff --exit-code -- go.mod go.sum >/dev/null 2>&1; rc=$$?; \
+	 git checkout -- go.mod go.sum 2>/dev/null || true; \
+	 if [ $$rc -ne 0 ]; then echo "FAIL: $$dir has untidy go.mod/go.sum"; fi; exit $$rc) && \
 	echo "=== $$dir CI checks passed ==="
 
 # CI matrix target: go build for a single component (HARD GATE — no masking).
@@ -245,8 +246,9 @@ go-quality-component:
 	fi && \
 	(cd $$dir && go vet ./...) && \
 	(cd $$dir && go mod tidy) && \
-	(cd $$dir && git diff --exit-code -- go.mod go.sum >/dev/null 2>&1; \
-	 git checkout -- go.mod go.sum 2>/dev/null || true) && \
+	(cd $$dir && git diff --exit-code -- go.mod go.sum >/dev/null 2>&1; rc=$$?; \
+	 git checkout -- go.mod go.sum 2>/dev/null || true; \
+	 if [ $$rc -ne 0 ]; then echo "FAIL: $$dir has untidy go.mod/go.sum"; fi; exit $$rc) && \
 	echo "=== $$dir quality checks passed ==="
 
 # ---------------------------------------------------------------------------
