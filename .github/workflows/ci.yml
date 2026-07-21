@@ -133,7 +133,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: '1.25.x'
 
       - name: Cache Go modules
         uses: actions/cache@v4
@@ -170,6 +170,10 @@ jobs:
           path: server/${{ matrix.component }}/coverage.out
 
   # Dependency review gate (issue #89 item 3).
+  # NOTE: dependency-review-action requires GitHub Advanced Security (GHAS) /
+  #       dependency graph enabled on the repository; otherwise the job may
+  #       fail with a billing/permissions error. This is a repository setting,
+  #       not a code issue, and is intentionally left unchanged here.
   # This is the ONLY universally-triggered, non-masked, CVSS>=7.0 dependency-CVE
   # gate covering both the Go and Android ecosystems on every PR targeting main.
   # It mirrors the `dependency-review` job in dev's .github/workflows/pr-checks.yml.
