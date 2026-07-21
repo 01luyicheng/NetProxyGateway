@@ -488,20 +488,31 @@ private fun ConnectionStatusCard(uiState: UiState, onRetry: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Crossfade(targetState = statusData, label = "status_icon_crossfade") { currentStatusData ->
-                    val currentIcon = currentStatusData.icon
-                    if (currentStatusData.icon == null) {
+                Crossfade(targetState = uiState.mqttState, label = "status_icon_crossfade") { currentMqttState ->
+                    val currentIcon = when (currentMqttState) {
+                        MqttUiState.Connected -> Icons.Default.CheckCircle
+                        MqttUiState.Connecting -> null
+                        MqttUiState.Error -> Icons.Default.Error
+                        MqttUiState.Disconnected -> Icons.Default.CloudOff
+                    }
+                    val currentContentColor = when (currentMqttState) {
+                        MqttUiState.Connected -> statusColors.onSuccess
+                        MqttUiState.Connecting -> statusColors.onWarning
+                        MqttUiState.Error -> statusColors.onError
+                        MqttUiState.Disconnected -> MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                    if (currentIcon == null) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(24.dp),
-                            color = contentColor,
+                            color = currentContentColor,
                             strokeWidth = 2.dp
                         )
                     } else {
                         Icon(
-                            imageVector = currentIcon!!,
+                            imageVector = currentIcon,
                             contentDescription = null,
                             modifier = Modifier.size(24.dp),
-                            tint = contentColor
+                            tint = currentContentColor
                         )
                     }
                 }
