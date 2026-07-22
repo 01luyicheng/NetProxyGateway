@@ -2168,6 +2168,8 @@
 > 以下问题由多个 subagent 对过去 24 小时内各分支提交与活跃 PR 进行深度审查发现。PR #108（MqttConnectionManager / Socks5ProxyHandler / DebugDetector）与 PR #131（ratelimit Stop 幂等）经独立复审，未发现新引入缺陷。PR #112 发现一处高严重程度缺陷（REV55）。
 
 ### REV55: server/api `updateDeviceStatus` 接受无上界的客户端 `last_seen`，配合 REV33 单调守卫可被永久投毒锁定设备状态 [已修复]
+- **提交哈希**: `c20af76`
+- **修复提交**: `c20af76`
 - **修复状态**: 已修复
 - **修复难度**: 低
 - **位置**: `server/api/main.go` (`updateDeviceStatus` handler, `upsertDeviceStatusDB`)
