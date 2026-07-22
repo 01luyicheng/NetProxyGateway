@@ -489,38 +489,16 @@ private fun ConnectionStatusCard(uiState: UiState, onRetry: () -> Unit) {
                 targetState = uiState.mqttState,
                 label = "status_crossfade"
             ) { targetState ->
-                val targetStatusData = when (targetState) {
+                val (targetStatusIcon, targetStatusTextRes) = when (targetState) {
                     MqttUiState.Connected ->
-                        StatusCardData(
-                            containerColor = statusColors.success,
-                            contentColor = statusColors.onSuccess,
-                            textRes = R.string.status_connected,
-                            icon = Icons.Default.CheckCircle
-                        )
+                        Icons.Default.CheckCircle to R.string.status_connected
                     MqttUiState.Connecting ->
-                        StatusCardData(
-                            containerColor = statusColors.warning,
-                            contentColor = statusColors.onWarning,
-                            textRes = R.string.status_connecting,
-                            icon = null
-                        )
+                        null to R.string.status_connecting
                     MqttUiState.Error ->
-                        StatusCardData(
-                            containerColor = statusColors.error,
-                            contentColor = statusColors.onError,
-                            textRes = R.string.status_error,
-                            icon = Icons.Default.Error
-                        )
+                        Icons.Default.Error to R.string.status_error
                     MqttUiState.Disconnected ->
-                        StatusCardData(
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textRes = R.string.status_disconnected,
-                            icon = Icons.Default.CloudOff
-                        )
+                        Icons.Default.CloudOff to R.string.status_disconnected
                 }
-                val targetStatusIcon = targetStatusData.icon
-                val targetStatusTextRes = targetStatusData.textRes
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
