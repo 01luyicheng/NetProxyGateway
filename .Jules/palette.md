@@ -1,0 +1,3 @@
+## 2024-11-28 - [Smooth Status Transitions in Jetpack Compose]
+**Learning:** Hard-swapping UI state colors and icons (like in a Connection Status Card) can feel abrupt and unpolished. Using `animateColorAsState` for background/content colors and `Crossfade` for icon/text swapping creates a much more pleasant and premium feel without adding much complexity.
+**Action:** Always consider wrapping state-dependent icon and color swaps in `Crossfade` or `AnimatedContent`, and compute the targeted derived properties *inside* the animation lambda based on the provided `targetState` to ensure smooth exit/enter transitions.

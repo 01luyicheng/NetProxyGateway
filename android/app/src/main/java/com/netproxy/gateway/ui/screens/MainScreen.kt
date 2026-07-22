@@ -11,6 +11,8 @@ import android.content.ContextWrapper
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.ui.draw.rotate
 import androidx.compose.foundation.layout.*
@@ -39,6 +41,8 @@ import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -467,45 +471,81 @@ private fun ConnectionStatusCard(uiState: UiState, onRetry: () -> Unit) {
                 icon = Icons.Default.CloudOff
             )
     }
-    val containerColor = statusData.containerColor
-    val contentColor = statusData.contentColor
-    val statusTextRes = statusData.textRes
-    val statusIcon = statusData.icon
+    val animatedContainerColor by animateColorAsState(targetValue = statusData.containerColor, label = "containerColor")
+    val animatedContentColor by animateColorAsState(targetValue = statusData.contentColor, label = "contentColor")
 
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = containerColor,
-            contentColor = contentColor
+            containerColor = animatedContainerColor,
+            contentColor = animatedContentColor
         )
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                if (uiState.mqttState == MqttUiState.Connecting) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(24.dp),
-                        color = contentColor,
-                        strokeWidth = 2.dp
-                    )
-                } else if (statusIcon != null) {
-                    Icon(
-                        imageVector = statusIcon,
-                        contentDescription = null,
-                        modifier = Modifier.size(24.dp),
-                        tint = contentColor
+            Crossfade(
+                targetState = uiState.mqttState,
+                label = "status_crossfade"
+            ) { targetState ->
+                val targetStatusData = when (targetState) {
+                    MqttUiState.Connected ->
+                        StatusCardData(
+                            containerColor = statusColors.success,
+                            contentColor = statusColors.onSuccess,
+                            textRes = R.string.status_connected,
+                            icon = Icons.Default.CheckCircle
+                        )
+                    MqttUiState.Connecting ->
+                        StatusCardData(
+                            containerColor = statusColors.warning,
+                            contentColor = statusColors.onWarning,
+                            textRes = R.string.status_connecting,
+                            icon = null
+                        )
+                    MqttUiState.Error ->
+                        StatusCardData(
+                            containerColor = statusColors.error,
+                            contentColor = statusColors.onError,
+                            textRes = R.string.status_error,
+                            icon = Icons.Default.Error
+                        )
+                    MqttUiState.Disconnected ->
+                        StatusCardData(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textRes = R.string.status_disconnected,
+                            icon = Icons.Default.CloudOff
+                        )
+                }
+                val targetStatusIcon = targetStatusData.icon
+                val targetStatusTextRes = targetStatusData.textRes
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (targetState == MqttUiState.Connecting) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(24.dp),
+                            color = animatedContentColor,
+                            strokeWidth = 2.dp
+                        )
+                    } else if (targetStatusIcon != null) {
+                        Icon(
+                            imageVector = targetStatusIcon,
+                            contentDescription = null,
+                            modifier = Modifier.size(24.dp),
+                            tint = animatedContentColor
+                        )
+                    }
+                    Text(
+                        text = stringResource(targetStatusTextRes),
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = animatedContentColor
                     )
                 }
-                Text(
-                    text = stringResource(statusTextRes),
-                    style = MaterialTheme.typography.headlineSmall,
-                    color = contentColor
-                )
             }
 
             if (uiState.peerId.isNotEmpty()) {
@@ -513,7 +553,7 @@ private fun ConnectionStatusCard(uiState: UiState, onRetry: () -> Unit) {
                 Text(
                     text = stringResource(R.string.pairing_code_format, uiState.peerId),
                     style = MaterialTheme.typography.bodyMedium,
-                    color = contentColor
+                    color = animatedContentColor
                 )
             }
 
@@ -522,12 +562,12 @@ private fun ConnectionStatusCard(uiState: UiState, onRetry: () -> Unit) {
                 Text(
                     text = uiState.mqttErrorMessage,
                     style = MaterialTheme.typography.bodySmall,
-                    color = contentColor
+                    color = animatedContentColor
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 OutlinedButton(
                     onClick = onRetry,
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = contentColor)
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = animatedContentColor)
                 ) {
                     Text(stringResource(R.string.retry))
                 }
