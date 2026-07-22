@@ -1253,7 +1253,7 @@ func (s *Server) updateDeviceStatus(c *gin.Context) {
 		// excluded.last_seen > device_status.last_seen (REV55). The tolerance
 		// absorbs normal clock skew between the tunnel server and the API server.
 		if candidate.After(lastSeen.Add(LastSeenFutureTolerance)) {
-			log.Printf("reject future last_seen: device=%s candidate=%s", req.DeviceID, candidate.UTC().Format(time.RFC3339Nano))
+			log.Printf("reject future last_seen: device=%q candidate=%s", req.DeviceID, candidate.UTC().Format(time.RFC3339Nano))
 			c.JSON(http.StatusBadRequest, gin.H{"error": ErrLastSeenTooFarInFuture.Error()})
 			return
 		}
