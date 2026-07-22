@@ -138,7 +138,7 @@ jobs:
       - name: Build ${{ matrix.component }}
         if: steps.filter.outputs.component == 'true'
         env:
-          CGO_ENABLED: ${{ steps.gcc.outputs.available == 'true' && '1' || '0' }}
+          CGO_ENABLED: 1
         working-directory: ${{ matrix.path }}
         run: go build -v ./...
 
@@ -147,7 +147,7 @@ jobs:
       - name: Test ${{ matrix.component }}
         if: steps.filter.outputs.component == 'true' && success()
         env:
-          CGO_ENABLED: ${{ steps.gcc.outputs.available == 'true' && '1' || '0' }}
+          CGO_ENABLED: 1
         working-directory: ${{ matrix.path }}
         run: go test -v -coverprofile=coverage.out ./...
 
@@ -157,7 +157,7 @@ jobs:
       - name: Quality checks for ${{ matrix.component }}
         if: always() && steps.filter.outputs.component == 'true'
         env:
-          CGO_ENABLED: ${{ steps.gcc.outputs.available == 'true' && '1' || '0' }}
+          CGO_ENABLED: 1
         working-directory: ${{ matrix.path }}
         run: |
           out=$(find . -name '*.go' -not -path '*/vendor/*' -exec gofmt -l {} + 2>/dev/null)
