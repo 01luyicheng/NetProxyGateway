@@ -109,6 +109,7 @@ type Server struct {
 
 	cleanupStop             chan struct{}
 	closeOnce               sync.Once
+	closeErr                error
 	cleanupWorkers          sync.WaitGroup
 	cleanupSessionsInterval time.Duration
 
@@ -278,7 +279,6 @@ func initSchema(db *sql.DB) error {
 // closeOnce makes Server.Close() idempotent regardless of whether its
 // sub-components are individually idempotent.
 func (s *Server) Close() error {
-	var dbErr error
 	s.closeOnce.Do(func() {
 		if s.rateLimiter != nil {
 			s.rateLimiter.Stop()
@@ -288,10 +288,10 @@ func (s *Server) Close() error {
 			s.cleanupWorkers.Wait()
 		}
 		if s.db != nil {
-			dbErr = s.db.Close()
+			s.closeErr = s.db.Close()
 		}
 	})
-	return dbErr
+	return s.closeErr
 }
 
 // generateCode generates a 6-digit pairing code using rejection sampling to avoid modulo bias.
