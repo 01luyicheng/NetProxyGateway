@@ -2207,3 +2207,41 @@
   - 运行：`python3 scripts/test_makefile_tidy_check.py`，6/6 通过。
 - **关联**: CI-MASK-1（同一 Makefile 的 masking 反模式家族）、CI-MASK-2、ADR-006 L294（声明 fmt/vet/tidy 基线掩盖意图，但未授权 drift 检查本身失效）、MAKE-MISSING-1（CI 实际不调用 Makefile 目标的结构性原因）。本条目由 post-commit 正确性审查（PR #120 评审）发现，经两个独立 subagent 交叉验证（静态分析 + 经验复现 + 溯源）确认。
 
+---
+
+## 提交后正确性检查发现（2026-07-24，多 subagent 审查过去 24h 各分支提交 + 活跃 PR）
+
+> 以下问题由多个 subagent 对过去 24 小时内各分支提交与活跃 PR（#112/#129/#131/#133/#135/#137/#139/#119）进行深度审查发现，并经独立 subagent 交叉复审确认。其中 REV56 为本批次修复（本 PR）；其余为对仍 OPEN 的 PR 的阻断性/残余风险记录，已通过 PR 评论通知维护者。
+
+### REV56: `Server.Close()` 非幂等，二次调用 panic（`close of closed channel`）[已修复]
+- **修复状态**: 已修复（本审查批次，分支 `fix/server-close-cleanupstop-idempotent-rev56`）
+- **位置**: `server/api/main.go` (`Server.Close()`, `Server.cleanupStop`)
+- **问题描述**: `Server.Close()` 对 `s.cleanupStop` 直接 `close(...)` 无 `sync.Once` 保护；且 `rateLimiter.Stop()`（在 dev 上仍非幂等，因 REV53/PR #131 尚未合并）也在每次 `Close()` 中被调用。第二次调用 `Close()` 会触发 `close of closed channel` panic（`s.cleanupStop` 或 `rl.stopCh` 二者之一先触发）。REV53 在其"关联"字段中已标注 "`Server.Close()` 中 `close(s.cleanupStop)` 存在同型非幂等缺陷，留待后续单独处理"，本条目即将其正式追踪并修复。
+- **触发场景**: 对同一 `*Server` 调用两次 `Close()`。当前生产调用方（main 中的 graceful shutdown）各只调用一次，故为**潜在（latent）**；但 (1) 测试中 `defer server.Close()` 与显式 `server.Close()` 并存时即触发 panic；(2) 一旦给 API server 增加 signal handler 调用 `Close()`（与 socks5/tunnel 一致的模式），或在 `Server.Close()` 失败后上层重试，即转为线上崩溃。
+- **影响**: **中高（崩溃）**。崩溃路径位于关闭流程，修复零风险。
+- **验证**: 回归测试 `TestServerCloseIsIdempotent`——构造 server、`startCleanupWorkers()`、首次 `Close()` 成功并确实关闭 db（`db.Ping()` 报错），随后连续调用 3 次 `Close()` 既不 panic 也不返回 error。已验证：dev 未修复版本该测试 FAIL（`Close() call #2 panicked: close of closed channel`），修复版本 PASS；全套 `go test -race` 通过，gofmt/vet/build 干净。
+- **修复方式**: `Server` 新增 `closeOnce sync.Once` 字段；`Close()` 将**全部** teardown（`rateLimiter.Stop()` + `close(cleanupStop)` + `cleanupWorkers.Wait()` + `db.Close()`）收敛进 `closeOnce.Do(func(){...})`，错误经局部 `dbErr` 返回。首次调用执行全部 teardown 并返回 `db.Close()` 的错误；后续调用 `Do` 跳过、返回 `nil`。这样 `Server.Close()` 的幂等性**不再依赖**子组件（`rateLimiter.Stop()`/`close(cleanupStop)`）自身是否幂等——与 REV53 对 `RateLimiter.Stop()` 的修复形成纵深防御。
+- **关联**: REV53（`RateLimiter.Stop()` 非幂等，PR #131 修复中）、issue #90 G1。本条目正式追踪 REV53"关联"字段中"留待后续单独处理"的 `Server.Close()` 同型缺陷。
+- **交叉验证**: 两个独立 subagent 复审确认（panic 在 dev 上可复现 + 生产调用链可达性分析 + 修复后 `go test -race` 全绿）。
+
+### REV52-补充: PR #112 提交 `84c0691` 额外回退 MAKEFILE-TIDY-NOOP-1 修复并删除其回归测试 [待修复 — 阻塞 PR #112/#137 合并]
+- **状态**: 待修复（已在 PR #112 与 PR #137 留下阻断评论）
+- **位置**: `Makefile`（`go-ci-component`/`go-quality-component` recipe）、`scripts/test_makefile_tidy_check.py`（整文件删除）
+- **问题描述**: REV52 已记录提交 `84c0691` 大规模回退 dev 的安全/数据完整性修复（6 项）。本次审查发现 `84c0691` **还额外回退了两项未被 REV52 逐条列出的内容**：
+  1. `Makefile` 的 `go-ci-component`/`go-quality-component` recipe 退回为 `(cd $$dir && git diff --exit-code -- go.mod go.sum >/dev/null 2>&1; git checkout -- go.mod go.sum 2>/dev/null || true)`——丢弃 `rc=$$?` 与 `exit $$rc`，子 shell 末尾 `|| true` 恒返回 0，**未 tidy 的 go.mod/go.sum 漂移被静默放行**（重新引入已修复的 MAKEFILE-TIDY-NOOP-1）。
+  2. 整文件删除 `scripts/test_makefile_tidy_check.py`（241 行，6 个用例）——即删除唯一能捕获上述回归的测试，与 PR #129 夹带 `continue-on-error` 并规避守卫的手法同构。
+- **影响**: 若 PR #112 或 PR #137（base 继承 PR #112）合并，go.mod/go.sum 漂移将不再被 CI 检出，依赖图篡改/漂移可静默合入。`merge-tree` 干跑合并 #137→dev 后确认 Makefile 为 buggy no-op 形态、`test_makefile_tidy_check.py` MISSING。
+- **风险**: **高（供应链/质量门禁）**。
+- **修复方式**: 维护者应按 REV52 建议丢弃 `84c0691`（仅保留 `c62aa5e` 预编译优化 + `4556282` 的 `db.Close()` + `d14d8e0` 测试），或 `git revert 84c0691` 后基于 dev 解决冲突。本条目不单独发修复分支（dev 上 Makefile 与测试均正确，仅需阻断问题 PR）。
+- **交叉验证**: 两个独立 subagent 复审确认（`merge-tree` 干跑 + 逐行 recipe 比对）。
+
+### REV55-残余: 持续投毒可维持 `device_status` 锁定，"5 分钟自愈"承诺在持续攻击下不成立 [残余风险 — 待评估]
+- **状态**: 残余风险（已在 PR #137 留下评论）
+- **位置**: `server/api/main.go` (`updateDeviceStatus` 的 `LastSeenFutureTolerance` cap)
+- **问题描述**: REV55（PR #137）将客户端 `last_seen` 上界设为 `now + 5min`，commit message 与 ISSUES.md 均声称"修复后单次投毒最多卡 5 分钟（自愈）"。但该自愈保证**仅在攻击者发送单次请求后停止时成立**：攻击者每 ≤5 分钟发送一次 `{"device_id":"victim","status":"offline","last_seen":<now+5min-1ms>}`，每次都在容差内通过 cap、且 `last_seen` 严格递增通过单调守卫，受害设备的真实上报（`last_seen ≈ now`）始终落后约 5 分钟被持续拒绝。设备状态可被**永久**锁定为 `offline`，无自愈。
+- **影响**: 工程师端永久看到设备离线（实际在线）。**不影响流量路由**——socks5-proxy 通过固定 `TunnelEndpoint` 连接隧道服务器，不读取 `device_status`。故严重度为 MEDIUM（可见性 DoS），且需攻击者持续持有共享 `INTERNAL_API_KEY`。
+- **与原 REV55 的区别**: 原 REV55 允许**单次请求**永久锁定；修复后单次请求最多锁 5 分钟，但**持续攻击**仍可维持永久锁定，攻击频率仅需每 5 分钟一次。
+- **建议**: 评估是否对 `device_id` 维度增加速率限制/异常频率检测，或在文档中明确修正"自愈"承诺的适用前提。因涉及 REV33/REV51 事件排序语义的设计权衡，本批次不单独实施代码修复。
+- **交叉验证**: 两个独立 subagent 复审确认（Go 模拟 20 分钟攻击场景，存储状态始终为 `offline`）。
+
+
