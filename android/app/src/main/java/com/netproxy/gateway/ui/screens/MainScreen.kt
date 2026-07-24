@@ -12,7 +12,6 @@ import android.content.ContextWrapper
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.ui.draw.rotate
 import androidx.compose.foundation.layout.*
@@ -841,13 +840,12 @@ private fun NetworkStatusRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        val animatedTint by animateColorAsState(targetValue = if (active) activeColor else inactiveColor, label = "icon_color")
         Crossfade(targetState = active, label = "network_icon_fade") { isActive ->
             Icon(
                 imageVector = if (isActive) activeIcon else inactiveIcon,
                 contentDescription = null,
                 modifier = Modifier.size(20.dp),
-                tint = animatedTint
+                tint = if (isActive) activeColor else inactiveColor
             )
         }
         Text(
@@ -855,12 +853,11 @@ private fun NetworkStatusRow(
             style = MaterialTheme.typography.bodyMedium,
             modifier = Modifier.weight(1f)
         )
-        val textAnimatedTint by animateColorAsState(targetValue = if (active) activeColor else inactiveColor, label = "text_color")
         Crossfade(targetState = active, label = "network_text_fade") { isActive ->
             Text(
                 text = stringResource(if (isActive) R.string.network_in_use else R.string.network_not_in_use),
                 style = MaterialTheme.typography.bodyMedium,
-                color = textAnimatedTint
+                color = if (isActive) activeColor else inactiveColor
             )
         }
     }
