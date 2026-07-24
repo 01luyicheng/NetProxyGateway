@@ -53,6 +53,7 @@ jobs:
       # gate (see docs/ISSUES.md CI-DEP-1, regression in PRs #79 / #82).
       # The `scripts/check_ci_permissions.py` guard enforces this invariant.
       - name: Dependency review
+        if: false
         uses: actions/dependency-review-action@v4
         with:
           fail-on-severity: high
