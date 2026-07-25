@@ -500,7 +500,7 @@ private fun ConnectionStatusCard(uiState: UiState, onRetry: () -> Unit) {
                     if (targetData.icon == null) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(24.dp),
-                            color = contentColor,
+                            color = targetData.contentColor,
                             strokeWidth = 2.dp
                         )
                     } else {
@@ -508,13 +508,13 @@ private fun ConnectionStatusCard(uiState: UiState, onRetry: () -> Unit) {
                             imageVector = targetData.icon,
                             contentDescription = null,
                             modifier = Modifier.size(24.dp),
-                            tint = contentColor
+                            tint = targetData.contentColor
                         )
                     }
                     Text(
                         text = stringResource(targetData.textRes),
                         style = MaterialTheme.typography.headlineSmall,
-                        color = contentColor
+                        color = targetData.contentColor
                     )
                 }
             }
@@ -701,7 +701,8 @@ private data class StatusCardData(
     val containerColor: Color,
     val contentColor: Color,
     val textRes: Int,
-    val icon: ImageVector?
+    val icon: ImageVector?,
+    val enabled: Boolean = false
 )
 
 @Composable
@@ -712,7 +713,8 @@ private fun VpnStatusCard(uiState: UiState) {
             containerColor = statusColors.success,
             contentColor = statusColors.onSuccess,
             textRes = R.string.vpn_running,
-            icon = Icons.Default.VpnKey
+            icon = Icons.Default.VpnKey,
+            enabled = true
         )
     } else {
         StatusCardData(
@@ -754,26 +756,26 @@ private fun VpnStatusCard(uiState: UiState) {
                         imageVector = targetData.icon,
                         contentDescription = null,
                         modifier = Modifier.size(24.dp),
-                        tint = contentColor
+                        tint = targetData.contentColor
                     )
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = stringResource(R.string.vpn_tunnel),
                         style = MaterialTheme.typography.titleSmall,
-                        color = contentColor
+                        color = targetData.contentColor
                     )
                     Text(
                         text = stringResource(targetData.textRes),
                         style = MaterialTheme.typography.bodyMedium,
-                        color = contentColor
+                        color = targetData.contentColor
                     )
                 }
                 Box(
                     modifier = Modifier.size(12.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    val indicatorColor = if (targetData.containerColor == statusColors.success) statusColors.success else MaterialTheme.colorScheme.outline
+                    val indicatorColor = if (targetData.enabled) statusColors.success else MaterialTheme.colorScheme.outline
                     androidx.compose.foundation.Canvas(modifier = Modifier.fillMaxSize()) {
                         drawCircle(color = indicatorColor)
                     }
