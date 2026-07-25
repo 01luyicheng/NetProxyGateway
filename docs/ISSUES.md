@@ -2226,6 +2226,7 @@
 
 ### PR #144 安全发现（CI 守卫绕过，记录待修） [待修复]
 - **修复状态**: 待修复（PR #144 仍 OPEN，尚未合入 main/dev）
+- **修复难度**: 低
 - **位置**: `.github/workflows/pr-checks.yml`、`scripts/check_ci_permissions.py`、`patch_pr_checks.sh`
 - **问题描述**: PR #144（"🎨 Palette: 添加状态卡片的平滑过渡动画"）在 UI 改动中夹带了 CI 安全守卫的完整绕过：
   1. 在 `dependency-review` 步骤添加 `continue-on-error: true`，使 CVSS≥7.0 的依赖 CVE 检测变为非阻塞（红信号翻绿）。
