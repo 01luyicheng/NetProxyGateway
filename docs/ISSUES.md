@@ -2340,4 +2340,36 @@
 - **关联**: PR #170（`palette/smooth-network-status-transition-7711183361486332504`）。本修复分支基于 PR #170 head，作为其 fix-up PR（base = PR #170 head 分支），与 REV62 作为 PR #165 的 fix-up PR（PR #168）的提交流程一致。同型缺陷：REV62（PR #168）。
 - **交叉验证**: 三个独立 subagent 复审确认（1 个发现 subagent + 2 个独立验证 subagent 逐行核对 `MainScreen.kt` 838/852/864 行：`tint`/`color` 读取外层 `animatedColor` 而图标/文字读取逐行 `isActive`；并从 Compose `Crossfade`/`AnimatedContent` 同时组合旧/新两行 + `animateColorAsState` 产生单一共享值的语义推演过渡窗口错配，CONFIRMED）。
 
+---
 
+## 提交后正确性检查发现（2026-07-23，多 subagent 审查 PR #112 / #108 / #131）
+
+> 以下问题由多个 subagent 对过去 24 小时内各分支提交与活跃 PR 进行深度审查发现。PR #108（MqttConnectionManager / Socks5ProxyHandler / DebugDetector）与 PR #131（ratelimit Stop 幂等）经独立复审，未发现新引入缺陷。PR #112 发现一处高严重程度缺陷（REV55）。
+
+### REV55: server/api `updateDeviceStatus` 接受无上界的客户端 `last_seen`，配合 REV33 单调守卫可被永久投毒锁定设备状态 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 低
+- **位置**: `server/api/main.go` (`updateDeviceStatus` handler, `upsertDeviceStatusDB`)
+- **问题描述**: PR #112（REV33 优化）同时引入了两处改动，二者组合形成本缺陷：
+  1. `updateDeviceStatus` 请求体新增客户端可控字段 `LastSeen int64 json:"last_seen"`，且**唯一校验为 `> 0`，无任何上界**——`lastSeen = time.UnixMilli(req.LastSeen)` 直接入库。
+  2. `upsertDeviceStatusDB` 的 `ON CONFLICT(device_id) DO UPDATE SET ... WHERE excluded.last_seen > device_status.last_seen` 是严格单调守卫，且 handler 丢弃 `sql.Result`、不检查 `RowsAffected()`，WHERE 不满足时仍返回 `200 {"status":"updated"}`。
+  - 两者单独存在均无害（main 上无 WHERE，下次 `time.Now()` 直接覆盖毒行；无 client `last_seen` 则值由服务端决定无法注入未来时间）。**两者组合才形成永久锁定**。
+- **触发场景**:
+  1. 持有共享 `INTERNAL_API_KEY` 的调用方发送 `POST /api/device/status`，header `X-Internal-API-Key: <key>`，body `{"device_id":"victim-device","status":"offline","last_seen":32503680000000}`（公元 3000 年，或直接用 `math.MaxInt64`）。首次走 INSERT 分支，远未来 `last_seen` 被写入。
+  2. 受害设备随后用真实 `time.Now()`（约 `1.7e12` ms）上报 `online`。SQLite 执行 ON CONFLICT UPDATE 时 `excluded.last_seen(1.7e12) > device_status.last_seen(3.25e13)` 为 **false**，UPDATE 被 **静默跳过**；`db.Exec` 返回 `nil`，handler 返回 `200 {"status":"updated"}`。
+  3. 设备状态永久卡在 `offline`，`tunnel_addr` 也被一并锁死，**无自纠正心跳**（无 TTL/清理任务）。唯一恢复手段是人工直连 DB `DELETE/UPDATE`。
+- **影响范围**:
+  - **数据完整性**：`device_status` 行被不可恢复地锁定为错误状态。
+  - **DoS**：设备在工程师端永久显示离线（即使实际在线、SOCKS5 连通正常），状态视图与实际不符；上报"看似成功"故无告警。
+  - **跨设备**：`device_id` 完全由客户端 body 提供，`internalAuthMiddleware` 只校验**所有设备共享**的 `X-Internal-API-Key`、不绑定 `device_id`。攻击者一次请求即可投毒任意/全部设备，**全设备状态瘫痪**。
+- **风险**: **高**。前提是攻击者持有 internal API key（内部信任边界内的凭据），但一旦满足即为确定性、静默、永久、可全设备的 DoS，且无日志告警。
+- **修复方式**:
+  - 在 `updateDeviceStatus` 中对客户端 `last_seen` 增加上界校验：`candidate := time.UnixMilli(req.LastSeen)`；若 `candidate.After(time.Now().Add(LastSeenFutureTolerance))`（默认 5 分钟），返回 `400 Bad Request`（`ErrLastSeenTooFarInFuture`）并 `log.Printf` 告警。
+  - 5 分钟容差吸收 tunnel 服务器（唯一合法 caller）与 API 服务器之间的正常 NTP 时钟偏差；保留合法范围内的客户端时间戳（不破坏 REV33/REV51 的"事件决策顺序"语义）。
+  - 不采用"完全忽略 client `last_seen` 永远用 `time.Now()`"的方案——它会重引入 REV51 要消除的"到达顺序 ≠ 决策顺序"错乱（见 REV51 分析）。
+  - 修复后单次投毒最多卡 5 分钟（容差上限），不再永久；容差外的明显未来时间戳被显式拒绝。
+- **测试覆盖**:
+  - `TestUpdateDeviceStatus_RejectsFutureLastSeen`：远未来时间戳（+1 年）返回 400，行不创建。
+  - `TestUpdateDeviceStatus_FutureLastSeenDoesNotPermanentlyLockRow`：核心回归——投毒尝试被 400 拒绝后，合法上报正常生效，状态正确为 `online`。
+  - `TestUpdateDeviceStatus_AcceptsLastSeenWithinFutureTolerance`：容差内（+1s）的未来时间戳被接受且原值保留，证明不误伤合法钟差。
+- **关联**: 本缺陷由 PR #112 引入（即 REV33 优化合入时引入）。修正 REV33"修复方式"中"`updateDeviceStatus` 接受请求体中的可选 `last_seen`"未提及上界校验与投毒风险的疏漏。修复分支 `fix/device-status-lastseen-future-cap-rev55`，基于 PR #112 分支。

@@ -1452,6 +1452,135 @@ func TestUpdateDeviceStatus_AcceptsLastSeenFromRequest(t *testing.T) {
 	}
 }
 
+// TestUpdateDeviceStatus_RejectsFutureLastSeen verifies REV55: a client-supplied
+// last_seen that lies beyond LastSeenFutureTolerance in the future must be
+// rejected with 400. Without this guard the value would be persisted and then
+// permanently reject every subsequent legitimate update via the monotonic
+// `excluded.last_seen > device_status.last_seen` guard in upsertDeviceStatusDB.
+func TestUpdateDeviceStatus_RejectsFutureLastSeen(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	server.internalAPIKey = []byte("internal-secret")
+
+	router := gin.New()
+	router.POST("/api/device/status", server.internalAuthMiddleware(), server.updateDeviceStatus)
+
+	// A timestamp far beyond the future tolerance (year 3000).
+	farFuture := time.Now().Add(365 * 24 * time.Hour).UnixMilli()
+	reqBody := fmt.Sprintf(`{"device_id":"dev-fut","status":"online","last_seen":%d}`, farFuture)
+	req := httptest.NewRequest(http.MethodPost, "/api/device/status", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-API-Key", "internal-secret")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for far-future last_seen, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	// The row must not have been created.
+	stored, err := server.getDeviceStatusDB("dev-fut")
+	if err != nil {
+		t.Fatalf("getDeviceStatusDB failed: %v", err)
+	}
+	if stored != nil {
+		t.Fatalf("device_status row should not exist after rejection, got status=%q last_seen=%d", stored.Status, stored.LastSeen.UnixMilli())
+	}
+}
+
+// TestUpdateDeviceStatus_FutureLastSeenDoesNotPermanentlyLockRow is the core
+// REV55 regression test. It reproduces the original attack: poison a row with a
+// future last_seen, then prove that subsequent real updates eventually take
+// effect once wall-clock passes the (tolerance-capped) stored value. Before the
+// fix an attacker could store an arbitrarily large value and lock the row forever.
+func TestUpdateDeviceStatus_FutureLastSeenDoesNotPermanentlyLockRow(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	server.internalAPIKey = []byte("internal-secret")
+
+	router := gin.New()
+	router.POST("/api/device/status", server.internalAuthMiddleware(), server.updateDeviceStatus)
+
+	now := time.Now()
+	// Attacker attempts to poison with an unbounded future timestamp.
+	// The handler must reject it (400) so no row is created at all.
+	attackTs := now.Add(10 * 365 * 24 * time.Hour).UnixMilli()
+	attackBody := fmt.Sprintf(`{"device_id":"dev-lock","status":"offline","last_seen":%d}`, attackTs)
+	req := httptest.NewRequest(http.MethodPost, "/api/device/status", strings.NewReader(attackBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-API-Key", "internal-secret")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("poisoning attempt should be rejected with 400, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	// Now a legitimate update (no last_seen, server stamps time.Now()) must
+	// succeed because no poisoned row was ever written.
+	legitBody := `{"device_id":"dev-lock","status":"online"}`
+	req = httptest.NewRequest(http.MethodPost, "/api/device/status", strings.NewReader(legitBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-API-Key", "internal-secret")
+	recorder = httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("legitimate update expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	stored, err := server.getDeviceStatusDB("dev-lock")
+	if err != nil {
+		t.Fatalf("getDeviceStatusDB failed: %v", err)
+	}
+	if stored == nil {
+		t.Fatal("expected device_status row to exist after legitimate update")
+	}
+	if stored.Status != "online" {
+		t.Fatalf("status = %q, want %q (poisoned row blocked legitimate update)", stored.Status, "online")
+	}
+}
+
+// TestUpdateDeviceStatus_AcceptsLastSeenWithinFutureTolerance ensures the
+// tolerance does not reject legitimate client-supplied timestamps that are
+// only marginally in the future (normal clock skew between tunnel and API).
+func TestUpdateDeviceStatus_AcceptsLastSeenWithinFutureTolerance(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	server.internalAPIKey = []byte("internal-secret")
+
+	router := gin.New()
+	router.POST("/api/device/status", server.internalAuthMiddleware(), server.updateDeviceStatus)
+
+	// A timestamp just inside the future tolerance (1 second ahead).
+	withinTolerance := time.Now().Add(time.Second).UnixMilli()
+	reqBody := fmt.Sprintf(`{"device_id":"dev-skew","status":"online","last_seen":%d}`, withinTolerance)
+	req := httptest.NewRequest(http.MethodPost, "/api/device/status", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-API-Key", "internal-secret")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200 for last_seen within future tolerance, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	stored, err := server.getDeviceStatusDB("dev-skew")
+	if err != nil {
+		t.Fatalf("getDeviceStatusDB failed: %v", err)
+	}
+	if stored == nil {
+		t.Fatal("expected device_status row to exist")
+	}
+	if stored.Status != "online" {
+		t.Fatalf("status = %q, want %q", stored.Status, "online")
+	}
+	if stored.LastSeen.UnixMilli() != withinTolerance {
+		t.Fatalf("LastSeen = %d, want %d (client value should be preserved within tolerance)", stored.LastSeen.UnixMilli(), withinTolerance)
+	}
+}
+
 func TestRateLimitKeyPrefersAuthenticatedIdentity(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
