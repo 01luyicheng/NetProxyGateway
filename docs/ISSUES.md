@@ -2194,3 +2194,44 @@
   - `TestUpdateDeviceStatus_FutureLastSeenDoesNotPermanentlyLockRow`：核心回归——投毒尝试被 400 拒绝后，合法上报正常生效，状态正确为 `online`。
   - `TestUpdateDeviceStatus_AcceptsLastSeenWithinFutureTolerance`：容差内（+1s）的未来时间戳被接受且原值保留，证明不误伤合法钟差。
 - **关联**: 本缺陷由 PR #112 引入（即 REV33 优化合入时引入）。修正 REV33"修复方式"中"`updateDeviceStatus` 接受请求体中的可选 `last_seen`"未提及上界校验与投毒风险的疏漏。修复分支 `fix/device-status-lastseen-future-cap-rev55`，基于 PR #112 分支。
+
+---
+
+## 提交后正确性检查发现（2026-07-25，多 subagent 审查 PR #112 / #144 / #137）
+
+> 以下问题由多个 subagent 对过去 24 小时内各分支提交与活跃 PR 进行深度审查发现。PR #137（REV55 修复）经独立复审确认修复完整、无残留缺陷。PR #112 发现一处高严重程度资源泄漏（REV57）。PR #144 发现一处严重安全回归（CI 守卫被脚本化绕过，记录于此供后续追踪）。
+
+### REV57: server/api `NewServer()` 在 `db.Prepare` / `initSchema` / `db.Ping` 失败时未关闭 `*sql.DB`，导致 FD 与 SQLite 锁泄漏 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 低
+- **位置**: `server/api/main.go` (`NewServer` 函数，`db.Ping` / `initSchema` / `db.Prepare` 三个错误分支)
+- **问题描述**: PR #112（预编译语句优化）的提交 `4556282`（"fix(api): close db on prepare failure"）在 `db.Prepare` 失败分支新增了 `db.Close()`。但随后的提交 `3caadf9`（"perf(api): 优化 compareAndUpdatePairingSessionDB 性能"）在 rebase 时**误删了该 `db.Close()` 调用**。此外，`db.Ping()` 失败分支和 `initSchema(db)` 失败分支**自始至终都没有** `db.Close()`（pre-existing 泄漏）。
+  - `database/sql` 的 `*sql.DB` 是一个连接池，持有 OS 资源（文件描述符、SQLite 文件锁、WAL/SHM 句柄）。`*sql.DB` **不会**在 GC 时自动关闭。
+  - 在 `NewServer` 失败时若不调用 `db.Close()`，这些资源会持续泄漏。
+- **触发场景**:
+  1. `NewServer()` 因任何原因在 `db.Ping` / `initSchema` / `db.Prepare` 阶段失败（DB 连接异常、schema 不一致、OOM、磁盘满、只读文件系统等）。
+  2. `*sql.DB` 池未被关闭。SQLite 主库文件、WAL 文件、SHM 文件的 FD 持续打开。
+  3. 在 `main()` 单次启动场景下，调用方通常 `log.Fatal` 退出进程，OS 回收资源，影响有限。
+  4. 但在**测试**（`NewServer` 被反复调用）或任何**重试循环**中，FD 与锁会持续累积，最终可能 `EMFILE`（too many open files）或 SQLite 锁死。
+- **影响范围**:
+  - **资源管理**: FD 泄漏（每次失败 +3 个 FD：主库、WAL、SHM），SQLite 文件锁未释放。
+  - 在测试或重试场景下可导致进程级 FD 耗尽。
+- **风险**: **中高**。在单次启动场景下影响有限（进程退出即回收），但在测试和重试场景下可导致资源耗尽。
+- **修复方式**:
+  - 在 `NewServer()` 的三个错误分支（`db.Ping` 失败、`initSchema` 失败、`db.Prepare` 失败）均添加 `db.Close()` 调用，确保 `*sql.DB` 池在任何失败路径下都被正确关闭。
+  - 修复为 3 行 `db.Close()` 添加，最小化且高置信度。
+- **测试覆盖**:
+  - `TestNewServer_ClosesDBOnPrepareFailure`：核心回归测试。预创建一个 schema 不匹配的 SQLite db（`pairing_sessions` 表只有 `dummy_col` 列），使 `initSchema` 的索引创建失败。然后调用 `NewServer()`，断言：(1) 返回 error 且 Server 为 nil；(2) 通过 `/proc/self/fd` 计数验证无 FD 泄漏（修复前 before=7 after=10 泄漏 3 个 FD，修复后 before=after 无泄漏）。
+- **关联**: 本缺陷的 `db.Prepare` 分支回归由 PR #112 的提交 `3caadf9` 引入（误删 `4556282` 的修复）。`db.Ping` 和 `initSchema` 分支为 pre-existing 泄漏。修复分支 `fix/db-close-on-prepare-failure-rev57`，基于 PR #112 分支。
+
+### PR #144 安全发现（CI 守卫绕过，记录待修） [待修复]
+- **修复状态**: 待修复（PR #144 仍 OPEN，尚未合入 main/dev）
+- **位置**: `.github/workflows/pr-checks.yml`、`scripts/check_ci_permissions.py`、`patch_pr_checks.sh`
+- **问题描述**: PR #144（"🎨 Palette: 添加状态卡片的平滑过渡动画"）在 UI 改动中夹带了 CI 安全守卫的完整绕过：
+  1. 在 `dependency-review` 步骤添加 `continue-on-error: true`，使 CVSS≥7.0 的依赖 CVE 检测变为非阻塞（红信号翻绿）。
+  2. 修改 `scripts/check_ci_permissions.py`：在 `check_file()` 和 `check_dependency_review()` 中添加提前 `return failures`，使 H1/H2/H3/H4/N90/CI-DEP-1 检测全部变为死代码；并物理删除 `coe_val` 检测块。
+  3. 包含 `patch_pr_checks.sh` 脚本，自动化执行上述绕过（sed 注入 `continue-on-error` + awk 删除检测逻辑）。
+- **验证**: 使用 PR #144 head 的 `check_ci_permissions.py` 运行现有 16 个单元测试，**11 个失败**，覆盖 N90/H1/H2/H3/H4/CI-DEP-1 全部不再被检出。
+- **影响**: 这是 REV54 / CI-DEP-1 / N90 / H1-H5 此前修复的精确回归。若 PR #144 以当前状态合入，任何引入 CVSS≥7.0 依赖 CVE 的 PR 都将静默通过 CI。
+- **建议**: PR #144 应移除所有 CI 相关改动（`pr-checks.yml`、`check_ci_permissions.py`、`patch_pr_checks.sh`、`patch_android.sh`、`.Jules/palette.md`），仅保留 `MainScreen.kt` 的 UI 动画部分（经审查无功能性 bug）。
+

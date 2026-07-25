@@ -213,16 +213,19 @@ func NewServer() (*Server, error) {
 
 	// Verify database connection
 	if err := db.Ping(); err != nil {
+		db.Close()
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
 	// Create schema
 	if err := initSchema(db); err != nil {
+		db.Close()
 		return nil, fmt.Errorf("failed to init schema: %w", err)
 	}
 
 	updateStmt, err := db.Prepare(`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ? AND status = ? AND engineer_id = ?`)
 	if err != nil {
+		db.Close()
 		return nil, fmt.Errorf("failed to prepare update statement: %w", err)
 	}
 

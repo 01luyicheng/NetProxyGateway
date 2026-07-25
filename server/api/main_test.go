@@ -9,6 +9,8 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -1980,5 +1982,85 @@ func TestGetPairingSession_ConcurrentModificationReturns410(t *testing.T) {
 	// but we should still return 410, not 200.
 	if recorder.Code != http.StatusGone {
 		t.Fatalf("expected 410 Gone for expired session with concurrent modification, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+// countOpenFDs returns the number of open file descriptors for the current
+// process. Used to detect resource (FD) leaks in NewServer error paths.
+// Returns -1 on platforms where /proc/self/fd is unavailable.
+func countOpenFDs(t *testing.T) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return -1
+	}
+	return len(entries)
+}
+
+// TestNewServer_ClosesDBOnPrepareFailure is the core REV57 regression test.
+// It verifies that when NewServer() fails (at initSchema or Prepare), the
+// *sql.DB pool is properly closed via db.Close() — preventing a resource leak
+// of file descriptors and SQLite file locks.
+//
+// The bug: commit 4556282 added db.Close() to the Prepare error path; commit
+// 3caadf9 accidentally removed it when rebasing the perf optimization. The
+// Ping and initSchema error paths also lacked db.Close() (pre-existing).
+// This test catches the regression by:
+//  1. Pre-creating a SQLite db with a `pairing_sessions` table whose columns
+//     don't match the schema initSchema expects — so initSchema's
+//     CREATE TABLE IF NOT EXISTS is a no-op, but a subsequent index or
+//     constraint referencing the missing columns fails.
+//  2. Counting open FDs before and after NewServer(). If db.Close() is not
+//     called on the error path, the SQLite connection FD leaks.
+func TestNewServer_ClosesDBOnPrepareFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test_rev57.db")
+
+	// Pre-create the pairing_sessions table with columns that don't match
+	// the prepared UPDATE statement. initSchema uses CREATE TABLE IF NOT
+	// EXISTS, so this table won't be recreated — but Prepare will fail
+	// because the referenced columns (status, engineer_id, used, code)
+	// don't exist.
+	preDb, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
+	if err != nil {
+		t.Fatalf("pre-open failed: %v", err)
+	}
+	_, err = preDb.Exec(`CREATE TABLE IF NOT EXISTS pairing_sessions (dummy_col TEXT NOT NULL)`)
+	if err != nil {
+		preDb.Close()
+		t.Fatalf("pre-create wrong schema failed: %v", err)
+	}
+	if err := preDb.Close(); err != nil {
+		t.Fatalf("pre-close failed: %v", err)
+	}
+
+	// Configure all env vars NewServer requires (avoid log.Fatalf paths).
+	t.Setenv("JWT_SECRET", strings.Repeat("a", MinJWTSecretLength))
+	t.Setenv("ADMIN_USER", "test-admin")
+	t.Setenv("ADMIN_PASS", "test-pass")
+	t.Setenv("INTERNAL_API_KEY", "test-internal-key")
+	t.Setenv("DB_PATH", dbPath)
+
+	before := countOpenFDs(t)
+
+	server, err := NewServer()
+
+	after := countOpenFDs(t)
+
+	if err == nil {
+		if server != nil {
+			server.Close()
+		}
+		t.Fatal("expected NewServer to fail when Prepare fails on mismatched schema, but it succeeded")
+	}
+
+	if server != nil {
+		t.Fatalf("expected nil Server on error, got non-nil")
+	}
+
+	// The fix: db.Close() must be called on the Prepare error path.
+	// Without it, the SQLite connection FD leaks (after > before).
+	if before >= 0 && after >= 0 && after > before {
+		t.Errorf("FD leak detected: before=%d after=%d — db.Close() was not called on NewServer Prepare failure (REV57 regression)", before, after)
 	}
 }
