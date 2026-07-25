@@ -32,6 +32,15 @@ const (
 	DefaultDBPath                 = "./api.db"
 	MinJWTSecretLength            = 32
 	MaxHTTPHeaderBytes            = 1 << 20
+
+	// LastSeenFutureTolerance caps how far a client-supplied last_seen may
+	// lie in the future relative to the server clock. upsertDeviceStatusDB
+	// only applies an update when excluded.last_seen > device_status.last_seen,
+	// so an unbounded future timestamp would permanently lock a device_status
+	// row (all subsequent real updates would be rejected by the guard).
+	// The tolerance absorbs normal clock skew between the tunnel server
+	// (the only legitimate caller) and the API server. See REV55.
+	LastSeenFutureTolerance = 5 * time.Minute
 )
 
 // Sentinel errors - unified ErrFailedToXxx naming convention
@@ -45,6 +54,7 @@ var (
 	ErrFailedToCreateSession              = errors.New("failed to create pairing session")
 	ErrFailedToUpdateSession              = errors.New("failed to update session")
 	ErrFailedToUpdateStatus               = errors.New("failed to update device status")
+	ErrLastSeenTooFarInFuture             = errors.New("last_seen is too far in the future")
 	ErrFailedToGenerateToken              = errors.New("failed to generate session token")
 	ErrFailedToCreateToken                = errors.New("failed to create session token")
 	ErrFailedToValidateToken              = errors.New("missing or invalid bearer token")
@@ -1235,7 +1245,19 @@ func (s *Server) updateDeviceStatus(c *gin.Context) {
 
 	lastSeen := time.Now()
 	if req.LastSeen > 0 {
-		lastSeen = time.UnixMilli(req.LastSeen)
+		candidate := time.UnixMilli(req.LastSeen)
+		// Reject timestamps that lie too far in the future. Without this cap a
+		// single request carrying an unbounded future last_seen would be written
+		// and then permanently reject every subsequent legitimate update, because
+		// upsertDeviceStatusDB only applies the ON CONFLICT update when
+		// excluded.last_seen > device_status.last_seen (REV55). The tolerance
+		// absorbs normal clock skew between the tunnel server and the API server.
+		if candidate.After(lastSeen.Add(LastSeenFutureTolerance)) {
+			log.Printf("reject future last_seen: device=%s candidate=%s", req.DeviceID, candidate.UTC().Format(time.RFC3339Nano))
+			c.JSON(http.StatusBadRequest, gin.H{"error": ErrLastSeenTooFarInFuture.Error()})
+			return
+		}
+		lastSeen = candidate
 	}
 
 	status := &DeviceStatus{
