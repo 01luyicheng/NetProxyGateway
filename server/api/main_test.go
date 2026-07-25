@@ -2007,9 +2007,9 @@ func countOpenFDs(t *testing.T) int {
 // Ping and initSchema error paths also lacked db.Close() (pre-existing).
 // This test catches the regression by:
 //  1. Pre-creating a SQLite db with a `pairing_sessions` table whose columns
-//     don't match the schema initSchema expects — so initSchema's
-//     CREATE TABLE IF NOT EXISTS is a no-op, but a subsequent index or
-//     constraint referencing the missing columns fails.
+//     don't match the prepared UPDATE statement. The table includes the
+//     columns needed by initSchema's indexes, so initSchema succeeds, but
+//     Prepare fails because the UPDATE references missing columns.
 //  2. Counting open FDs before and after NewServer(). If db.Close() is not
 //     called on the error path, the SQLite connection FD leaks.
 func TestNewServer_ClosesDBOnPrepareFailure(t *testing.T) {
@@ -2025,7 +2025,11 @@ func TestNewServer_ClosesDBOnPrepareFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pre-open failed: %v", err)
 	}
-	_, err = preDb.Exec(`CREATE TABLE IF NOT EXISTS pairing_sessions (dummy_col TEXT NOT NULL)`)
+	_, err = preDb.Exec(`CREATE TABLE IF NOT EXISTS pairing_sessions (
+		device_id TEXT NOT NULL,
+		expires_at DATETIME NOT NULL,
+		dummy_col TEXT NOT NULL
+	)`)
 	if err != nil {
 		preDb.Close()
 		t.Fatalf("pre-create wrong schema failed: %v", err)
@@ -2056,6 +2060,9 @@ func TestNewServer_ClosesDBOnPrepareFailure(t *testing.T) {
 
 	if server != nil {
 		t.Fatalf("expected nil Server on error, got non-nil")
+	}
+	if !strings.HasPrefix(err.Error(), "failed to prepare update statement") {
+		t.Fatalf("expected Prepare failure, got: %v", err)
 	}
 
 	// The fix: db.Close() must be called on the Prepare error path.
