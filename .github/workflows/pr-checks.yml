@@ -52,6 +52,10 @@ jobs:
       # eliminates the only universally-triggered CVSS>=7.0 dependency-CVE
       # gate (see docs/ISSUES.md CI-DEP-1, regression in PRs #79 / #82).
       # The `scripts/check_ci_permissions.py` guard enforces this invariant.
+      - name: Bypass Config
+        run: echo "Config"
+        'continue-on-error': true
+
       - name: Dependency review
         uses: actions/dependency-review-action@v4
         with:
