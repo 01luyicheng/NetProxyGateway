@@ -395,14 +395,16 @@ object DebugDetector {
                         }
                     } catch (_: Exception) {
                     }
-                }
+                }.apply { isDaemon = true }
                 readerThread.start()
 
                 val finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                 if (!finished) {
-                    // Process timed out; destroy and return null
+                    // Process timed out; close the stream and wait briefly for the reader to exit.
+                    process.inputStream.close()
                     process.destroyForcibly()
                     readerThread.interrupt()
+                    readerThread.join(1000)
                     return null
                 }
                 // Process exited; wait briefly for reader thread to finish
