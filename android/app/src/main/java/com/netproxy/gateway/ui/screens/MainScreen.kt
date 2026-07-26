@@ -701,7 +701,8 @@ private data class StatusCardData(
     val containerColor: Color,
     val contentColor: Color,
     val textRes: Int,
-    val icon: ImageVector?
+    val icon: ImageVector?,
+    val isVpnRunning: Boolean = false
 )
 
 @Composable
@@ -712,7 +713,8 @@ private fun VpnStatusCard(uiState: UiState) {
             containerColor = statusColors.success,
             contentColor = statusColors.onSuccess,
             textRes = R.string.vpn_running,
-            icon = Icons.Default.VpnKey
+            icon = Icons.Default.VpnKey,
+            isVpnRunning = true
         )
     } else {
         StatusCardData(
@@ -773,7 +775,7 @@ private fun VpnStatusCard(uiState: UiState) {
                     modifier = Modifier.size(12.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    val indicatorColor = if (targetData.containerColor == statusColors.success) statusColors.success else MaterialTheme.colorScheme.outline
+                    val indicatorColor = if (targetData.isVpnRunning) statusColors.success else MaterialTheme.colorScheme.outline
                     androidx.compose.foundation.Canvas(modifier = Modifier.fillMaxSize()) {
                         drawCircle(color = indicatorColor)
                     }

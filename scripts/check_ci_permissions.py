@@ -108,7 +108,7 @@ def check_file(path: Path) -> list[str]:
     jobs = _parse_jobs(path.read_text())
     if not jobs:
         failures.append(f"{path.name}: no jobs parsed (parser out of sync?)")
-    return failures
+        return failures
     any_filter = False
     for jname, info in jobs.items():
         if not info["filter"]:
@@ -266,7 +266,7 @@ def check_dependency_review(path: Path) -> list[str]:
             f"CVSS>=7.0 dependency-CVE gate (CI-DEP-1). Re-add the job "
             f"using {DEPENDENCY_REVIEW_ACTION} with `fail-on-severity: high`."
         )
-    return failures
+        return failures
 
     # Collect the job body (until the next 2-space-indented key or EOF).
     job_body: list[str] = []
@@ -348,6 +348,15 @@ def check_dependency_review(path: Path) -> list[str]:
         # silently flips a red CVE signal to green. Detection is on key
         # presence alone — covers literal `true` (N90), expression
         # `${{ ... }}` (H3), and trailing-comment form `true  # ...` (H4).
+        coe_val = _step_get_value(dep_review_step, "continue-on-error")
+        if coe_val is not None:
+            failures.append(
+                f"{path.name}: `dependency-review` step is masked "
+                f"by `continue-on-error:` (value='{coe_val}', "
+                f"N90/CI-DEP-1/H3/H4). This silently flips a red "
+                f"CVE signal to green. Remove the directive."
+            )
+
     return failures
 
 
