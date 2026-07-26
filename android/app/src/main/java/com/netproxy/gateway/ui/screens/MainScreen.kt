@@ -458,7 +458,16 @@ private fun ConnectionStatusCard(uiState: UiState, onRetry: () -> Unit) {
             contentColor = animatedContentColor
         )
     ) {
-        Crossfade(targetState = uiState.mqttState, label = "mqttStateCrossfade") { targetMqttState ->
+        val connectionStatusModel = remember(uiState.mqttState, uiState.peerId, uiState.mqttErrorMessage) {
+            ConnectionStatusUiModel(
+                mqttState = uiState.mqttState,
+                peerId = uiState.peerId,
+                mqttErrorMessage = uiState.mqttErrorMessage
+            )
+        }
+
+        Crossfade(targetState = connectionStatusModel, label = "mqttStateCrossfade") { targetModel ->
+            val targetMqttState = targetModel.mqttState
             val statusData = when (targetMqttState) {
                 MqttUiState.Connected ->
                     StatusCardData(
@@ -521,19 +530,19 @@ private fun ConnectionStatusCard(uiState: UiState, onRetry: () -> Unit) {
                     )
                 }
 
-                if (uiState.peerId.isNotEmpty()) {
+                if (targetModel.peerId.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = stringResource(R.string.pairing_code_format, uiState.peerId),
+                        text = stringResource(R.string.pairing_code_format, targetModel.peerId),
                         style = MaterialTheme.typography.bodyMedium,
                         color = animatedContentColor
                     )
                 }
 
-                if (targetMqttState == MqttUiState.Error && uiState.mqttErrorMessage != null) {
+                if (targetMqttState == MqttUiState.Error && targetModel.mqttErrorMessage != null) {
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = uiState.mqttErrorMessage,
+                        text = targetModel.mqttErrorMessage,
                         style = MaterialTheme.typography.bodySmall,
                         color = animatedContentColor
                     )
@@ -705,6 +714,12 @@ private data class StatusCardData(
     val contentColor: Color,
     val textRes: Int,
     val icon: ImageVector?
+)
+
+private data class ConnectionStatusUiModel(
+    val mqttState: MqttUiState,
+    val peerId: String,
+    val mqttErrorMessage: String?
 )
 
 @Composable
