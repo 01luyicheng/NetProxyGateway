@@ -1509,14 +1509,22 @@
 > **跨分支引用说明**：REV46（DebugDetector `readLine()` 阻塞）与 REV47（Frida hook 绕过 getprop 交叉验证）记录在 `dev` 分支的 `docs/ISSUES.md` 中；PR #108 分支基于较旧状态，未包含 REV31-REV58 条目。REV59 的 A4 与 dev 分支的 REV46 是同一类 ANR/挂死回归，A2 与 dev 分支的 REV47 是同一类 Frida 绕过回归。
 
 ### REV59-A1: MqttConnectionManager trust-all X509TrustManager 移除 BuildConfig.DEBUG fail-closed 守卫 [已修复]
-- **严重程度**: 中（TLS 纵深防御）
+- **提交哈希**: `604f2e4`
+- **修复提交**: `604f2e4`（当前修复）
+- **修复状态**: 已修复
+- **修复难度**: 中
+- **风险**: 中（TLS 纵深防御）
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (`createDevSocketFactory()` 内的 trust-all `X509TrustManager`，`checkClientTrusted` / `checkServerTrusted`)
 - **问题描述**: PR #108 移除了 `if (!BuildConfig.DEBUG) throw CertificateException("Trust-all manager is only allowed in debug builds")` 守卫。这是一个 fail-closed 安全网：若 trust-all manager 因逻辑 bug 或 BuildConfig 误生成在 release 构建中被触达，握手应失败而非静默信任所有证书。
 - **触发条件**: release 构建中 trust-all manager 被意外触达（逻辑 bug / BuildConfig.DEBUG 误生成）→ 静默接受任意证书 → 中间人攻击。
 - **修复方式**: 恢复 `checkClientTrusted` 与 `checkServerTrusted` 中的 `if (!BuildConfig.DEBUG) throw CertificateException(...)` 守卫，并恢复 `import java.security.cert.CertificateException`。
 
 ### REV59-A2: DebugDetector 单路径属性检查让 Frida hook 可绕过 debug 检测 [已修复]
-- **严重程度**: 高（安全，Frida 绕过）
+- **提交哈希**: `604f2e4`
+- **修复提交**: `604f2e4`（当前修复）
+- **修复状态**: 已修复
+- **修复难度**: 中
+- **风险**: 高（安全，Frida 绕过）
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt` (`resolveDebugPropertiesState` 的 `debugProps` 循环)
 - **问题描述**: PR #108 用 `readDebugPropertyValue` 替换双路径属性检查——该 helper 反射成功即立即返回，仅在反射返回 null/抛异常时才回退到 `getprop` 子进程。因此 Frida 钩住 `SystemProperties.get("ro.debuggable")` 返回 `"0"` 即可绕过检测，独立的 `getprop` 子进程交叉验证被跳过。旧代码同时读反射 AND getprop，任一指示 debug 即返回 true（注释明确说明 "This prevents Frida hooking of SystemProperties.get() from bypassing detection, since getprop serves as an independent verification path"）。
 - **触发条件**: Frida 钩 `SystemProperties.get` 返回安全值 → 反射路径短路 → getprop 独立校验被跳过 → debug 检测被绕过。
@@ -1524,7 +1532,11 @@
 - **关联测试**: `DebugDetectorTest.resolveDebugPropertiesState_detectsDebugViaProcess_whenReflectionIsHooked`
 
 ### REV59-A3: DebugDetector checkTimingAttack 工作负载循环被 DCE 消除，反调试检测形同虚设 [已修复]
-- **严重程度**: 高（安全，重新引入 PR #95 回归）
+- **提交哈希**: `604f2e4`
+- **修复提交**: `604f2e4`（当前修复）
+- **修复状态**: 已修复
+- **修复难度**: 中
+- **风险**: 高（安全，重新引入 PR #95 回归）
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt` (`checkTimingAttack` 及 `workloadFingerprint` / `timingCheckInvocationCount` 字段)
 - **问题描述**: PR #108 删除了 `@Volatile var workloadFingerprint: Int = 0`（private set）与 `@Volatile var timingCheckInvocationCount: Long = 0L`（private set）字段，以及 `checkTimingAttack` 内的副作用写入 `workloadFingerprint = sum` 与 `timingCheckInvocationCount++`。无这些 @Volatile 写入，`var sum` 计算后从不被读取 → 1,000,000 次迭代循环在 ART 优化编译器下为死代码 → 被 DCE → `endTime - startTime ≈ 0` → `checkTimingAttack` 恒返回 false，即使单步调试器附加。PR #108 还把 `now: () -> Long` 可注入时钟参数改回直接调用 `System.currentTimeMillis()`，使现有注入时钟的测试无法编译。删除的注释明确记录此为 "PR #95 的回归教训"。
 - **触发条件**: 调试器单步执行 / 软件断点 → 工作负载循环被 DCE 删除 → `checkTimingAttack` 恒返回 false → 反调试检测形同虚设。
@@ -1532,7 +1544,11 @@
 - **关联测试**: `DebugDetectorTest.checkTimingAttack_executesObservableWorkload`、`checkTimingAttack_returnsTrue_whenClockSimulatesDebuggerSlowdown` 等
 
 ### REV59-A4: DebugDetector readProcessOutput 在调用线程 readLine() 导致超时不可达 + 僵尸进程 [已修复]
-- **严重程度**: 中（挂起/ANR）
+- **提交哈希**: `604f2e4`
+- **修复提交**: `604f2e4`（当前修复）
+- **修复状态**: 已修复
+- **修复难度**: 中
+- **风险**: 中（挂起/ANR）
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/security/DebugDetector.kt` (`readPropertyViaProcess` / `readProcessOutput`)
 - **问题描述**: PR #108 重写 `readPropertyViaProcess`/`readProcessOutput`，使 `reader.readLine()` 在调用线程、`process.waitFor(timeout)` 之前执行。若 `getprop` 子进程不输出换行且不退出（Frida 钩 fork/exec，或系统卡死），`readLine()` 无限阻塞——timeout 永远不可达。`finally` 块还丢弃了 `destroyForcibly().waitFor(...)` 回收，有僵尸进程风险。旧代码在独立线程中读取并用 `process.waitFor(timeout)` 约束整体执行。
 - **触发条件**: getprop 子进程卡住且不输出换行 → `readLine()` 无限阻塞 → 调用线程挂起 → ANR；finally 未 `destroyForcibly().waitFor()` → 僵尸进程。
@@ -1540,14 +1556,22 @@
 - **关联测试**: `DebugDetectorTest.readProcessOutput_returnsNull_whenProcessHangsWithoutOutput`
 
 ### REV59-A5: VpnPacketProcessor calculateTcpChecksum 奇数段长读取段外字节污染校验和 [已修复]
-- **严重程度**: 中（数据正确性）
+- **提交哈希**: `604f2e4`
+- **修复提交**: `604f2e4`（当前修复）
+- **修复状态**: 已修复
+- **修复难度**: 中
+- **风险**: 中（数据正确性）
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnPacketProcessor.kt` (`calculateTcpChecksum` 的 TCP 头+payload 循环)
 - **问题描述**: PR #108 重写循环为 `for (i in ipHeaderLen until ipHeaderLen + tcpHeaderLen + payloadLen step 2)` 并用 `i + 1 < buffer.size`（缓冲区边界）守卫读取。当 `tcpHeaderLen + payloadLen` 为奇数且 `buffer.size > segment_end` 时，最后一次迭代读取 `buffer[i]` 与 `buffer[i+1]`，其中 `i+1` 位于 TCP 段之外一个字节——用段外字节污染校验和，而非零填充。旧代码用 `val endLimit = min(ipHeaderLen + tcpHeaderLen + payloadLen, buffer.size)` 作为循环上界，并用单独的 `if (i < endLimit) { sum += (buffer[i].toInt() and 0xFF) shl 8 }` 处理尾部奇数字节（零填充）。
 - **触发条件**: TCP 段长（tcpHeaderLen + payloadLen）为奇数且 buffer.size > segment_end → 最后一次迭代读取段外字节 → 校验和错误 → 接收方丢弃合法回包或接受错误包。
 - **修复方式**: 恢复 `val endLimit = min(ipHeaderLen + tcpHeaderLen + payloadLen, buffer.size)` 上界、`while (i < endLimit - 1)` 成对读取循环、以及 `if (i < endLimit) { sum += (buffer[i].toInt() and 0xFF) shl 8 }` 奇数字节零填充处理。`kotlin.math.min` 导入已存在。
 
 ### REV59-C1: server/api/main.go CORS AllowOrigins 硬编码 localhost，生产部署 403 [已修复]
-- **严重程度**: 中（配置回归）
+- **提交哈希**: `604f2e4`
+- **修复提交**: `604f2e4`（当前修复）
+- **修复状态**: 已修复
+- **修复难度**: 中
+- **风险**: 中（配置回归）
 - **位置**: `server/api/main.go` (`main()` 中的 CORS 配置块)
 - **问题描述**: PR #125（合入 PR #108 分支）添加了 env-var 驱动的 CORS origins（`buildCorsConfig(os.Getenv("API_ALLOWED_ORIGINS"))` 与 `parseCORSAllowedOrigins` helper）。PR #108 分支上的后续提交将其回退为硬编码 `corsConfig.AllowOrigins = []string{"http://localhost:3000", "http://localhost:8080"}` 并附 `// TODO: Read allowed origins from environment variable in production` 注释。生产部署使用真实前端域名时，所有 credentialed 跨域请求收到 403，无 env 旋钮可修复。gin-contrib/cors@v1.7.7 对不在 allowlist 的 Origin 调用 `c.AbortWithStatus(http.StatusForbidden)`。
 - **触发条件**: 生产部署 + 非 localhost 前端域名 → 所有 credentialed 跨域请求 403。
@@ -1555,7 +1579,11 @@
 - **关联测试**: `main_test.go` 的 `TestParseCORSAllowedOrigins_*`、`TestBuildCorsConfig_*`、`TestCORSIntegration_*`
 
 ### REV59-T1: .github/workflows/ci.yml 硬编码 go-version '1.21' 无法构建 go 1.25/1.22 模块 [已修复]
-- **严重程度**: 高（CI 构建中断）
+- **提交哈希**: `604f2e4`
+- **修复提交**: `604f2e4`（当前修复）
+- **修复状态**: 已修复
+- **修复难度**: 中
+- **风险**: 高（CI 构建中断）
 - **位置**: `.github/workflows/ci.yml` (`go-build` job 的 `Set up Go` step)
 - **问题描述**: PR #108 删除了 `.github/workflows/go-ci.yml`（使用 `go-version-file: ${{ matrix.path }}/go.mod`，按模块正确）并新增 `.github/workflows/ci.yml` 硬编码 `go-version: '1.21'`。但 `server/api/go.mod` 要求 `go 1.25.0`，`server/socks5-proxy`/`server/tunnel` 要求 `go 1.22`。自 Go 1.21 起，`go` 指令是硬性最低版本——Go 1.21 无法构建这些模块。这中断了 PR #108 本身修改组件的 CI。
 - **触发条件**: CI 运行 `go build ./...` 于 `server/api` → Go 1.21 拒绝 `go 1.25.0` 模块 → 构建失败。
