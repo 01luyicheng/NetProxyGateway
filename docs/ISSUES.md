@@ -2194,3 +2194,32 @@
   - `TestUpdateDeviceStatus_FutureLastSeenDoesNotPermanentlyLockRow`：核心回归——投毒尝试被 400 拒绝后，合法上报正常生效，状态正确为 `online`。
   - `TestUpdateDeviceStatus_AcceptsLastSeenWithinFutureTolerance`：容差内（+1s）的未来时间戳被接受且原值保留，证明不误伤合法钟差。
 - **关联**: 本缺陷由 PR #112 引入（即 REV33 优化合入时引入）。修正 REV33"修复方式"中"`updateDeviceStatus` 接受请求体中的可选 `last_seen`"未提及上界校验与投毒风险的疏漏。修复分支 `fix/device-status-lastseen-future-cap-rev55`，基于 PR #112 分支。
+
+### REV58: PR #112 误删 `ratelimit.cleanupLoop` 的 G1 守卫与回归测试，重新引入 issue #90 的 100% CPU 忙等 + goroutine 泄漏 [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 低（纯回退：恢复 8 行 `select` 守卫 + 恢复被删的回归测试）
+- **位置**: `server/shared/ratelimit/ratelimit.go` (`(*RateLimiter).cleanupLoop`)、`server/shared/ratelimit/ratelimit_test.go` (`TestCleanupLoopStopsOnStop`)
+- **问题描述**: PR #112（"优化 compareAndUpdatePairingSessionDB 性能"）在不相关的 `server/shared/ratelimit/ratelimit.go` 中删除了 `cleanupLoop` 外层 `for` 循环里的 G1 守卫：
+  ```go
+  // G1 (issue #90): if Stop() closed stopCh during the inner func,
+  // exit the outer loop. Otherwise the next iteration creates a new
+  // ticker then immediately reads from the closed stopCh and returns
+  // from the inner func, spinning forever (100% CPU + goroutine leak).
+  select {
+  case <-rl.stopCh:
+      return
+  default:
+  }
+  ```
+  同时删除了专门保护此修复的回归测试 `TestCleanupLoopStopsOnStop` 及其 `runtime`/`strings` 导入。`Stop()` 在该分支仍是 `close(rl.stopCh)`（非幂等，未配 `sync.Once`）。
+- **触发场景**: 任何对 `(*RateLimiter).Stop()` 的调用——`Server.Close()`（API 优雅关闭，`server/api/main.go`）、`server/socks5-proxy/main.go` 信号处理器、以及 `server/api/main_test.go` 每个测试的 `t.Cleanup` 都会触发。`close(stopCh)` 后内层 `select` 的 `<-rl.stopCh` 立即就绪 → 内层 `func()` 返回（非 panic，故 `restartCount` 不递增）→ 外层 `for` 重新迭代 → 新建 ticker → 内层 `select` 又立即读已关闭的 `stopCh` 返回 → `defer ticker.Stop()` → 外层再迭代……形成**无 sleep 的紧密忙等循环**，单 goroutine 永久占用一核 100% CPU 且永不退出。
+- **影响范围**:
+  - **资源泄漏 + 性能**: 每个 `RateLimiter` 实例在 `Stop()` 后泄漏一个永久忙等的 goroutine，占满一个 CPU 核。测试进程中，被泄漏的 goroutine 会污染后续所有测试的 CPU 资源，导致时序敏感测试 flaky。
+  - **生产关闭**: 优雅关闭期间（等待 in-flight 请求排空、k8s drain、嵌入式/reload 场景）持续烧 CPU。
+  - **可观测性盲区**: `Server.Close()` 本身正常返回，泄漏的 goroutine 不报错、不打日志，难以发现。
+- **风险**: **高**。资源泄漏 + 100% CPU；触发面广（每次关闭即触发）；无自愈。
+- **验证**: 独立 subagent 用 `runtime.Stack`/`runtime.NumGoroutine` 经验复现——有守卫时 goroutine <5ms 退出；无守卫时 2s/4s 后仍存活且 `NumGoroutine` 不降。恢复守卫后 `TestCleanupLoopStopsOnStop` 通过；临时移除守卫后该测试失败（"cleanupLoop goroutine still running 2s after Stop()"）。
+- **修复方式**: 恢复 G1 `select` 守卫（8 行，含注释）至 `cleanupLoop` 外层 `for` 循环中内层 `func()` 之后、`restartCount` 检查之前；恢复 `TestCleanupLoopStopsOnStop` 回归测试及 `runtime`/`strings` 导入。纯回退，不引入新行为。
+- **测试覆盖**:
+  - `TestCleanupLoopStopsOnStop`：`Stop()` 后 2s 内 `cleanupLoop` goroutine 必须退出；有守卫通过，无守卫失败。
+- **关联**: 本缺陷由 PR #112 引入（与该 PR 的"预编译语句优化"目标无关，疑为误操作/坏 rebase）。issue #90 G1 的原始修复（PR #122）与回归测试被一并删除。修复分支 `fix/ratelimit-cleanuploop-g1-regression-rev58`，基于 PR #112 分支。
