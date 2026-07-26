@@ -1,0 +1,3 @@
+## 2024-10-24 - Smooth Status Transitions
+**Learning:** For Jetpack Compose micro-UX improvements, prefer smooth transitions like `animateColorAsState` and `Crossfade` over abrupt state swaps. When using `Crossfade`, avoid computing derived state outside the animation lambda. Always compute derived properties (like the target icon) *inside* the lambda using the passed `targetState` parameter to prevent immediate outer-scope state updates from breaking the fade-out animation.
+**Action:** Use `animateColorAsState` for status card background and content colors, and `Crossfade` for swapping status icons and text inside `ConnectionStatusCard` and `VpnStatusCard`.
