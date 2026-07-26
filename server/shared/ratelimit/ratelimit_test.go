@@ -3,6 +3,7 @@ package ratelimit
 import (
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -198,6 +199,9 @@ func TestCleanupLoopStopsOnStop(t *testing.T) {
 		StaleAttemptTTL: 30 * time.Minute,
 	}
 	rl := NewRateLimiter(cfg)
+	var once sync.Once
+	stop := func() { once.Do(rl.Stop) }
+	t.Cleanup(stop)
 
 	// Wait for cleanupLoop goroutine to start so we can later verify it exits.
 	// Without this, the test could race the goroutine's creation and pass
@@ -213,7 +217,7 @@ func TestCleanupLoopStopsOnStop(t *testing.T) {
 		t.Fatal("cleanupLoop goroutine did not start within 500ms — cannot verify regression")
 	}
 
-	rl.Stop()
+	stop()
 
 	// After Stop(), cleanupLoop should exit promptly. Poll all goroutine
 	// stacks for up to 2s; the fixed implementation exits on the first
