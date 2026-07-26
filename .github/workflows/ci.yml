@@ -124,7 +124,12 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          # Use per-module go.mod so each component builds with the Go version
+          # it requires (server/api needs go 1.25.0; socks5-proxy/tunnel need
+          # go 1.22). Hardcoding go-version: '1.21' breaks CI because since
+          # Go 1.21 the `go` directive is a hard minimum. REV59 / T1.
+          go-version-file: server/${{ matrix.component }}/go.mod
+          cache: false
 
       - name: Cache Go modules
         uses: actions/cache@v4

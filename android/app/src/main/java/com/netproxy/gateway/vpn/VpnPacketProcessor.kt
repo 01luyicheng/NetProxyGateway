@@ -241,12 +241,20 @@ internal class VpnPacketProcessor {
         sum += tcpHeaderLen + payloadLen
 
         // TCP头和payload
-        for (i in ipHeaderLen until ipHeaderLen + tcpHeaderLen + payloadLen step 2) {
-            if (i + 1 < buffer.size) {
-                sum += ((buffer[i].toInt() and 0xFF) shl 8) or (buffer[i + 1].toInt() and 0xFF)
-            } else if (i < buffer.size) {
-                sum += (buffer[i].toInt() and 0xFF) shl 8
-            }
+        // 使用 endLimit = min(ipHeaderLen + tcpHeaderLen + payloadLen, buffer.size) 作为循环上界，
+        // 确保不会读取 TCP 段之外的字节。当 tcpHeaderLen + payloadLen 为奇数时，
+        // 最后一个字节通过零填充（shl 8）单独处理，而不是与段外的下一字节组合。
+        // （REV59 修复：PR #108 重写为 `for (i in ... step 2)` + `i + 1 < buffer.size` 缓冲区边界判断，
+        // 当段长为奇数且 buffer.size > segment_end 时，最后一次迭代会读取 buffer[i+1]，
+        // 该字节位于 TCP 段之外，会污染校验和。）
+        val endLimit = min(ipHeaderLen + tcpHeaderLen + payloadLen, buffer.size)
+        var i = ipHeaderLen
+        while (i < endLimit - 1) {
+            sum += ((buffer[i].toInt() and 0xFF) shl 8) or (buffer[i + 1].toInt() and 0xFF)
+            i += 2
+        }
+        if (i < endLimit) {
+            sum += (buffer[i].toInt() and 0xFF) shl 8
         }
 
         while (sum shr 16 != 0) {
