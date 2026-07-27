@@ -1568,7 +1568,10 @@
 > **审查范围**：`fix/pr108-missing-guards-rev60` 分支上 REV59 提交 (`604f2e4`) 之后的工作区变更。
 
 ### REV60-A1: createSessionToken 丢失过期检查与乐观锁 [已修复]
-- **严重程度**: 高（安全 / 数据完整性）
+- **风险**: 高（安全 / 数据完整性）
+- **修复难度**: 中
+- **修复状态**: 已修复
+- **提交哈希**: 28e87e7ad186ccec51ea1a411d903d08ba138c36
 - **位置**: `server/api/main.go` (`createSessionToken` handler)
 - **问题描述**: PR #108 重构 `createSessionToken` 时误删了两段关键防护：
   1. **过期检查**：`if time.Now().After(session.ExpiresAt)` 守卫被删除。后台清理 goroutine (`cleanupExpiredSessions`) 每 5 分钟才运行一次，在两次清理之间，一个 `status="connected"` 但 `ExpiresAt` 已过的会话仍可签发有效 token，绕过 15 分钟配对 TTL。
@@ -1580,7 +1583,10 @@
 - **关联测试**: `TestCreateSessionToken_ExpiredConnectedSessionReturns400`、`TestCreateSessionToken_ValidSessionIssuesToken`、`TestCreateSessionToken_ConcurrentModificationReturns409`、`TestUpdatePairingSession_ConcurrentModificationReturns409`
 
 ### REV60-A2: upsertDeviceStatusDB 丢失 last_seen 守卫 + 时间戳精度降级 [已修复]
-- **严重程度**: 高（数据完整性）
+- **风险**: 高（数据完整性）
+- **修复难度**: 中
+- **修复状态**: 已修复
+- **提交哈希**: 28e87e7ad186ccec51ea1a411d903d08ba138c36
 - **位置**: `server/api/main.go` (`upsertDeviceStatusDB`)、`server/tunnel/main.go` (`notifyDeviceStatus` / `Register` / `Unregister` / `cleanupDeadTunnelsOnce`)
 - **问题描述**: PR #108 误删了 `upsertDeviceStatusDB` 中 `ON CONFLICT DO UPDATE` 的 `WHERE excluded.last_seen > device_status.last_seen` 守卫，并将 `last_seen` 从毫秒 (`UnixMilli()`) 降级为秒 (`Unix()`)。同时 `notifyDeviceStatus` 不再传递 `last_seen` 时间戳，API 端回退为接收时间 `time.Now()` 而非事件时间。
   - **守卫缺失**：延迟到达的 offline 通知（网络抖动、重试延迟）可覆盖更新的 online 状态，导致设备在 UI 上显示为离线尽管实际已在线。
@@ -1596,7 +1602,10 @@
 - **关联测试**: `TestUpsertDeviceStatusDB_RejectsStaleLastSeen`、`TestUpsertDeviceStatusDB_AcceptsNewerLastSeen`
 
 ### REV60-A3: GET /api/pair/:code 丢失限流中间件 [已修复]
-- **严重程度**: 高（安全，暴力破解）
+- **风险**: 高（安全，暴力破解）
+- **修复难度**: 中
+- **修复状态**: 已修复
+- **提交哈希**: 28e87e7ad186ccec51ea1a411d903d08ba138c36
 - **位置**: `server/api/main.go` (`main()` 路由注册)
 - **问题描述**: PR #108 重构路由注册时，`GET /pair/:code` 路由丢失了 `rateLimitMiddleware()` 中间件。配对码为 6 位数字（10^6 种组合），无限流保护下攻击者可从单个 IP 无限速枚举配对码。其他敏感端点（`POST /pair`、`PUT /pair/:code`）保留了基于 IP 的限流，但 `GET /pair/:code`（用于轮询配对状态）暴露了无限制的 code 枚举入口。
 - **触发条件**: 攻击者从单个 IP 对 `GET /api/pair/:code` 发送大量请求枚举 6 位配对码 → 无 429 限制 → 在合理时间内猜出有效配对码 → 未授权签发 session token。
