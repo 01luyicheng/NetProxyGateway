@@ -39,7 +39,7 @@ func TestNotifyDeviceStatusAddsInternalAPIKeyHeader(t *testing.T) {
 	})
 
 	manager.wg.Add(1)
-	manager.notifyDeviceStatus("device-123", "online", "")
+	manager.notifyDeviceStatus("device-123", "online", "", time.Now().UnixMilli())
 
 	waitDone := make(chan struct{})
 	go func() {
@@ -84,7 +84,7 @@ func TestNotifyDeviceStatusRetriesAndEventuallySucceeds(t *testing.T) {
 
 	manager := NewTunnelManager(&Config{APIEndpoint: server.URL})
 	manager.wg.Add(1)
-	manager.notifyDeviceStatus("device-123", "online", "")
+	manager.notifyDeviceStatus("device-123", "online", "", time.Now().UnixMilli())
 
 	for i := 0; i < 2; i++ {
 		select {
@@ -128,7 +128,7 @@ func TestNotifyDeviceStatusDoesNotRetryOnBadRequest(t *testing.T) {
 
 	manager := NewTunnelManager(&Config{APIEndpoint: server.URL})
 	manager.wg.Add(1)
-	manager.notifyDeviceStatus("device-123", "online", "")
+	manager.notifyDeviceStatus("device-123", "online", "", time.Now().UnixMilli())
 
 	select {
 	case <-requestSignal:
@@ -598,7 +598,7 @@ func TestNotifyDeviceStatusExhaustsRetries(t *testing.T) {
 
 	manager := NewTunnelManager(&Config{APIEndpoint: server.URL})
 	manager.wg.Add(1)
-	manager.notifyDeviceStatus("device-123", "online", "")
+	manager.notifyDeviceStatus("device-123", "online", "", time.Now().UnixMilli())
 
 	for i := 0; i < 3; i++ {
 		select {
@@ -649,7 +649,7 @@ func TestNotifyDeviceStatusRetriesOnTooManyRequests(t *testing.T) {
 
 	manager := NewTunnelManager(&Config{APIEndpoint: server.URL})
 	manager.wg.Add(1)
-	manager.notifyDeviceStatus("device-123", "online", "")
+	manager.notifyDeviceStatus("device-123", "online", "", time.Now().UnixMilli())
 
 	for i := 0; i < 2; i++ {
 		select {
@@ -808,7 +808,7 @@ func TestNotifyDeviceStatusNoRaceWithStop(t *testing.T) {
 	go func() {
 		manager.wg.Add(1)
 		close(started)
-		manager.notifyDeviceStatus("device-123", "online", "")
+		manager.notifyDeviceStatus("device-123", "online", "", time.Now().UnixMilli())
 	}()
 
 	<-started
@@ -860,7 +860,7 @@ func TestNotifyDeviceStatusAfterStopIsIgnored(t *testing.T) {
 	manager.Stop()
 
 	manager.wg.Add(1)
-	manager.notifyDeviceStatus("device-123", "online", "")
+	manager.notifyDeviceStatus("device-123", "online", "", time.Now().UnixMilli())
 
 	time.Sleep(200 * time.Millisecond)
 

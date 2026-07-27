@@ -287,6 +287,13 @@ func (m *TunnelManager) Register(deviceID string, conn *websocket.Conn) *TunnelC
 		oldTunnel.Close()
 	}
 
+	// Capture the online event timestamp at the registration decision instant so
+	// any concurrent offline notification whose last_seen was captured earlier
+	// cannot be newer than this online notification (REV33/REV51). Captured in
+	// the registering goroutine (not the notify goroutine) to avoid scheduler
+	// delay shifting the timestamp forward.
+	lastSeen := time.Now().UnixMilli()
+
 	log.Printf("Tunnel registered for device: %s", deviceID)
 
 	// Check stopped before wg.Add(1) to prevent WaitGroup reuse panic
@@ -298,7 +305,7 @@ func (m *TunnelManager) Register(deviceID string, conn *websocket.Conn) *TunnelC
 	}
 	m.wg.Add(1)
 	m.stopMu.Unlock()
-	go m.notifyDeviceStatus(deviceID, "online", "")
+	go m.notifyDeviceStatus(deviceID, "online", "", lastSeen)
 
 	return tunnel
 }
@@ -326,6 +333,23 @@ func (m *TunnelManager) Unregister(deviceID string, tunnel *TunnelConn) {
 	// Close() may block if sendLoop is holding connMu for a WriteMessage call.
 	closedTunnel.Close()
 
+	// REV32: re-check under RLock whether a replacement tunnel registered while
+	// we were closing this one. If so, the device is back online and we must not
+	// send a stale offline notification that could overwrite the fresh online
+	// state at the API.
+	m.mu.RLock()
+	if _, replaced := m.tunnels[deviceID]; replaced {
+		m.mu.RUnlock()
+		log.Printf("Tunnel unregistered for device: %s (replacement already registered, skipping offline notification)", deviceID)
+		return
+	}
+	// REV51: capture last_seen under the lock so any subsequent Register (which
+	// acquires WLock) captures a strictly newer online last_seen, guaranteeing
+	// the API's strict `last_seen >` guard rejects this offline notification if
+	// it arrives after the newer online notification.
+	lastSeen := time.Now().UnixMilli()
+	m.mu.RUnlock()
+
 	log.Printf("Tunnel unregistered for device: %s", deviceID)
 
 	// Check stopped before wg.Add(1) to prevent WaitGroup reuse panic
@@ -337,7 +361,7 @@ func (m *TunnelManager) Unregister(deviceID string, tunnel *TunnelConn) {
 	}
 	m.wg.Add(1)
 	m.stopMu.Unlock()
-	go m.notifyDeviceStatus(deviceID, "offline", "")
+	go m.notifyDeviceStatus(deviceID, "offline", "", lastSeen)
 }
 
 // Get retrieves a tunnel by device ID.
@@ -348,8 +372,12 @@ func (m *TunnelManager) Get(deviceID string) (*TunnelConn, bool) {
 	return tunnel, ok
 }
 
-// notifyDeviceStatus notifies the API of a device status change.
-func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string) {
+// notifyDeviceStatus notifies the API of a device status change. lastSeen is
+// the millisecond Unix timestamp captured at the event-decision instant by the
+// caller; it must not be re-captured here, otherwise scheduler delay can make
+// an offline notification appear newer than a concurrent online notification
+// and defeat the API's last_seen guard (REV51).
+func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string, lastSeen int64) {
 	m.stopMu.Lock()
 	if m.stopped {
 		m.stopMu.Unlock()
@@ -359,10 +387,11 @@ func (m *TunnelManager) notifyDeviceStatus(deviceID, status, tunnelAddr string) 
 	m.stopMu.Unlock()
 
 	defer m.wg.Done()
-	payload := map[string]string{
+	payload := map[string]any{
 		"device_id":   deviceID,
 		"status":      status,
 		"tunnel_addr": tunnelAddr,
+		"last_seen":   lastSeen,
 	}
 
 	data, err := json.Marshal(payload)
@@ -503,8 +532,22 @@ func (m *TunnelManager) cleanupDeadTunnelsOnce() {
 
 	for i, tunnel := range deadTunnels {
 		tunnel.Close()
+
+		// REV32: re-check under RLock whether a replacement tunnel registered
+		// while we were closing this dead one. If so, the device is back online
+		// and we must not send a stale offline notification.
+		m.mu.RLock()
+		if _, replaced := m.tunnels[deadIDs[i]]; replaced {
+			m.mu.RUnlock()
+			continue
+		}
+		// REV51: capture last_seen under the lock so a subsequent Register (which
+		// acquires WLock) captures a strictly newer online last_seen.
+		lastSeen := time.Now().UnixMilli()
+		m.mu.RUnlock()
+
 		m.wg.Add(1)
-		go m.notifyDeviceStatus(deadIDs[i], "offline", "")
+		go m.notifyDeviceStatus(deadIDs[i], "offline", "", lastSeen)
 	}
 }
 

@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -1029,10 +1028,17 @@ func TestCompareAndUpdatePairingSessionDB_StatusChangedConcurrently(t *testing.T
 }
 
 // TestUpdatePairingSession_ConcurrentModificationReturns409 exercises the full
-// HTTP handler path (not just the DB layer) to verify that when two requests
-// race to claim the same pending pairing session, exactly one succeeds and
-// the loser observes a 409 Conflict rather than silently overwriting the
-// winner's claim (the TOCTOU race described in REV42).
+// HTTP handler path (not just the DB layer) to verify that when the session is
+// modified between the handler's read and its conditional UPDATE, the handler
+// returns 409 Conflict rather than silently overwriting the winner's claim
+// (the TOCTOU race described in REV42).
+//
+// The test uses preCompareUpdateHook to deterministically inject a concurrent
+// modification into the TOCTOU window (between getPairingSessionDB and
+// compareAndUpdatePairingSessionDB). This replaces the previous probabilistic
+// goroutine-race approach, which was flaky under -race with the full test
+// suite because the goroutine scheduler would not reliably interleave the two
+// handlers' read→update windows under heavy load.
 func TestUpdatePairingSession_ConcurrentModificationReturns409(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -1053,41 +1059,61 @@ func TestUpdatePairingSession_ConcurrentModificationReturns409(t *testing.T) {
 		return recorder.Code
 	}
 
-	const trials = 30
-	sawConflict := false
-
-	for i := 0; i < trials; i++ {
-		pairingCode := fmt.Sprintf("race-%03d", i)
-		insertPendingPairingSession(t, server, pairingCode, "device-race")
-
-		var wg sync.WaitGroup
-		statusCodes := make([]int, 2)
-		wg.Add(2)
-		go func() { defer wg.Done(); statusCodes[0] = sendConnectRequest(pairingCode, "engineer-A") }()
-		go func() { defer wg.Done(); statusCodes[1] = sendConnectRequest(pairingCode, "engineer-B") }()
-		wg.Wait()
-
-		successCount := 0
-		for _, statusCode := range statusCodes {
-			switch statusCode {
-			case http.StatusOK:
-				successCount++
-			case http.StatusConflict:
-				sawConflict = true
-			case http.StatusForbidden:
-				// Acceptable: this request only read the session after the
-				// other had already committed its update.
-			default:
-				t.Fatalf("trial %d: unexpected status code %d (codes=%v)", i, statusCode, statusCodes)
-			}
-		}
-		if successCount != 1 {
-			t.Fatalf("trial %d: expected exactly one concurrent request to succeed, got %d (codes=%v)", i, successCount, statusCodes)
-		}
+	// Install a hook that simulates a concurrent modification: right before
+	// the handler's conditional UPDATE, another writer claims the session
+	// (status → connected, engineer_id → engineer-B). The handler's
+	// conditional UPDATE (WHERE status='pending' AND engineer_id='') will
+	// then match 0 rows → ErrConcurrentModification → 409.
+	server.preCompareUpdateHook = func(code string) {
+		_, _ = server.db.Exec(
+			`UPDATE pairing_sessions SET status = 'connected', engineer_id = 'engineer-B', used = 1 WHERE code = ?`,
+			code,
+		)
 	}
 
-	if !sawConflict {
-		t.Fatalf("expected at least one of %d trials to trigger a 409 Conflict from concurrent modification", trials)
+	pairingCode := "CONFLICT-1"
+	insertPendingPairingSession(t, server, pairingCode, "device-race")
+
+	statusCode := sendConnectRequest(pairingCode, "engineer-A")
+	if statusCode != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict when session is concurrently modified between read and update, got %d", statusCode)
+	}
+
+	// Verify the winner's claim was NOT overwritten by the loser.
+	current, err := server.getPairingSessionDB(pairingCode)
+	if err != nil {
+		t.Fatalf("failed to get session after conflict: %v", err)
+	}
+	if current.Status != "connected" || current.EngineerID != "engineer-B" {
+		t.Fatalf("session was overwritten by losing request: status=%q engineer_id=%q", current.Status, current.EngineerID)
+	}
+}
+
+// TestUpdatePairingSession_NoConflictReturns200 verifies that when no
+// concurrent modification occurs, the handler succeeds normally (the hook is
+// not installed / does not modify the session).
+func TestUpdatePairingSession_NoConflictReturns200(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+
+	router := gin.New()
+	router.PUT("/pair/:code", func(c *gin.Context) {
+		c.Set("engineer_id", c.GetHeader("X-Engineer-ID"))
+		server.updatePairingSession(c)
+	})
+
+	pairingCode := "OK-1"
+	insertPendingPairingSession(t, server, pairingCode, "device-ok")
+
+	req := httptest.NewRequest(http.MethodPut, "/pair/"+pairingCode, strings.NewReader(`{"status":"connected"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Engineer-ID", "engineer-A")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK when no concurrent modification, got %d", recorder.Code)
 	}
 }
 
@@ -1271,5 +1297,291 @@ func TestCORSIntegration_AllowedOriginPreflightReturns204(t *testing.T) {
 	}
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
 		t.Fatalf("ACAO header = %q, want %q", got, "https://app.example.com")
+	}
+}
+
+// --- createSessionToken / last_seen / rate-limit regression tests (REV60) ---
+//
+// These tests pin the three high-impact guards that were accidentally dropped
+// from PR #108 and restored on the fix branch:
+//   1. createSessionToken must reject an already-expired "connected" session
+//      with 400 instead of issuing a token that bypasses the pairing TTL.
+//   2. createSessionToken must re-verify the session with optimistic locking
+//      before issuing a token, returning 409 on concurrent modification.
+//   3. GET /api/pair/:code must enforce per-identity rate limiting so a brute
+//      force on pairing codes is blocked after MaxFailedAttempts.
+//   4. upsertDeviceStatusDB must reject a status update whose last_seen is
+//      older than the stored value, so a delayed/offline notification cannot
+//      overwrite a fresher online state.
+// See docs/ISSUES.md (REV60 section).
+
+// insertConnectedSession creates a pairing session row already in the
+// "connected" state for the given engineer, with the supplied ExpiresAt. It is
+// used by the createSessionToken regression tests below.
+func insertConnectedSession(t *testing.T, server *Server, code, deviceID, engineerID string, expiresAt time.Time) {
+	t.Helper()
+
+	session := &PairingSession{
+		Code:       code,
+		DeviceID:   deviceID,
+		Status:     "connected",
+		EngineerID: engineerID,
+		CreatedAt:  time.Now().Add(-PairingCodeTTL),
+		ExpiresAt:  expiresAt,
+		Used:       true,
+	}
+	if err := server.createPairingSessionDB(session); err != nil {
+		t.Fatalf("failed to insert connected session %s: %v", code, err)
+	}
+}
+
+func newCreateSessionTokenRouter(server *Server) *gin.Engine {
+	router := gin.New()
+	router.POST("/session/token", func(c *gin.Context) {
+		c.Set("engineer_id", c.GetHeader("X-Engineer-ID"))
+		server.createSessionToken(c)
+	})
+	return router
+}
+
+func runCreateSessionTokenRequest(router *gin.Engine, code, engineerID string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/session/token", strings.NewReader(fmt.Sprintf(`{"code":%q}`, code)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Engineer-ID", engineerID)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+	return recorder
+}
+
+// TestCreateSessionToken_ExpiredConnectedSessionReturns400 verifies that a
+// session whose ExpiresAt has already passed but whose status is still
+// "connected" (not yet swept by cleanupExpiredSessions) is rejected with 400
+// ErrSessionExpired. Without the restored guard, createSessionToken would
+// issue a valid token for a session past its pairing TTL.
+func TestCreateSessionToken_ExpiredConnectedSessionReturns400(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	insertConnectedSession(t, server, "EXP400", "device-1", "engineer-A", time.Now().Add(-5*time.Minute))
+
+	recorder := runCreateSessionTokenRequest(newCreateSessionTokenRouter(server), "EXP400", "engineer-A")
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for expired connected session, got %d (body=%s)", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), ErrSessionExpired.Error()) {
+		t.Fatalf("expected error to contain %q, got %s", ErrSessionExpired.Error(), recorder.Body.String())
+	}
+
+	// Sanity: no session token should have been issued for the expired session.
+	tokens, err := server.db.Query(`SELECT COUNT(*) FROM session_tokens WHERE device_id = ?`, "device-1")
+	if err != nil {
+		t.Fatalf("failed to count tokens: %v", err)
+	}
+	defer tokens.Close()
+	count := 0
+	if tokens.Next() {
+		_ = tokens.Scan(&count)
+	}
+	if count != 0 {
+		t.Fatalf("expected no token issued for expired session, got %d", count)
+	}
+}
+
+// TestCreateSessionToken_ValidSessionIssuesToken verifies the happy path is
+// not broken by the restored expiry check and optimistic lock: a valid,
+// non-expired "connected" session issues a token with 200.
+func TestCreateSessionToken_ValidSessionIssuesToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	insertConnectedSession(t, server, "OK200", "device-2", "engineer-B", time.Now().Add(10*time.Minute))
+
+	recorder := runCreateSessionTokenRequest(newCreateSessionTokenRouter(server), "OK200", "engineer-B")
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for valid connected session, got %d (body=%s)", recorder.Code, recorder.Body.String())
+	}
+
+	var resp struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode token response: %v (body=%s)", err, recorder.Body.String())
+	}
+	if resp.Token == "" {
+		t.Fatal("expected non-empty token in response")
+	}
+}
+
+// TestCreateSessionToken_ConcurrentModificationReturns409 verifies that when a
+// "connected" session is concurrently modified (e.g. expired by a sweep or
+// transferred) between createSessionToken's read and its optimistic-lock
+// update, the handler returns 409 instead of issuing a token for the stale
+// session. This exercises the full HTTP path (not just the DB layer) and
+// mirrors the pattern of TestUpdatePairingSession_ConcurrentModificationReturns409.
+//
+// The test uses preCompareUpdateHook to deterministically inject a concurrent
+// modification into the TOCTOU window (between getPairingSessionDB and
+// compareAndUpdatePairingSessionDB). This replaces the previous probabilistic
+// goroutine-race approach, which was flaky under -race with the full test
+// suite because the goroutine scheduler would not reliably interleave the
+// flipper and the handler under heavy load.
+func TestCreateSessionToken_ConcurrentModificationReturns409(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	router := newCreateSessionTokenRouter(server)
+
+	// Install a hook that simulates a concurrent modification: right before
+	// the handler's conditional UPDATE, another writer changes the session
+	// status to "expired". The handler's conditional UPDATE
+	// (WHERE status='connected' AND engineer_id='engineer-A') will then
+	// match 0 rows → ErrConcurrentModification → 409, and no token is issued.
+	server.preCompareUpdateHook = func(code string) {
+		_, _ = server.db.Exec(
+			`UPDATE pairing_sessions SET status = 'expired' WHERE code = ?`,
+			code,
+		)
+	}
+
+	code := "C409-DET"
+	insertConnectedSession(t, server, code, "device-race", "engineer-A", time.Now().Add(10*time.Minute))
+
+	recorder := runCreateSessionTokenRequest(router, code, "engineer-A")
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict when session is concurrently modified between read and update, got %d (body=%s)", recorder.Code, recorder.Body.String())
+	}
+
+	// Verify no token was issued for the stale session.
+	var resp struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err == nil && resp.Token != "" {
+		t.Fatalf("expected no token in conflict response, got %q", resp.Token)
+	}
+
+	// Verify the concurrent modification was not overwritten.
+	current, err := server.getPairingSessionDB(code)
+	if err != nil {
+		t.Fatalf("failed to get session after conflict: %v", err)
+	}
+	if current.Status != "expired" {
+		t.Fatalf("session status was overwritten: got %q, want %q", current.Status, "expired")
+	}
+}
+
+// TestGetPairingSessionRateLimit_BlocksBruteForce verifies that GET
+// /api/pair/:code is protected by per-identity rate limiting. An attacker
+// guessing pairing codes from a single IP must be blocked with 429 after
+// MaxFailedAttempts, rather than being able to probe codes unboundedly.
+func TestGetPairingSessionRateLimit_BlocksBruteForce(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+
+	router := gin.New()
+	// Mirror the production route ordering: rate-limit middleware runs before
+	// the handler and (since no auth context is set here) keys on ClientIP.
+	router.GET("/pair/:code", server.rateLimitMiddleware(), server.getPairingSession)
+
+	// Issue MaxFailedAttempts requests for a non-existent code; each returns
+	// 404 but accumulates against the per-IP failure counter.
+	for i := 0; i < MaxFailedAttempts; i++ {
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/pair/000000", nil)
+		router.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("attempt %d: expected 404 for unknown code, got %d", i, recorder.Code)
+		}
+	}
+
+	// The next attempt from the same identity must be blocked.
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/pair/000000", nil)
+	router.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after %d failed attempts, got %d (body=%s)", MaxFailedAttempts, recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), ErrRateLimitExceeded.Error()) {
+		t.Fatalf("expected error to contain %q, got %s", ErrRateLimitExceeded.Error(), recorder.Body.String())
+	}
+}
+
+// TestUpsertDeviceStatusDB_RejectsStaleLastSeen verifies the last_seen guard:
+// a status update whose last_seen is older than the stored value must NOT
+// overwrite the fresher status. This prevents a delayed/reordered offline
+// notification from clobbering a newer online state (REV33 regression).
+func TestUpsertDeviceStatusDB_RejectsStaleLastSeen(t *testing.T) {
+	server := newPairingTestServer(t)
+
+	now := time.Now()
+	if err := server.upsertDeviceStatusDB(&DeviceStatus{
+		DeviceID:   "device-stale",
+		Status:     "online",
+		LastSeen:   now,
+		TunnelAddr: "online:1234",
+	}); err != nil {
+		t.Fatalf("failed to seed device status: %v", err)
+	}
+
+	// A stale notification with an older last_seen and a contradicting status.
+	stale := now.Add(-30 * time.Second)
+	if err := server.upsertDeviceStatusDB(&DeviceStatus{
+		DeviceID:   "device-stale",
+		Status:     "offline",
+		LastSeen:   stale,
+		TunnelAddr: "offline:5678",
+	}); err != nil {
+		t.Fatalf("upsert returned error: %v", err)
+	}
+
+	ds, err := server.getDeviceStatusDB("device-stale")
+	if err != nil || ds == nil {
+		t.Fatalf("failed to read back device status: %v", err)
+	}
+	if ds.Status != "online" {
+		t.Fatalf("stale last_seen overwrote status: got %q, want %q", ds.Status, "online")
+	}
+	if ds.TunnelAddr != "online:1234" {
+		t.Fatalf("stale last_seen overwrote tunnel_addr: got %q, want %q", ds.TunnelAddr, "online:1234")
+	}
+}
+
+// TestUpsertDeviceStatusDB_AcceptsNewerLastSeen verifies the complementary
+// side of the guard: an update with a strictly newer last_seen DOES overwrite
+// the stored status, so genuine state transitions are not silently dropped.
+func TestUpsertDeviceStatusDB_AcceptsNewerLastSeen(t *testing.T) {
+	server := newPairingTestServer(t)
+
+	now := time.Now()
+	if err := server.upsertDeviceStatusDB(&DeviceStatus{
+		DeviceID:   "device-new",
+		Status:     "offline",
+		LastSeen:   now,
+		TunnelAddr: "old:1234",
+	}); err != nil {
+		t.Fatalf("failed to seed device status: %v", err)
+	}
+
+	newer := now.Add(5 * time.Second)
+	if err := server.upsertDeviceStatusDB(&DeviceStatus{
+		DeviceID:   "device-new",
+		Status:     "online",
+		LastSeen:   newer,
+		TunnelAddr: "new:5678",
+	}); err != nil {
+		t.Fatalf("upsert returned error: %v", err)
+	}
+
+	ds, err := server.getDeviceStatusDB("device-new")
+	if err != nil || ds == nil {
+		t.Fatalf("failed to read back device status: %v", err)
+	}
+	if ds.Status != "online" {
+		t.Fatalf("newer last_seen did not update status: got %q, want %q", ds.Status, "online")
+	}
+	if ds.TunnelAddr != "new:5678" {
+		t.Fatalf("newer last_seen did not update tunnel_addr: got %q, want %q", ds.TunnelAddr, "new:5678")
 	}
 }

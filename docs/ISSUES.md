@@ -1561,3 +1561,49 @@
 - **触发条件**: CI 运行 `go build ./...` 于 `server/api` → Go 1.21 拒绝 `go 1.25.0` 模块 → 构建失败。
 - **修复方式**: 将 `go-version: '1.21'` 改为 `go-version-file: server/${{ matrix.component }}/go.mod`（匹配旧 go-ci.yml 的按模块模式），并加 `cache: false`（该 workflow 已有独立 `actions/cache@v4` step，避免双重缓存冲突）。
 
+## REV60: PR #108 误删的 server/api 与 server/tunnel 安全/正确性防护栏（REV59 遗漏项） [已修复]
+
+> 以下问题由多个 subagent 对过去 24 小时提交进行提交后正确性检查时发现。REV59 已修复 PR #108 引入的 Android 侧与 CI 回归，但遗漏了 server/api 与 server/tunnel 中三处同样被 PR #108 误删的高影响防护栏。本条目逐项记录回归与修复。
+>
+> **审查范围**：`fix/pr108-missing-guards-rev60` 分支上 REV59 提交 (`604f2e4`) 之后的工作区变更。
+
+### REV60-A1: createSessionToken 丢失过期检查与乐观锁 [已修复]
+- **严重程度**: 高（安全 / 数据完整性）
+- **位置**: `server/api/main.go` (`createSessionToken` handler)
+- **问题描述**: PR #108 重构 `createSessionToken` 时误删了两段关键防护：
+  1. **过期检查**：`if time.Now().After(session.ExpiresAt)` 守卫被删除。后台清理 goroutine (`cleanupExpiredSessions`) 每 5 分钟才运行一次，在两次清理之间，一个 `status="connected"` 但 `ExpiresAt` 已过的会话仍可签发有效 token，绕过 15 分钟配对 TTL。
+  2. **乐观锁**：`compareAndUpdatePairingSessionDB(session, expectedStatus, expectedEngineerID)` 调用被删除。这去除了读-写之间的 TOCTOU 防护——会话在 `getPairingSessionDB` 读取后、token 创建前被并发修改（如被清理 goroutine 标记为 expired，或被其他请求转移给别的工程师），handler 仍会基于陈旧状态签发 token。
+- **触发条件**:
+  - 过期检查缺失：配对会话过期后 0–5 分钟内（清理周期内），攻击者仍可用该 code 签发 token。
+  - 乐观锁缺失：两个并发 `createSessionToken` 请求竞争同一会话，或清理 goroutine 在读取与签发之间过期会话 → 为已过期/已转移的会话签发 token。
+- **修复方式**: 在 token 生成前恢复 `time.Now().After(session.ExpiresAt)` 过期检查（返回 400）；在 `createSessionTokenDB` 前恢复 `compareAndUpdatePairingSessionDB` 乐观锁调用（并发修改返回 409）。
+- **关联测试**: `TestCreateSessionToken_ExpiredConnectedSessionReturns400`、`TestCreateSessionToken_ValidSessionIssuesToken`、`TestCreateSessionToken_ConcurrentModificationReturns409`、`TestUpdatePairingSession_ConcurrentModificationReturns409`
+
+### REV60-A2: upsertDeviceStatusDB 丢失 last_seen 守卫 + 时间戳精度降级 [已修复]
+- **严重程度**: 高（数据完整性）
+- **位置**: `server/api/main.go` (`upsertDeviceStatusDB`)、`server/tunnel/main.go` (`notifyDeviceStatus` / `Register` / `Unregister` / `cleanupDeadTunnelsOnce`)
+- **问题描述**: PR #108 误删了 `upsertDeviceStatusDB` 中 `ON CONFLICT DO UPDATE` 的 `WHERE excluded.last_seen > device_status.last_seen` 守卫，并将 `last_seen` 从毫秒 (`UnixMilli()`) 降级为秒 (`Unix()`)。同时 `notifyDeviceStatus` 不再传递 `last_seen` 时间戳，API 端回退为接收时间 `time.Now()` 而非事件时间。
+  - **守卫缺失**：延迟到达的 offline 通知（网络抖动、重试延迟）可覆盖更新的 online 状态，导致设备在 UI 上显示为离线尽管实际已在线。
+  - **精度降级**：秒级精度下，同一秒内到达的 online→offline 通知无法可靠排序。
+  - **tunnel 侧**：`Unregister` 和 `cleanupDeadTunnelsOnce` 缺少 REV32 重检（关闭 tunnel 期间新 tunnel 注册则应跳过 offline 通知），且 `last_seen` 在通知 goroutine 中捕获而非在决策点捕获，调度延迟可使 offline 通知的 `last_seen` 晚于并发 online 通知。
+- **触发条件**: 设备快速断连重连 → 旧 offline 通知（延迟到达、`last_seen` 较旧）覆盖新 online 状态 → 设备状态在 UI 上错误显示为离线。
+- **修复方式**:
+  1. 恢复 `WHERE excluded.last_seen > device_status.last_seen` 守卫，`last_seen` 改回 `UnixMilli()`。
+  2. `getDeviceStatusDB` 添加向后兼容：legacy 秒级时间戳 (`< 1e12`) 自动 ×1000 转毫秒。
+  3. `notifyDeviceStatus` 签名添加 `lastSeen int64` 参数，由调用方在决策点（锁内）捕获。
+  4. `Register` / `Unregister` / `cleanupDeadTunnelsOnce` 恢复 REV32 重检并在锁内捕获 `lastSeen`。
+  5. `updateDeviceStatus` handler 从请求体读取 `last_seen`，回退为 `time.Now()`。
+- **关联测试**: `TestUpsertDeviceStatusDB_RejectsStaleLastSeen`、`TestUpsertDeviceStatusDB_AcceptsNewerLastSeen`
+
+### REV60-A3: GET /api/pair/:code 丢失限流中间件 [已修复]
+- **严重程度**: 高（安全，暴力破解）
+- **位置**: `server/api/main.go` (`main()` 路由注册)
+- **问题描述**: PR #108 重构路由注册时，`GET /pair/:code` 路由丢失了 `rateLimitMiddleware()` 中间件。配对码为 6 位数字（10^6 种组合），无限流保护下攻击者可从单个 IP 无限速枚举配对码。其他敏感端点（`POST /pair`、`PUT /pair/:code`）保留了基于 IP 的限流，但 `GET /pair/:code`（用于轮询配对状态）暴露了无限制的 code 枚举入口。
+- **触发条件**: 攻击者从单个 IP 对 `GET /api/pair/:code` 发送大量请求枚举 6 位配对码 → 无 429 限制 → 在合理时间内猜出有效配对码 → 未授权签发 session token。
+- **修复方式**:
+  1. 新增 `rateLimitKey(c)` 函数：优先使用认证身份（JWT `sub` 或 internal API key），回退到 `c.ClientIP()`。
+  2. 新增 `rateLimitMiddleware()` 中间件：调用 `s.rateLimiter.Allow(key)`，超限返回 429。
+  3. 路由注册改为 `api.GET("/pair/:code", server.internalOrUserAuthMiddleware(), server.rateLimitMiddleware(), server.getPairingSession)`。
+  4. `getPairingSession` handler 在会话找到（有效 code）时调用 `s.rateLimiter.Success(key)` 重置计数器，避免合法工程师轮询即将过期的会话时被错误封禁（REV34）。
+- **关联测试**: `TestGetPairingSessionRateLimit_BlocksBruteForce`
+
