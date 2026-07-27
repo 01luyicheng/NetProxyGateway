@@ -814,7 +814,7 @@ func rateLimitKey(c *gin.Context) string {
 func (s *Server) rateLimitMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		key := rateLimitKey(c)
-		if !s.rateLimiter.Allow(key) {
+		if s.rateLimiter.IsBlocked(key) {
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": ErrRateLimitExceeded.Error()})
 			return
 		}
@@ -893,6 +893,10 @@ func (s *Server) getPairingSession(c *gin.Context) {
 	}
 
 	if session == nil {
+		if !s.rateLimiter.Fail(rateLimitKey(c)) {
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": ErrRateLimitExceeded.Error()})
+			return
+		}
 		c.JSON(http.StatusNotFound, gin.H{"error": ErrFailedToFindSession.Error()})
 		return
 	}
@@ -902,7 +906,6 @@ func (s *Server) getPairingSession(c *gin.Context) {
 		// The session was found (valid code), so this is not a brute-force
 		// attempt. Reset the failure counter to avoid blocking engineers who
 		// poll an expiring session (REV34 rate-limit fix).
-		s.rateLimiter.Success(rateLimitKey(c))
 		if err := s.markSessionExpired(session, session.Status, session.EngineerID); err != nil {
 			if errors.Is(err, ErrConcurrentModification) {
 				// Session was modified concurrently; re-fetch to return current state
@@ -924,7 +927,6 @@ func (s *Server) getPairingSession(c *gin.Context) {
 
 	// Session found and valid: reset the failure counter so legitimate polling
 	// does not accumulate toward the brute-force block (REV34 rate-limit fix).
-	s.rateLimiter.Success(rateLimitKey(c))
 	c.JSON(http.StatusOK, session)
 }
 

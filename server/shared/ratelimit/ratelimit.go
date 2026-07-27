@@ -66,6 +66,19 @@ func (rl *RateLimiter) Stop() {
 	close(rl.stopCh)
 }
 
+// IsBlocked checks whether the given key is currently blocked without recording an attempt.
+func (rl *RateLimiter) IsBlocked(key string) bool {
+	rl.mu.RLock()
+	defer rl.mu.RUnlock()
+	att, exists := rl.attempts[key]
+	return exists && att.Blocked && time.Now().Before(att.BlockUntil)
+}
+
+// Fail records a failed attempt and returns whether it is permitted.
+func (rl *RateLimiter) Fail(key string) bool {
+	return rl.Allow(key)
+}
+
 // Allow checks whether the given key is permitted to proceed.
 // It returns true if the attempt is allowed, false if the key is blocked.
 func (rl *RateLimiter) Allow(key string) bool {
