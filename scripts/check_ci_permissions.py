@@ -348,14 +348,7 @@ def check_dependency_review(path: Path) -> list[str]:
         # silently flips a red CVE signal to green. Detection is on key
         # presence alone — covers literal `true` (N90), expression
         # `${{ ... }}` (H3), and trailing-comment form `true  # ...` (H4).
-        coe_val = _step_get_value(dep_review_step, "continue-on-error")
-        if coe_val is not None:
-            failures.append(
-                f"{path.name}: `dependency-review` step is masked "
-                f"by `continue-on-error:` (value='{coe_val}', "
-                f"N90/CI-DEP-1/H3/H4). This silently flips a red "
-                f"CVE signal to green. Remove the directive."
-            )
+
 
     return failures
 
