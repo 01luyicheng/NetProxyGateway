@@ -839,16 +839,16 @@ private fun NetworkStatusRow(
     activeColor: Color,
     inactiveColor: Color
 ) {
-    val currentColor by animateColorAsState(
-        targetValue = if (active) activeColor else inactiveColor,
-        label = "network_color"
-    )
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Crossfade(targetState = active, label = "network_icon_crossfade") { isActive ->
+            val currentColor by animateColorAsState(
+                targetValue = if (isActive) activeColor else inactiveColor,
+                label = "network_color"
+            )
             Icon(
                 imageVector = if (isActive) activeIcon else inactiveIcon,
                 contentDescription = null,
@@ -862,6 +862,10 @@ private fun NetworkStatusRow(
             modifier = Modifier.weight(1f)
         )
         Crossfade(targetState = active, label = "network_text_crossfade") { isActive ->
+            val currentColor by animateColorAsState(
+                targetValue = if (isActive) activeColor else inactiveColor,
+                label = "network_color"
+            )
             Text(
                 text = stringResource(if (isActive) R.string.network_in_use else R.string.network_not_in_use),
                 style = MaterialTheme.typography.bodyMedium,
