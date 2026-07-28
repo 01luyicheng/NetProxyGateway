@@ -1614,6 +1614,8 @@
 > **审查范围**：`fix/pr108-missing-guards-rev60` 分支 REV60 提交后的工作区变更。
 
 ### REV61-A1: createSessionToken 乐观锁为空操作重写，并发请求可双花签发多个 token [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 中
 - **严重程度**: 高（安全 / 数据完整性）
 - **位置**: `server/api/main.go` (`createSessionToken` handler、`compareAndUpdatePairingSessionDB`)
 - **问题描述**: `createSessionToken` 通过 `compareAndUpdatePairingSessionDB` 做"乐观锁"重验，但该 UPDATE 写回的 `status`/`engineer_id`/`used` 与已存储值完全相同（"connected" 会话的 `used` 已在 `updatePairingSession` 中置为 `true`）。SQLite 的 `RowsAffected` 返回匹配行数（即使值未变），因此第二个并发请求的 `WHERE status='connected' AND engineer_id=?` 仍匹配 → `rowsAffected=1` → 通过乐观锁 → 签发第二个 token。乐观锁仅能防护外部写者改变了 `status`/`engineer_id` 的场景，对同一会话的并发签发完全无效。`session_tokens` 表的 PRIMARY KEY 仅在 `token` 上，无 `(device_id, engineer_id)` 唯一约束，DB 层也不阻止多 token。
@@ -1622,6 +1624,8 @@
 - **关联测试**: `TestCreateSessionToken_ConcurrentRequestsIssueSingleToken`（2/5/10 并发均仅签发 1 个 token）、`TestCreateSessionToken_SecondRequestAfterFirstCompletesReturns409`（顺序第二次请求返回 409）
 
 ### REV61-A2: tunnel Register 在线 last_seen 在写锁外捕获，与并发 cleanup 竞态导致设备永久卡 "online" [已修复]
+- **修复状态**: 已修复
+- **修复难度**: 中
 - **严重程度**: 中高（数据完整性 / 用户可感知功能退化，无自纠正）
 - **位置**: `server/tunnel/main.go` (`Register`)
 - **问题描述**: REV60 将 `Register` 的在线 `lastSeen` 捕获放在 `m.mu.Unlock()` 之后、`oldTunnel.Close()` 之后（原第 295 行）。`oldTunnel.Close()` 会阻塞等待 `connMu`（sendLoop 的 WriteMessage 设有 10s 写超时）。REV51 不变式要求"任何后续 Register 的在线 last_seen 严格新于 Unregister 的离线 last_seen"——但该不变式仅在 Register 于写锁内捕获 last_seen 时成立（写锁与读锁互斥保证顺序）。将捕获移到锁外后，`cleanupDeadTunnelsOnce` 可在 `Close()` 阻塞期间删除新注册的 tunnel 并捕获离线 `last_seen`（T_off），随后 Register 捕获更晚的在线 `last_seen`（T_on > T_off）。API 的严格 `WHERE excluded.last_seen > device_status.last_seen` 守卫会接受陈旧在线通知、拒绝合法离线通知。API 侧无任何 `device_status` 对账/清理/超时机制，设备将永久显示 "online"。
