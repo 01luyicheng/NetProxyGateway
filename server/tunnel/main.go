@@ -279,6 +279,18 @@ func (m *TunnelManager) Register(deviceID string, conn *websocket.Conn) *TunnelC
 		oldTunnel = old
 	}
 	m.tunnels[deviceID] = tunnel
+	// REV61: capture the online last_seen UNDER the write lock, at the exact
+	// instant the tunnel is placed in the map. This is the true "registration
+	// decision instant". Any concurrent Unregister/cleanup that captures its
+	// offline last_seen under RLock can only do so after this WLock is released,
+	// guaranteeing offline last_seen > online last_seen. Capturing it after the
+	// lock release (as REV60 did) broke this invariant: oldTunnel.Close() can
+	// block for up to the write deadline (~10s), and a concurrent cleanup could
+	// capture an offline last_seen during that block, then Register would capture
+	// a newer online last_seen — causing the API's strict last_seen guard to
+	// accept the stale online and reject the legitimate offline, leaving the
+	// device stuck "online" with no self-correction.
+	lastSeen := time.Now().UnixMilli()
 	m.mu.Unlock()
 
 	// Close old tunnel outside m.mu to avoid blocking I/O under the lock.
@@ -286,13 +298,6 @@ func (m *TunnelManager) Register(deviceID string, conn *websocket.Conn) *TunnelC
 	if oldTunnel != nil {
 		oldTunnel.Close()
 	}
-
-	// Capture the online event timestamp at the registration decision instant so
-	// any concurrent offline notification whose last_seen was captured earlier
-	// cannot be newer than this online notification (REV33/REV51). Captured in
-	// the registering goroutine (not the notify goroutine) to avoid scheduler
-	// delay shifting the timestamp forward.
-	lastSeen := time.Now().UnixMilli()
 
 	log.Printf("Tunnel registered for device: %s", deviceID)
 

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1583,5 +1584,111 @@ func TestUpsertDeviceStatusDB_AcceptsNewerLastSeen(t *testing.T) {
 	}
 	if ds.TunnelAddr != "new:5678" {
 		t.Fatalf("newer last_seen did not update tunnel_addr: got %q, want %q", ds.TunnelAddr, "new:5678")
+	}
+}
+
+// TestCreateSessionToken_ConcurrentRequestsIssueSingleToken verifies the REV61
+// double-spend fix: N concurrent POST /session/token requests for the SAME
+// "connected" pairing session must result in exactly ONE token being issued.
+// Without the transaction + existence-check fix, the optimistic lock was a
+// no-op re-write (it wrote back identical status/engineer_id/used values), so
+// every concurrent request's WHERE clause still matched and every request
+// issued a distinct token.
+func TestCreateSessionToken_ConcurrentRequestsIssueSingleToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for _, concurrency := range []int{2, 5, 10} {
+		t.Run(fmt.Sprintf("n=%d", concurrency), func(t *testing.T) {
+			server := newPairingTestServer(t)
+			code := fmt.Sprintf("DBL-%d", concurrency)
+			deviceID := fmt.Sprintf("device-dbl-%d", concurrency)
+			insertConnectedSession(t, server, code, deviceID, "engineer-A", time.Now().Add(10*time.Minute))
+
+			router := newCreateSessionTokenRouter(server)
+
+			type result struct {
+				code int
+				body string
+			}
+			results := make([]result, concurrency)
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			wg.Add(concurrency)
+
+			for i := 0; i < concurrency; i++ {
+				go func(idx int) {
+					defer wg.Done()
+					<-start // fire all goroutines simultaneously
+					recorder := runCreateSessionTokenRequest(router, code, "engineer-A")
+					results[idx] = result{code: recorder.Code, body: recorder.Body.String()}
+				}(i)
+			}
+			close(start)
+			wg.Wait()
+
+			created, conflict, other := 0, 0, 0
+			for _, r := range results {
+				switch r.code {
+				case http.StatusCreated:
+					created++
+				case http.StatusConflict:
+					conflict++
+				default:
+					other++
+					t.Logf("unexpected response: code=%d body=%s", r.code, r.body)
+				}
+			}
+
+			if created != 1 {
+				t.Fatalf("expected exactly 1 token issued (201), got %d created, %d conflict, %d other", created, conflict, other)
+			}
+			if conflict != concurrency-1 {
+				t.Fatalf("expected %d conflicts (409), got %d", concurrency-1, conflict)
+			}
+			if other != 0 {
+				t.Fatalf("expected 0 unexpected responses, got %d", other)
+			}
+
+			// Verify exactly one token row exists for this device.
+			tokens, err := server.db.Query(`SELECT COUNT(*) FROM session_tokens WHERE device_id = ?`, deviceID)
+			if err != nil {
+				t.Fatalf("failed to count tokens: %v", err)
+			}
+			defer tokens.Close()
+			count := 0
+			if tokens.Next() {
+				_ = tokens.Scan(&count)
+			}
+			if count != 1 {
+				t.Fatalf("expected exactly 1 token row in DB, got %d", count)
+			}
+		})
+	}
+}
+
+// TestCreateSessionToken_SecondRequestAfterFirstCompletesReturns409 verifies
+// the sequential (non-concurrent) case: after a token is issued, a second
+// request for the same session is rejected with 409 ErrSessionTokenAlreadyIssued.
+func TestCreateSessionToken_SecondRequestAfterFirstCompletesReturns409(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	insertConnectedSession(t, server, "SEQ409", "device-seq", "engineer-A", time.Now().Add(10*time.Minute))
+
+	router := newCreateSessionTokenRouter(server)
+
+	// First request succeeds.
+	rec1 := runCreateSessionTokenRequest(router, "SEQ409", "engineer-A")
+	if rec1.Code != http.StatusCreated {
+		t.Fatalf("first request: expected 201, got %d (body=%s)", rec1.Code, rec1.Body.String())
+	}
+
+	// Second request for the same session is rejected.
+	rec2 := runCreateSessionTokenRequest(router, "SEQ409", "engineer-A")
+	if rec2.Code != http.StatusConflict {
+		t.Fatalf("second request: expected 409, got %d (body=%s)", rec2.Code, rec2.Body.String())
+	}
+	if !strings.Contains(rec2.Body.String(), ErrSessionTokenAlreadyIssued.Error()) {
+		t.Fatalf("second request: expected error to contain %q, got %s", ErrSessionTokenAlreadyIssued.Error(), rec2.Body.String())
 	}
 }

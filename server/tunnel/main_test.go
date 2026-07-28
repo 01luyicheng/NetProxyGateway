@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1029,6 +1030,132 @@ func TestSendReturnsErrorAfterClose(t *testing.T) {
 		err := tunnel.Send([]byte("after-close"))
 		if err == nil {
 			t.Fatalf("Send after close returned nil on iteration %d — data would be silently lost", i)
+		}
+	}
+}
+
+// TestRegister_OnlineLastSeenNotNewerThanConcurrentOffline verifies the REV61
+// fix for the tunnel last_seen race. Register must capture the online last_seen
+// UNDER the write lock (at the instant the tunnel is placed in the map), not
+// after releasing the lock and blocking on oldTunnel.Close(). Otherwise, a
+// concurrent cleanupDeadTunnelsOnce can capture an offline last_seen during the
+// Close() block, and Register would then capture a newer online last_seen,
+// causing the API's strict last_seen guard to accept the stale online and reject
+// the legitimate offline — leaving the device stuck "online" with no
+// self-correction.
+//
+// The test simulates a blocking oldTunnel.Close() by holding connMu, then runs
+// cleanupDeadTunnelsOnce (with a short HeartbeatTimeout) while Register is
+// blocked. It asserts that the online last_seen <= the offline last_seen.
+func TestRegister_OnlineLastSeenNotNewerThanConcurrentOffline(t *testing.T) {
+	type notification struct {
+		status   string
+		lastSeen int64
+	}
+	var (
+		notifMu sync.Mutex
+		notifs  []notification
+		notifCh = make(chan struct{}, 4)
+	)
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var payload struct {
+			DeviceID string `json:"device_id"`
+			Status   string `json:"status"`
+			LastSeen int64  `json:"last_seen"`
+		}
+		_ = json.Unmarshal(body, &payload)
+		notifMu.Lock()
+		notifs = append(notifs, notification{status: payload.Status, lastSeen: payload.LastSeen})
+		notifMu.Unlock()
+		notifCh <- struct{}{}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer apiServer.Close()
+
+	manager := NewTunnelManager(&Config{
+		APIEndpoint:     apiServer.URL,
+		InternalAPIKey:  "internal-secret",
+		HeartbeatTimeout: 50 * time.Millisecond,
+	})
+	defer manager.Stop()
+
+	// Seed an "old" tunnel directly into the map so Register will close it.
+	oldTunnel := NewTunnelConn("device-race", nil)
+	manager.mu.Lock()
+	manager.tunnels["device-race"] = oldTunnel
+	manager.mu.Unlock()
+
+	// Hold oldTunnel.connMu so oldTunnel.Close() blocks inside Register,
+	// simulating a blocking write. Register will be stuck after releasing the
+	// write lock but before capturing lastSeen (in the buggy version).
+	oldTunnel.connMu.Lock()
+
+	// Start Register in a goroutine. With the fix, it captures online lastSeen
+	// under the WLock before releasing it, then blocks on oldTunnel.Close().
+	registerDone := make(chan struct{})
+	go func() {
+		manager.Register("device-race", nil)
+		close(registerDone)
+	}()
+
+	// Wait for the new tunnel to become "dead" per the short HeartbeatTimeout,
+	// then run cleanup. cleanupDeadTunnelsOnce will delete the new tunnel and
+	// capture an offline lastSeen under RLock.
+	time.Sleep(100 * time.Millisecond)
+	manager.cleanupDeadTunnelsOnce()
+
+	// Release connMu so oldTunnel.Close() (and thus Register) can proceed.
+	oldTunnel.connMu.Unlock()
+
+	// Wait for Register to finish.
+	select {
+	case <-registerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Register did not complete within 5s")
+	}
+
+	// Wait for both notifications (offline from cleanup, online from Register).
+	// They may arrive in either order due to goroutine scheduling.
+	waitForNotifications(t, notifCh, 2, 5*time.Second)
+
+	notifMu.Lock()
+	defer notifMu.Unlock()
+	if len(notifs) < 2 {
+		t.Fatalf("expected at least 2 notifications, got %d: %+v", len(notifs), notifs)
+	}
+
+	var onlineTS, offlineTS int64
+	for _, n := range notifs {
+		if n.status == "online" {
+			onlineTS = n.lastSeen
+		}
+		if n.status == "offline" {
+			offlineTS = n.lastSeen
+		}
+	}
+	if onlineTS == 0 || offlineTS == 0 {
+		t.Fatalf("missing online or offline notification: %+v", notifs)
+	}
+
+	if onlineTS > offlineTS {
+		t.Fatalf("REV51 invariant violated: online last_seen (%d) > offline last_seen (%d); "+
+			"the stale online notification would overwrite the legitimate offline at the API, "+
+			"leaving the device stuck 'online' with no self-correction", onlineTS, offlineTS)
+	}
+	t.Logf("online last_seen (%d) <= offline last_seen (%d) — invariant holds", onlineTS, offlineTS)
+}
+
+// waitForNotifications blocks until at least n notifications have arrived or
+// the timeout expires.
+func waitForNotifications(t *testing.T, ch chan struct{}, n int, timeout time.Duration) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		select {
+		case <-ch:
+		case <-time.After(timeout):
+			t.Fatalf("timed out waiting for notification %d/%d", i+1, n)
 		}
 	}
 }
