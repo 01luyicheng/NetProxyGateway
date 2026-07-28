@@ -217,6 +217,7 @@ func (t *TunnelConn) WritePing(deadline time.Time) error {
 // TunnelManager manages tunnel connections.
 type TunnelManager struct {
 	tunnels    map[string]*TunnelConn
+	lastSeen   map[string]int64
 	mu         sync.RWMutex
 	config     *Config
 	httpClient *http.Client
@@ -234,6 +235,7 @@ func NewTunnelManager(config *Config) *TunnelManager {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &TunnelManager{
 		tunnels:    make(map[string]*TunnelConn),
+		lastSeen:   make(map[string]int64),
 		config:     config,
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 		ctx:        ctx,
@@ -291,6 +293,10 @@ func (m *TunnelManager) Register(deviceID string, conn *websocket.Conn) *TunnelC
 	// accept the stale online and reject the legitimate offline, leaving the
 	// device stuck "online" with no self-correction.
 	lastSeen := time.Now().UnixMilli()
+	if lastSeen <= m.lastSeen[deviceID] {
+		lastSeen = m.lastSeen[deviceID] + 1
+	}
+	m.lastSeen[deviceID] = lastSeen
 	m.mu.Unlock()
 
 	// Close old tunnel outside m.mu to avoid blocking I/O under the lock.
@@ -353,6 +359,10 @@ func (m *TunnelManager) Unregister(deviceID string, tunnel *TunnelConn) {
 	// the API's strict `last_seen >` guard rejects this offline notification if
 	// it arrives after the newer online notification.
 	lastSeen := time.Now().UnixMilli()
+	if lastSeen <= m.lastSeen[deviceID] {
+		lastSeen = m.lastSeen[deviceID] + 1
+	}
+	m.lastSeen[deviceID] = lastSeen
 	m.mu.RUnlock()
 
 	log.Printf("Tunnel unregistered for device: %s", deviceID)
@@ -549,6 +559,10 @@ func (m *TunnelManager) cleanupDeadTunnelsOnce() {
 		// REV51: capture last_seen under the lock so a subsequent Register (which
 		// acquires WLock) captures a strictly newer online last_seen.
 		lastSeen := time.Now().UnixMilli()
+	if lastSeen <= m.lastSeen[deviceID] {
+		lastSeen = m.lastSeen[deviceID] + 1
+	}
+	m.lastSeen[deviceID] = lastSeen
 		m.mu.RUnlock()
 
 		m.wg.Add(1)
