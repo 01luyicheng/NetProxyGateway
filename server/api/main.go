@@ -82,11 +82,12 @@ type PairingSession struct {
 
 // SessionToken represents a session token.
 type SessionToken struct {
-	Token      string    `json:"token"`
-	DeviceID   string    `json:"device_id"`
-	EngineerID string    `json:"engineer_id"`
-	CreatedAt  time.Time `json:"created_at"`
-	ExpiresAt  time.Time `json:"expires_at"`
+	Token       string    `json:"token"`
+	DeviceID    string    `json:"device_id"`
+	EngineerID  string    `json:"engineer_id"`
+	PairingCode string    `json:"-"`
+	CreatedAt   time.Time `json:"created_at"`
+	ExpiresAt   time.Time `json:"expires_at"`
 }
 
 // DeviceStatus represents the status of a device.
@@ -260,7 +261,8 @@ func initSchema(db *sql.DB) error {
 		device_id TEXT NOT NULL,
 		engineer_id TEXT NOT NULL,
 		created_at INTEGER NOT NULL,
-		expires_at INTEGER NOT NULL
+		expires_at INTEGER NOT NULL,
+		pairing_code TEXT
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_token_device_id ON session_tokens(device_id);
@@ -563,13 +565,14 @@ func (s *Server) markSessionExpired(session *PairingSession, expectedStatus, exp
 // createSessionTokenDB inserts a session token into the database.
 func (s *Server) createSessionTokenDB(token *SessionToken) error {
 	_, err := s.db.Exec(
-		`INSERT INTO session_tokens (token, device_id, engineer_id, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?)`,
+		`INSERT INTO session_tokens (token, device_id, engineer_id, created_at, expires_at, pairing_code)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
 		token.Token,
 		token.DeviceID,
 		token.EngineerID,
 		token.CreatedAt.Unix(),
 		token.ExpiresAt.Unix(),
+		token.PairingCode,
 	)
 	return err
 }
@@ -1176,6 +1179,7 @@ func (s *Server) createSessionToken(c *gin.Context) {
 		EngineerID: engineerID,
 		CreatedAt:  time.Now(),
 		ExpiresAt:  time.Now().Add(SessionTokenTTL),
+		PairingCode: session.Code,
 	}
 
 	// The optimistic-lock re-verification and the token insertion MUST be atomic.
@@ -1230,8 +1234,8 @@ func (s *Server) createSessionToken(c *gin.Context) {
 	// reliably sees it. Reject with 409 instead of issuing a second token.
 	var existing int
 	if err := tx.QueryRow(
-		`SELECT COUNT(*) FROM session_tokens WHERE device_id = ? AND engineer_id = ? AND expires_at > ?`,
-		session.DeviceID, engineerID, time.Now().Unix(),
+		`SELECT COUNT(*) FROM session_tokens WHERE pairing_code = ? AND expires_at > ?`,
+		session.Code, time.Now().Unix(),
 	).Scan(&existing); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToQueryDatabase.Error()})
 		return
@@ -1242,13 +1246,14 @@ func (s *Server) createSessionToken(c *gin.Context) {
 	}
 
 	if _, err := tx.Exec(
-		`INSERT INTO session_tokens (token, device_id, engineer_id, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?)`,
+		`INSERT INTO session_tokens (token, device_id, engineer_id, created_at, expires_at, pairing_code)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
 		sessionToken.Token,
 		sessionToken.DeviceID,
 		sessionToken.EngineerID,
 		sessionToken.CreatedAt.Unix(),
 		sessionToken.ExpiresAt.Unix(),
+		sessionToken.PairingCode,
 	); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToCreateToken.Error()})
 		return
