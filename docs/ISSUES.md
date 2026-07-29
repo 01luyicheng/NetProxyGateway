@@ -2295,4 +2295,31 @@
 - **建议**: 评估是否对 `device_id` 维度增加速率限制/异常频率检测，或在文档中明确修正"自愈"承诺的适用前提。因涉及 REV33/REV51 事件排序语义的设计权衡，本批次不单独实施代码修复。
 - **交叉验证**: 两个独立 subagent 复审确认（Go 模拟 20 分钟攻击场景，存储状态始终为 `offline`）。
 
+---
+
+## 提交后正确性检查发现（2026-07-30，多 subagent 审查过去 24h 各分支提交 + 活跃 PR）
+
+> 以下问题由多个 subagent 对过去 24 小时内各分支提交与活跃 PR（#163/#159/#154/#165/#161/#108 等）进行深度审查发现。服务端 Go 并发/安全 PR（#163 REV61、#159 REV60、#154 REV59）经多 subagent 复审确认**无未记录缺陷**——其真实缺陷（createSessionToken 双花、tunnel Register last_seen 竞争）已被同分支 REV61 修复并在本文档记录。UI 过渡动画 PR #165 发现 1 项未记录缺陷（REV62），已在本批次修复。
+
+### REV62: `ConnectionStatusCard` 旋转图标 与 `VpnStatusCard` 指示灯 在 AnimatedContent 过渡期间绑定到**当前** UiState 而非**逐行 target** 状态，导致淡出行图标/文字与旋转图标/指示灯短暂不一致 [已修复]
+- **修复状态**: 已修复（本审查批次，分支 `fix/rev62-status-card-crossfade-target-binding`，基于 PR #165 head）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt`
+  - `ConnectionStatusCard`：`AnimatedContent(...) { targetStatus -> ... }` 内的 spinner 判定（原 `if (uiState.mqttState == MqttUiState.Connecting)`，约 497 行）
+  - `VpnStatusCard`：`AnimatedContent(...) { targetVpnData -> ... }` 内的指示灯颜色（原 `if (uiState.isVpnEnabled) statusColors.success else ...`，约 769 行）
+- **问题描述**: 两张状态卡都使用 `AnimatedContent(targetState = statusData/vpnData)` 做交叉淡入淡出。Compose 的 `AnimatedContent` 在过渡期间会**同时**组合旧（淡出）与新（淡入）两行，且两行的 lambda 闭包都捕获**当前** `uiState`。PR #165 已把 `Icon`/`Text` 绑定到逐行 target 参数（`targetStatus.icon`/`targetStatus.textRes`、`targetVpnData.icon`/`targetVpnData.textRes`），但 spinner 判定与 VPN 指示灯颜色**仍读取外层共享的 `uiState`**，没有跟随 target。结果：淡出行渲染的 spinner/指示灯属于**新**状态，而其图标/文字属于**旧**状态，二者在 ~300ms 过渡窗口内不一致。
+  - **REV62-A（MQTT）**: `Connected → Connecting` 过渡时，淡出的 "Connected" 行因 `uiState.mqttState` 已变为 `Connecting` 而显示旋转图标（"Connected" 文字 + 旋转图标）；反向 `Connecting → Connected` 过渡时，淡出的 "Connecting" 行（`icon == null`）因 `uiState.mqttState` 已变为 `Connected` 而落入 `else if (targetStatus.icon != null)` 为假，**既无旋转图标也无图标**，只剩光秃秃的 "Connecting" 文字。
+  - **REV62-B（VPN）**: `Running → Stopped` 过渡时，淡出的 "Running" 行因 `uiState.isVpnEnabled` 已变为 false 而显示灰色指示灯（"Running" 文字 + 灰点）；反向 `Stopped → Running` 时，淡出的 "Stopped" 行显示绿色指示灯（"Stopped" 文字 + 绿点）。
+- **触发场景**: 任意触发状态卡 `AnimatedContent` 切换的用户可感知事件——MQTT 连接建立/断开/重连、用户点击 VPN 开关启停。过渡窗口 ~300ms（默认 `tween`），淡出行起始 alpha=1.0，不一致在最初 ~100-150ms 近满透明度下肉眼可见。
+- **影响**: **MEDIUM（可见的功能退化）**。瞬态、自愈（稳态正确），无数据丢失/崩溃/安全影响；但状态指示器是用户判断连接/VPN 状态的关键 UI，过渡期间图标/文字与指示灯自相矛盾会误导用户。PR #165 自身提交 "Bind animated content rendering to target state" 表明作者已知此类问题并修复了图标/文字，但遗漏了 spinner/指示灯。
+- **验证**: 回归测试 `StatusCardBindingTest`（`android/app/src/test/java/com/netproxy/gateway/ui/screens/StatusCardBindingTest.kt`）锁定修复所依赖的不变式：`showsSpinner()` 仅在 `icon == null`（Connecting）时为真、其余状态为假；`isVpnRunning()` 仅在 `textRes == R.string.vpn_running`（运行行）时为真。该测试在 `:app:testDebugUnitTest`（CI 已运行）下执行，无需 emulator。
+- **修复方式**: 新增两个 `internal` 扩展函数 `StatusCardData.showsSpinner(): Boolean = icon == null` 与 `StatusCardData.isVpnRunning(): Boolean = textRes == R.string.vpn_running`，并将两处判定改为基于逐行 target：`if (targetStatus.showsSpinner())` 与 `if (targetVpnData.isVpnRunning())`。`StatusCardData` 由 `private` 改为 `internal` 以供同模块测试访问。稳态行为与原实现等价（Connecting 是唯一 `icon == null` 的状态；运行态即 `vpn_running`），仅在过渡窗口修正绑定来源。修改最小、高置信度。
+- **关联**: PR #165（`ux-status-transitions-13816424101316795215`）、PR #161。本修复分支基于 PR #165 head，作为其 fix-up PR。
+- **交叉验证**: 三个独立 subagent 复审确认（1 个发现 subagent + 2 个独立验证 subagent 逐行核对 `MainScreen.kt` 497/503-512 与 737/745-763/769 行，确认 spinner/指示灯读取外层 `uiState` 而图标/文字读取逐行 target，CONFIRMED）。
+
+### REV61 复审确认（无新缺陷）
+- 服务端并发 PR #163（`fix/rev61-doublespend-tunnel-race`）经多 subagent 复审确认：`createSessionToken` 双花修复（`BEGIN IMMEDIATE` 事务包裹乐观锁 UPDATE + COUNT + INSERT）与 tunnel `Register` last_seen 在 WLock 下捕获均正确完整，`go test -race` 通过。原缺陷已在本文件 REV61-A1/A2 记录。未发现未记录缺陷。
+
+### REV59/REV60 复审确认（无新缺陷）
+- 安全/安全守卫 PR #154（REV59）、#159（REV60）经多 subagent 复审确认：MqttConnectionManager trust-all 守卫、DebugDetector 双路径 OR 语义与 `@Volatile` 防 DCE、VpnPacketProcessor TCP 校验和边界、CORS allowlist、createSessionToken 过期检查与乐观锁、upsertDeviceStatusDB last_seen 单调守卫、GET /pair/:code 限流、tunnel Unregister/cleanup REV32 重检均完整正确。CI 门禁未被削弱。`go test -race` 通过。未发现未记录缺陷。
+
 

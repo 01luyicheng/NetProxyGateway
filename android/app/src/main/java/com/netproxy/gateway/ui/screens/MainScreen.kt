@@ -494,7 +494,7 @@ private fun ConnectionStatusCard(uiState: UiState, onRetry: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    if (uiState.mqttState == MqttUiState.Connecting) {
+                    if (targetStatus.showsSpinner()) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(24.dp),
                             color = animatedContentColor,
@@ -694,12 +694,23 @@ private fun ConnectedOptionsSection(
     }
 }
 
-private data class StatusCardData(
+internal data class StatusCardData(
     val containerColor: Color,
     val contentColor: Color,
     val textRes: Int,
     val icon: ImageVector?
 )
+
+// REV62: during an AnimatedContent crossfade both the fading-out and fading-in rows are
+// composed against the *current* UiState. The spinner / VPN indicator must therefore be
+// derived from the per-row target StatusCardData (the AnimatedContent lambda parameter),
+// NOT from the shared uiState — otherwise the fading-out row briefly renders a spinner /
+// indicator that belongs to the new state, disagreeing with its own icon and text.
+// (Previously the spinner read `uiState.mqttState == Connecting` and the VPN indicator
+// read `uiState.isVpnEnabled`; both produced a ~300ms mismatch during transitions.)
+internal fun StatusCardData.showsSpinner(): Boolean = icon == null
+
+internal fun StatusCardData.isVpnRunning(): Boolean = textRes == R.string.vpn_running
 
 @Composable
 private fun VpnStatusCard(uiState: UiState) {
@@ -766,7 +777,7 @@ private fun VpnStatusCard(uiState: UiState) {
                     modifier = Modifier.size(12.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    val indicatorColor = if (uiState.isVpnEnabled) statusColors.success else MaterialTheme.colorScheme.outline
+                    val indicatorColor = if (targetVpnData.isVpnRunning()) statusColors.success else MaterialTheme.colorScheme.outline
                     androidx.compose.foundation.Canvas(modifier = Modifier.fillMaxSize()) {
                         drawCircle(color = indicatorColor)
                     }
