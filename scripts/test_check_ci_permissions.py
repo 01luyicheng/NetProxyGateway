@@ -293,6 +293,77 @@ jobs:
           fail-on-severity: high
 """
 
+# REV54 / S1 (quoted-key, single-quote): the EXACT form smuggled into PR #129
+# (commit e41f70f). `'continue-on-error': true` is YAML-equivalent to the bare
+# `continue-on-error: true` but the pre-REV54 guard's
+# `s.startswith("continue-on-error:")` did not match the leading `'`. Must FAIL.
+# This test fails on the pre-fix guard (returns [] = no failures) and passes
+# after the fix.
+REV54_S1_QUOTED_KEY_STEP = """\
+name: PR Checks
+jobs:
+  dependency-review:
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Dependency review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+        # Temporary bypass for DEP-REVIEW-1 as GHAS is not enabled yet
+        'continue-on-error': true
+"""
+
+# REV54 / S1 (quoted-key, double-quote): `"continue-on-error": true` is the
+# double-quoted equivalent. Must FAIL.
+REV54_S1_QUOTED_KEY_STEP_DBL = """\
+name: PR Checks
+jobs:
+  dependency-review:
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Dependency review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+        "continue-on-error": true
+"""
+
+# REV54 / S1 (quoted-key, job-level): a job-level `'continue-on-error': true`
+# (indent 4) must FAIL the H1 check, just like the bare form. The pre-fix
+# job-level scan also used `startswith("continue-on-error:")` and missed this.
+REV54_S1_QUOTED_KEY_JOB = """\
+name: PR Checks
+jobs:
+  dependency-review:
+    'continue-on-error': true
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Dependency review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+"""
+
+# REV54 / S2 (colon-space): `continue-on-error : true` (whitespace before the
+# colon) is valid YAML and semantically identical. The pre-fix guard's
+# `startswith("continue-on-error:")` did not match. Must FAIL.
+REV54_S2_COLON_SPACE_STEP = """\
+name: PR Checks
+jobs:
+  dependency-review:
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Dependency review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+        continue-on-error : true
+"""
+
 
 class CheckDependencyReviewTests(unittest.TestCase):
     def test_dev_baseline_passes(self) -> None:
@@ -429,6 +500,62 @@ class CheckDependencyReviewTests(unittest.TestCase):
             any("does not use" in f for f in failures),
             f"expected 'does not use' for unrelated-step severity bypass, "
             f"got: {failures}",
+        )
+
+    def test_rev54_s1_quoted_key_step_mask_fails(self) -> None:
+        """REV54/S1: step-level `'continue-on-error': true` (the exact PR #129
+        form) must FAIL. The pre-fix guard's `startswith("continue-on-error:")`
+        did not match the leading single-quote, so this returned [] (bypass).
+        """
+        path = _write_yaml(REV54_S1_QUOTED_KEY_STEP)
+        failures = m.check_dependency_review(path)
+        self.assertTrue(
+            any("continue-on-error" in f and "N90" in f for f in failures),
+            f"expected S1 quoted-key step continue-on-error failure, got: {failures}",
+        )
+
+    def test_rev54_s1_quoted_key_step_value_extracted(self) -> None:
+        """REV54/S1: the guard must not only detect the quoted key but also
+        extract its value (`true`) for the failure message, proving the value
+        extraction (partition on ':') still works through the quote."""
+        path = _write_yaml(REV54_S1_QUOTED_KEY_STEP)
+        failures = m.check_dependency_review(path)
+        self.assertTrue(
+            any("value='true'" in f for f in failures),
+            f"expected value='true' in S1 quoted-key failure, got: {failures}",
+        )
+
+    def test_rev54_s1_double_quoted_key_step_mask_fails(self) -> None:
+        """REV54/S1: step-level `"continue-on-error": true` (double-quoted key)
+        must FAIL too — the fix handles both quote styles."""
+        path = _write_yaml(REV54_S1_QUOTED_KEY_STEP_DBL)
+        failures = m.check_dependency_review(path)
+        self.assertTrue(
+            any("continue-on-error" in f and "N90" in f for f in failures),
+            f"expected S1 double-quoted-key step failure, got: {failures}",
+        )
+
+    def test_rev54_s1_quoted_key_job_level_fails(self) -> None:
+        """REV54/S1: a job-level `'continue-on-error': true` (indent 4) must
+        FAIL the H1 check. The pre-fix job-level scan also used
+        `startswith("continue-on-error:")` and missed the quoted form."""
+        path = _write_yaml(REV54_S1_QUOTED_KEY_JOB)
+        failures = m.check_dependency_review(path)
+        self.assertTrue(
+            any("H1" in f and "job-level" in f for f in failures),
+            f"expected H1 job-level quoted-key failure, got: {failures}",
+        )
+
+    def test_rev54_s2_colon_space_step_mask_fails(self) -> None:
+        """REV54/S2: step-level `continue-on-error : true` (whitespace before
+        the colon) is valid YAML and must FAIL. The pre-fix guard's
+        `startswith("continue-on-error:")` did not match the space before ':'.
+        """
+        path = _write_yaml(REV54_S2_COLON_SPACE_STEP)
+        failures = m.check_dependency_review(path)
+        self.assertTrue(
+            any("continue-on-error" in f and "N90" in f for f in failures),
+            f"expected S2 colon-space step continue-on-error failure, got: {failures}",
         )
 
 

@@ -20,6 +20,7 @@ Pure stdlib (no PyYAML dependency) so it runs on any Python 3 interpreter.
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -211,16 +212,51 @@ def _step_has_exact_uses(step_lines: list[str], action: str) -> bool:
     return False
 
 
+def _key_line_pattern(key: str) -> re.Pattern:
+    """Compiled regex matching a YAML mapping line whose key equals `key`.
+
+    Matches the key optionally wrapped in single/double quotes, optionally
+    followed by whitespace, then a colon. This closes the S1 (quoted-key,
+    e.g. `'continue-on-error': true`) and S2 (colon-space, e.g.
+    `continue-on-error : true`) bypasses of the previous
+    `s.startswith(f"{key}:")` check, which missed both forms because a
+    quoted key begins with `'`/`"` and a colon-space key has whitespace
+    before the `:`. See docs/ISSUES.md REV54 / CI-GUARD-BYPASS-S1to3.
+
+    GitHub Actions (which uses PyYAML) treats `'continue-on-error': true`
+    and `continue-on-error : true` as semantically identical to the bare
+    `continue-on-error: true`, so the guard must treat them identically too.
+    Comment lines (leading `#`) are NOT matched because the regex anchors
+    the key (or its opening quote) to the start of the stripped line.
+    """
+    pat = _KEY_PATTERN_CACHE.get(key)
+    if pat is None:
+        esc = re.escape(key)
+        # Key optionally single/double-quoted, optional whitespace, then ':'.
+        pat = re.compile(rf"^(?:'{esc}'|\"{esc}\"|{esc})\s*:")
+        _KEY_PATTERN_CACHE[key] = pat
+    return pat
+
+
+# Cache of compiled key-line patterns, keyed by YAML mapping key.
+_KEY_PATTERN_CACHE: dict[str, re.Pattern] = {}
+
+
 def _step_get_value(step_lines: list[str], key: str) -> str | None:
     """Extract the value of `key:` from a step's lines (first match).
 
     Inline ` #...` comments are stripped so that
     `fail-on-severity: high  # comment` yields `high`. Returns the value
     with surrounding whitespace removed, or None if the key is absent.
+
+    REV54: matching now uses `_key_line_pattern` so that quoted-key
+    (`'continue-on-error': true`) and colon-space (`key : value`) forms
+    are detected, not just the bare `key:` form.
     """
+    pat = _key_line_pattern(key)
     for line in step_lines:
         s = line.strip()
-        if not s.startswith(f"{key}:"):
+        if not pat.match(s):
             continue
         _, _, val = s.partition(":")
         val = val.split(" #", 1)[0].rstrip().strip()
@@ -282,18 +318,25 @@ def check_dependency_review(path: Path) -> list[str]:
     # dep-review job, defeating the CI-DEP-1 gate. The check is on key
     # presence alone — any value (true, false, expression, or comment) is
     # suspect because the directive itself is wrong for this job.
+    #
+    # REV54: matching uses `_key_line_pattern` so that quoted-key
+    # (`'continue-on-error': true`, realized by PR #129) and colon-space
+    # (`continue-on-error : true`) forms are caught here too, not just the
+    # bare `key:` form. See docs/ISSUES.md REV54 / CI-GUARD-BYPASS-S1to3.
+    coe_pat = _key_line_pattern("continue-on-error")
+    if_pat = _key_line_pattern("if")
     for raw in job_body:
         # Indent exactly 4 (job-body keys), not 6+ (steps / step keys).
         if not raw.startswith("    ") or raw.startswith("      "):
             continue
         s = raw.strip()
-        if s.startswith("continue-on-error:"):
+        if coe_pat.match(s):
             failures.append(
                 f"{path.name}: `dependency-review` job has a job-level "
                 f"`continue-on-error:` directive (CI-DEP-1/H1). This "
                 f"masks the entire job. Remove the directive."
             )
-        elif s.startswith("if:"):
+        elif if_pat.match(s):
             failures.append(
                 f"{path.name}: `dependency-review` job has a job-level "
                 f"`if:` condition (CI-DEP-1/H2). The dep-review job must "
