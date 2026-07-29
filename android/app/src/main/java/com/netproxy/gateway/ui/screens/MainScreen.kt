@@ -494,10 +494,10 @@ private fun ConnectionStatusCard(uiState: UiState, onRetry: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    if (uiState.mqttState == MqttUiState.Connecting) {
+                    if (targetStatus.textRes == R.string.status_connecting) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(24.dp),
-                            color = animatedContentColor,
+                            color = targetStatus.contentColor,
                             strokeWidth = 2.dp
                         )
                     } else if (targetStatus.icon != null) {
@@ -505,13 +505,13 @@ private fun ConnectionStatusCard(uiState: UiState, onRetry: () -> Unit) {
                             imageVector = targetStatus.icon,
                             contentDescription = null,
                             modifier = Modifier.size(24.dp),
-                            tint = animatedContentColor
+                            tint = targetStatus.contentColor
                         )
                     }
                     Text(
                         text = stringResource(targetStatus.textRes),
                         style = MaterialTheme.typography.headlineSmall,
-                        color = animatedContentColor
+                        color = targetStatus.contentColor
                     )
                 }
             }
@@ -698,7 +698,8 @@ private data class StatusCardData(
     val containerColor: Color,
     val contentColor: Color,
     val textRes: Int,
-    val icon: ImageVector?
+    val icon: ImageVector?,
+    val isEnabled: Boolean = false
 )
 
 @Composable
@@ -709,7 +710,8 @@ private fun VpnStatusCard(uiState: UiState) {
             containerColor = statusColors.success,
             contentColor = statusColors.onSuccess,
             textRes = R.string.vpn_running,
-            icon = Icons.Default.VpnKey
+            icon = Icons.Default.VpnKey,
+            isEnabled = true
         )
     } else {
         StatusCardData(
@@ -747,26 +749,26 @@ private fun VpnStatusCard(uiState: UiState) {
                         imageVector = targetVpnData.icon,
                         contentDescription = null,
                         modifier = Modifier.size(24.dp),
-                        tint = animatedContentColor
+                        tint = targetVpnData.contentColor
                     )
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = stringResource(R.string.vpn_tunnel),
                         style = MaterialTheme.typography.titleSmall,
-                        color = animatedContentColor
+                        color = targetVpnData.contentColor
                     )
                     Text(
                         text = stringResource(targetVpnData.textRes),
                         style = MaterialTheme.typography.bodyMedium,
-                        color = animatedContentColor
+                        color = targetVpnData.contentColor
                     )
                 }
                 Box(
                     modifier = Modifier.size(12.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    val indicatorColor = if (uiState.isVpnEnabled) statusColors.success else MaterialTheme.colorScheme.outline
+                    val indicatorColor = if (targetVpnData.isEnabled) statusColors.success else MaterialTheme.colorScheme.outline
                     androidx.compose.foundation.Canvas(modifier = Modifier.fillMaxSize()) {
                         drawCircle(color = indicatorColor)
                     }
