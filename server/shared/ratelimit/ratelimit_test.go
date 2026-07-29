@@ -234,3 +234,36 @@ func hasCleanupLoopGoroutine() bool {
 	n := runtime.Stack(buf, true)
 	return strings.Contains(string(buf[:n]), "cleanupLoop")
 }
+
+// TestStopIsIdempotent is a regression test for REV53: Stop() must be safe to
+// call more than once. The pre-fix implementation did `close(rl.stopCh)`,
+// which panicked with "close of closed channel" on the second call.
+func TestStopIsIdempotent(t *testing.T) {
+	cfg := Config{
+		MaxAttempts:     5,
+		Window:          5 * time.Minute,
+		BlockDuration:   15 * time.Minute,
+		CleanupInterval: 10 * time.Minute,
+		StaleAttemptTTL: 30 * time.Minute,
+	}
+	rl := NewRateLimiter(cfg)
+
+	// Multiple Stop() calls must not panic. Run under a recover so a failure
+	// surfaces as a clear assertion instead of aborting the test binary.
+	for i := 0; i < 3; i++ {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("Stop() call #%d panicked: %v", i+1, r)
+				}
+			}()
+			rl.Stop()
+		}()
+	}
+
+	// Stop() must remain a no-op after the first call; the limiter must not
+	// crash on subsequent use either.
+	if !rl.Allow("after-stop") {
+		t.Fatal("Allow() should still succeed after Stop()")
+	}
+}

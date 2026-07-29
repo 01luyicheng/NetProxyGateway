@@ -2207,3 +2207,36 @@
   - 运行：`python3 scripts/test_makefile_tidy_check.py`，6/6 通过。
 - **关联**: CI-MASK-1（同一 Makefile 的 masking 反模式家族）、CI-MASK-2、ADR-006 L294（声明 fmt/vet/tidy 基线掩盖意图，但未授权 drift 检查本身失效）、MAKE-MISSING-1（CI 实际不调用 Makefile 目标的结构性原因）。本条目由 post-commit 正确性审查（PR #120 评审）发现，经两个独立 subagent 交叉验证（静态分析 + 经验复现 + 溯源）确认。
 
+---
+
+## 提交后正确性检查发现（2026-07-22，审查过去 24 小时各分支提交 + 更新的 PR）
+
+> 以下问题由多 subagent 对过去 24 小时提交与更新 PR 的深度审查发现，经独立 subagent 交叉验证确认。
+
+### REV52: PR #112 提交 `84c0691` 大规模回退 dev 已修复的安全/数据完整性缺陷 [待修复 — 阻塞合并]
+- **状态**: 待修复（已在 PR #112 留下阻塞评论；PR 尚未合并）
+- **提交哈希**: `84c0691`（分支 `fix-pairing-session-db-perf-91002509196936996`）
+- **位置**: `server/api/main.go`
+- **问题描述**: PR #112 标题为“使用预编译语句优化 `compareAndUpdatePairingSessionDB` 性能”。真正实现预编译语句的提交 `c62aa5e` 是正确的（完整保留 dev 全部修复）。但随后的提交 `84c0691`（commit message 同样写作 perf 优化）实际用一份旧版 `main.go` 快照覆盖文件，diff 高达 **65 文件 +491/−7089**，把 dev 上已修复的多个问题全部回退。`git merge-base origin/dev <PR分支>` == `origin/dev` HEAD (`af16a54`)，证实这些代码缺失是被本 PR 删除，而非“dev 有更新但分支未跟上”。
+- **被回退的缺陷（合并即重新引入）**:
+  1. `GET /pair/:code` 丢失速率限制：`rateLimitMiddleware`/`rateLimitKey` 整组函数被删，路由链去掉 `rateLimitMiddleware()`，`getPairingSession` 内 `s.rateLimiter.Success(...)` 调用被移除 → 6 位配对码可无节流暴力枚举（回退已修复的 REV28）。**安全**
+  2. `createSessionToken` 丢失 TOCTOU + 过期校验：`expectedStatus`/`expectedEngineerID` 捕获、`compareAndUpdatePairingSessionDB` 二次校验、`time.Now().After(session.ExpiresAt)` 的 400 检查全被删 → 已过期/已连接会话仍可签发 token（回退 REV42/REV43）。**安全**
+  3. `upsertDeviceStatusDB` 丢失单调写保护：`ON CONFLICT ... WHERE excluded.last_seen > device_status.last_seen` 子句被删 → 乱序/延迟通知用旧 `last_seen` 覆盖新状态（回退 REV33）。**数据损坏**
+  4. `last_seen` 存储单位 ms→s 且删除向后兼容 shim：写 `Unix()` 秒、读 `time.Unix(lastSeen,0)`，并删掉 `if lastSeen > 0 && lastSeen < 1e12 { lastSeen *= 1000 }`；`updateDeviceStatus` 不再接受客户端 `last_seen` → 从 dev 毫秒时间戳升级后既有行被当成秒，时间戳错到几千年后。**数据损坏**
+  5. `getPairingSession` 并发修改重检弱化：`ErrConcurrentModification` 后不再 `time.Now().After(refreshed.ExpiresAt)` 重检返回 410 Gone → 并发触碰后已过期会话仍以 200 返回（回退 REV31/REV44）。**正确性/安全**
+  6. `db.Close()` on prepare-failure 被删（本 PR 自身 `4556282` 引入的修复，被 `84c0691` 回退）→ `NewServer` 在 `db.Prepare` 失败时不再关闭 `*sql.DB`，测试/嵌入式调用会泄漏句柄。**资源泄漏**
+- **风险**: **高**。合并会同时回退 REV28/REV33/REV42(及 REV43)/REV31(及 REV44) 等已记录修复，重新引入 2 个安全漏洞 + 2 个数据损坏 + 1 个正确性退化 + 1 个资源泄漏。
+- **修复方式**: 预编译语句优化本身（`c62aa5e` + `4556282` 的 `db.Close()` + `d14d8e0` 的测试覆盖）可合并。应**丢弃 `84c0691`**，将分支 rebase 到 `origin/dev` 仅保留 `c62aa5e` + `4556282` + `d14d8e0`（+ 可选 `45d5182` 的 CI Go 版本）；或在本分支 `git revert 84c0691` 后基于 dev 解决冲突。
+- **交叉验证**: 两个独立 subagent 复核确认（merge-base = dev HEAD；六项逐一用 `git show origin/dev:server/api/main.go` 与 PR 分支 grep 比对）。
+
+### REV53: `RateLimiter.Stop()` 非幂等，二次调用 panic（`close of closed channel`）[已修复]
+- **状态**: 已修复（本审查批次，分支 `fix/ratelimit-stop-idempotent-rev53`）
+- **提交哈希**: `1b64bd0`（PR #122 修复 cleanupLoop goroutine 泄漏时，`Stop()` 本身未一并加固；该缺陷为既有问题，非 PR #122 引入）
+- **位置**: `server/shared/ratelimit/ratelimit.go` (`Stop()`, L65-67 修复前)
+- **问题描述**: `Stop()` 直接 `close(rl.stopCh)`，无 `sync.Once` 保护。第二次调用 `Stop()` 会 panic：`close of closed channel`。`Stop()` 与 `cleanupLoop` 属同一区域（PR #122 评审范围），但评审遗漏了 `Stop()` 自身的幂等性。
+- **触发场景**: 任何对同一 `*RateLimiter` 调用两次 `Stop()` 的路径。当前生产代码（API server 的 `Server.Close()` 与 socks5-proxy 信号 goroutine）各只调用一次，故当前为**潜在（latent）**而非线上必现；但脆弱性明显：(1) 测试中已存在显式 `Stop()` + `defer Stop()` 模式，写出双调用即 panic；(2) `Server.Close()` 自身对 `s.cleanupStop` 也有同样的非幂等 `close`，一旦给 API server 增加 signal handler 调用 `Close()`（与 socks5/tunnel 一致的模式），即转为线上崩溃。独立 subagent 复现确认 panic 字符串为 `close of closed channel`。
+- **风险**: **中高（崩溃）**。当前潜在，但属 `Stop()`/关闭路径的崩溃缺陷，且修复零风险。
+- **修复方式**: 结构体新增 `stopOnce sync.Once` 字段；`Stop()` 改为 `rl.stopOnce.Do(func() { close(rl.stopCh) })`。新增回归测试 `TestStopIsIdempotent`：连续调用 `Stop()` 三次不 panic，且 `Allow()` 在 `Stop()` 后仍可用。已验证：buggy 版本（`close(rl.stopCh)`）该测试 FAIL（`Stop() call #2 panicked: close of closed channel`），修复版本 PASS；全套 `go test -race` 通过，gofmt/vet/build 干净。
+- **关联**: issue #90 G1（PR #122 已修 cleanupLoop busy-loop，但未加固 `Stop()` 幂等性）。注意 `Server.Close()` 中 `close(s.cleanupStop)` 存在同型非幂等缺陷，留待后续单独处理（保持本次修复最小化）。
+- **交叉验证**: 两个独立 subagent 复核确认（panic 可复现 + 生产调用链可达性分析：API server 无 signal handler、`Close()` 为生产死代码；socks5 signal goroutine 单次触发）。
+

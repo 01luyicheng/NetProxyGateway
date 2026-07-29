@@ -42,6 +42,7 @@ type RateLimiter struct {
 	mu           sync.RWMutex
 	config       Config
 	stopCh       chan struct{}
+	stopOnce     sync.Once
 	restartCount int32
 }
 
@@ -61,9 +62,11 @@ func NewRateLimiterWithDefaults() *RateLimiter {
 	return NewRateLimiter(DefaultConfig())
 }
 
-// Stop halts the background cleanup goroutine.
+// Stop halts the background cleanup goroutine. It is safe to call multiple
+// times; only the first call closes stopCh (REV53: previously a second call
+// panicked with "close of closed channel").
 func (rl *RateLimiter) Stop() {
-	close(rl.stopCh)
+	rl.stopOnce.Do(func() { close(rl.stopCh) })
 }
 
 // Allow checks whether the given key is permitted to proceed.
