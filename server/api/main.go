@@ -108,6 +108,7 @@ type Server struct {
 	expectedPassHash [sha256.Size]byte
 
 	cleanupStop             chan struct{}
+	closeOnce               sync.Once
 	cleanupWorkers          sync.WaitGroup
 	cleanupSessionsInterval time.Duration
 
@@ -269,21 +270,28 @@ func initSchema(db *sql.DB) error {
 	return err
 }
 
-// Close closes server resources.
+// Close closes server resources. It is safe to call multiple times; only the
+// first call performs teardown (REV56: previously a second call panicked with
+// "close of closed channel" because cleanupStop was closed unguarded — mirroring
+// the REV53 ratelimit Stop() defect — and rateLimiter.Stop() is likewise
+// non-idempotent on dev until PR #131 merges). Gating the whole teardown behind
+// closeOnce makes Server.Close() idempotent regardless of whether its
+// sub-components are individually idempotent.
 func (s *Server) Close() error {
-	if s.rateLimiter != nil {
-		s.rateLimiter.Stop()
-	}
-
-	if s.cleanupStop != nil {
-		close(s.cleanupStop)
-		s.cleanupWorkers.Wait()
-	}
-
-	if s.db != nil {
-		return s.db.Close()
-	}
-	return nil
+	var dbErr error
+	s.closeOnce.Do(func() {
+		if s.rateLimiter != nil {
+			s.rateLimiter.Stop()
+		}
+		if s.cleanupStop != nil {
+			close(s.cleanupStop)
+			s.cleanupWorkers.Wait()
+		}
+		if s.db != nil {
+			dbErr = s.db.Close()
+		}
+	})
+	return dbErr
 }
 
 // generateCode generates a 6-digit pairing code using rejection sampling to avoid modulo bias.
