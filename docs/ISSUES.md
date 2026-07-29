@@ -2302,7 +2302,10 @@
 > 以下问题由多个 subagent 对过去 24 小时内各分支提交与活跃 PR（#163/#159/#154/#165/#161/#108 等）进行深度审查发现。服务端 Go 并发/安全 PR（#163 REV61、#159 REV60、#154 REV59）经多 subagent 复审确认**无未记录缺陷**——其真实缺陷（createSessionToken 双花、tunnel Register last_seen 竞争）已被同分支 REV61 修复并在本文档记录。UI 过渡动画 PR #165 发现 1 项未记录缺陷（REV62），已在本批次修复。
 
 ### REV62: `ConnectionStatusCard` 旋转图标 与 `VpnStatusCard` 指示灯 在 AnimatedContent 过渡期间绑定到**当前** UiState 而非**逐行 target** 状态，导致淡出行图标/文字与旋转图标/指示灯短暂不一致 [已修复]
+- **提交哈希**: `60257d9`
 - **修复状态**: 已修复（本审查批次，分支 `fix/rev62-status-card-crossfade-target-binding`，基于 PR #165 head）
+- **修复提交**: `60257d9`
+- **修复难度**: 低
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt`
   - `ConnectionStatusCard`：`AnimatedContent(...) { targetStatus -> ... }` 内的 spinner 判定（原 `if (uiState.mqttState == MqttUiState.Connecting)`，约 497 行）
   - `VpnStatusCard`：`AnimatedContent(...) { targetVpnData -> ... }` 内的指示灯颜色（原 `if (uiState.isVpnEnabled) statusColors.success else ...`，约 769 行）
