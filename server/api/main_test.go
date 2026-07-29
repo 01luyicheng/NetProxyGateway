@@ -584,6 +584,54 @@ func TestServerCloseStopsCleanupWorkers(t *testing.T) {
 	}
 }
 
+// TestServerCloseIsIdempotent is a regression test for REV56: Server.Close()
+// must be safe to call more than once. The pre-fix implementation did
+// `close(s.cleanupStop)` with no guard, which panicked with "close of closed
+// channel" on the second call (mirroring the REV53 ratelimit Stop() defect).
+// It also re-invoked *sql.DB.Close(); this returns an error rather than
+// panicking, but the idempotent contract should return nil on a second call.
+func TestServerCloseIsIdempotent(t *testing.T) {
+	db, err := sql.Open("sqlite3", "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("failed to open in-memory db: %v", err)
+	}
+	if err := initSchema(db); err != nil {
+		_ = db.Close()
+		t.Fatalf("failed to init schema: %v", err)
+	}
+
+	server := &Server{
+		db:                      db,
+		rateLimiter:             ratelimit.NewRateLimiterWithDefaults(),
+		cleanupSessionsInterval: 10 * time.Millisecond,
+	}
+	server.startCleanupWorkers()
+
+	// First call must succeed and actually close resources.
+	if err := server.Close(); err != nil {
+		t.Fatalf("first Close() failed: %v", err)
+	}
+	if err := db.Ping(); err == nil {
+		t.Fatal("expected database to be closed after first Close()")
+	}
+
+	// Subsequent calls must neither panic nor return an error. Run under a
+	// recover so a failure surfaces as a clear assertion instead of aborting
+	// the test binary.
+	for i := 0; i < 3; i++ {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("Close() call #%d panicked: %v", i+2, r)
+				}
+			}()
+			if err := server.Close(); err != nil {
+				t.Fatalf("Close() call #%d returned unexpected error: %v", i+2, err)
+			}
+		}()
+	}
+}
+
 func TestValidateSessionExpiredTokenDeleteFailureDoesNotLogRawToken(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
