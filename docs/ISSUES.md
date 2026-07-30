@@ -2295,4 +2295,26 @@
 - **建议**: 评估是否对 `device_id` 维度增加速率限制/异常频率检测，或在文档中明确修正"自愈"承诺的适用前提。因涉及 REV33/REV51 事件排序语义的设计权衡，本批次不单独实施代码修复。
 - **交叉验证**: 两个独立 subagent 复审确认（Go 模拟 20 分钟攻击场景，存储状态始终为 `offline`）。
 
+---
+
+## 提交后正确性检查发现（2026-07-30，多 subagent 审查过去 24h 各分支提交 + 活跃 PR）
+
+> 以下问题由多个 subagent 对过去 24 小时内各分支提交与活跃 PR（#170/#168/#169/#161/#159/#163/#165/#166/#154 等）进行深度审查发现。服务端 Go 并发/安全 PR（#163 REV61、#159 REV60、#154 REV59）与 REV62 修复（PR #168）在本窗口内**无新代码提交**或经独立 subagent 复审确认无未记录缺陷。UI 平滑过渡 PR #170 发现 1 项未记录缺陷（REV63，与 REV62 同型），已在本批次修复。
+
+### REV63: `NetworkStatusRow` 的图标 `tint` 与文本 `color` 在 `Crossfade` 过渡期间绑定到**外层** `animateColorAsState` 而非**逐行 `isActive` 目标**，导致淡出行图标/文字与颜色短暂不一致 [已修复]
+- **修复状态**: 已修复（本审查批次，分支 `fix/rev63-networkstatusrow-color-crossfade-target`，基于 PR #170 head `4bd6f8b`）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt`（`NetworkStatusRow`，原约 838–864 行）
+  - `Crossfade(targetState = active, label = "network_status_icon") { isActive -> Icon(..., tint = animatedColor) }`（`tint` 原读取外层 `animatedColor`，约 852 行）
+  - `Crossfade(targetState = active, label = "network_status_text") { isActive -> Text(..., color = animatedColor) }`（`color` 原读取外层 `animatedColor`，约 864 行）
+  - 外层 `val animatedColor by animateColorAsState(targetValue = if (active) activeColor else inactiveColor, ...)`（约 838 行，由外层共享 `active` 驱动）
+- **问题描述**: PR #170（`4bd6f8b`）为 `NetworkStatusRow` 引入 `Crossfade` 做图标/文字交叉淡入淡出，并正确地把 `imageVector`/`text` 绑定到逐行 lambda 参数 `isActive`，却把 `Icon.tint` 与 `Text.color` 绑定到外层 `animateColorAsState` 产生的**单一共享** `animatedColor`。Compose 的 `Crossfade`（基于 `AnimatedContent`）在过渡期间会**同时**组合旧（淡出，`isActive` = 旧状态）与新（淡入，`isActive` = 新状态）两行，而两行的 lambda 闭包都读取**同一个** `animatedColor`——它正由旧颜色向新颜色补间。结果：淡出行渲染**旧**图标却被"正趋向新颜色"染色，淡入行渲染**新**图标却被"仍接近旧颜色"染色，二者在 ~300ms 过渡窗口内图标与颜色自相矛盾。这与 REV62（PR #168）修复的反模式**完全同构**：把应随逐行 target 变化的派生视觉属性绑定到随外层共享状态变化的单一值。该提交自身新增的 `.Jules/palette.md` 已明文要求"When using `Crossfade`, always compute derived properties ... inside the lambda using the passed `targetState` parameter"，但 `tint`/`color` 违反了该规约。
+  - **REV63-A（WiFi 断开→连接）**：淡出的 `WifiOff`（灰）图标被染上趋向 `success`（绿）的颜色；淡入的 `Wifi`（绿）图标被染上仍偏灰的颜色。
+  - **REV63-B（蜂窝 连接→断开 等）**：同理，淡出行/淡入行图标与颜色在过渡期不一致。
+- **触发场景**: 任意触发 `NetworkStatusRow` 的 `Crossfade` 切换的用户可感知事件——WiFi 或蜂窝网络连接/断开（`uiState.wifiConnected`/`uiState.cellularConnected` 翻转）。`NetworkStatusRow` 在 `NetworkInfoCard` 中为 WiFi 行与蜂窝行各调用一次（`activeColor = statusColors.success` 绿 / `inactiveColor = MaterialTheme.colorScheme.outline` 灰）。过渡窗口 ~300ms（默认 `tween`），淡出行起始 alpha=1.0，不一致在最初 ~100–150ms 近满透明度下肉眼可见。
+- **影响**: **MEDIUM（可见的功能退化）**。瞬态、自愈（稳态正确），无数据丢失/崩溃/安全影响；但网络状态行是用户判断 WiFi/蜂窝连接状态的关键 UI，过渡期间图标与颜色自相矛盾会误导用户。PR #170 自身提交 "add smooth transitions to NetworkStatusRow" 表明作者意图平滑过渡，但遗漏了颜色也须跟随逐行 target，重蹈 REV62 的覆辙。
+- **验证**: 回归测试 `NetworkStatusRowColorTest`（`android/app/src/test/java/com/netproxy/gateway/ui/screens/NetworkStatusRowColorTest.kt`）锁定修复所依赖的不变式：`networkStatusRowColor(isActive, activeColor, inactiveColor)` 在 `isActive=true` 时返回 `activeColor`、`isActive=false` 时返回 `inactiveColor`——即颜色是逐行 target 的纯函数，每行图标与颜色始终自洽。该测试在 `:app:testDebugUnitTest`（CI 已运行）下执行，无需 emulator。
+- **修复方式**: 新增 `internal` 函数 `networkStatusRowColor(isActive: Boolean, activeColor: Color, inactiveColor: Color): Color = if (isActive) activeColor else inactiveColor`，将两处 `tint`/`color` 改为 `networkStatusRowColor(isActive, activeColor, inactiveColor)`，并**删除**外层冗余的 `animateColorAsState`/`animatedColor`。稳态行为与原实现等价（`isActive` 稳态即 `active`），仅在过渡窗口修正绑定来源：每行图标与颜色同源，混合完全交给 `Crossfade` 的不透明度。修改最小、高置信度，与 REV62 修复模式一致。
+- **关联**: PR #170（`palette/smooth-network-status-transition-7711183361486332504`）。本修复分支基于 PR #170 head，作为其 fix-up PR（base = PR #170 head 分支），与 REV62 作为 PR #165 的 fix-up PR（PR #168）的提交流程一致。同型缺陷：REV62（PR #168）。
+- **交叉验证**: 三个独立 subagent 复审确认（1 个发现 subagent + 2 个独立验证 subagent 逐行核对 `MainScreen.kt` 838/852/864 行：`tint`/`color` 读取外层 `animatedColor` 而图标/文字读取逐行 `isActive`；并从 Compose `Crossfade`/`AnimatedContent` 同时组合旧/新两行 + `animateColorAsState` 产生单一共享值的语义推演过渡窗口错配，CONFIRMED）。
+
 
