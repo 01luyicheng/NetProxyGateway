@@ -11,6 +11,7 @@ import android.content.ContextWrapper
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.ui.draw.rotate
 import androidx.compose.foundation.layout.*
@@ -834,27 +835,35 @@ private fun NetworkStatusRow(
     activeColor: Color,
     inactiveColor: Color
 ) {
+    val animatedColor by androidx.compose.animation.animateColorAsState(
+        targetValue = if (active) activeColor else inactiveColor,
+        label = "network_status_color"
+    )
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Icon(
-            imageVector = if (active) activeIcon else inactiveIcon,
-            contentDescription = null,
-            modifier = Modifier.size(20.dp),
-            tint = if (active) activeColor else inactiveColor
-        )
+        Crossfade(targetState = active, label = "network_status_icon") { isActive ->
+            Icon(
+                imageVector = if (isActive) activeIcon else inactiveIcon,
+                contentDescription = null,
+                modifier = Modifier.size(20.dp),
+                tint = animatedColor
+            )
+        }
         Text(
             text = label,
             style = MaterialTheme.typography.bodyMedium,
             modifier = Modifier.weight(1f)
         )
-        Text(
-            text = stringResource(if (active) R.string.network_in_use else R.string.network_not_in_use),
-            style = MaterialTheme.typography.bodyMedium,
-            color = if (active) activeColor else inactiveColor
-        )
+        Crossfade(targetState = active, label = "network_status_text") { isActive ->
+            Text(
+                text = stringResource(if (isActive) R.string.network_in_use else R.string.network_not_in_use),
+                style = MaterialTheme.typography.bodyMedium,
+                color = animatedColor
+            )
+        }
     }
 }
 
