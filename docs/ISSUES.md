@@ -2303,6 +2303,8 @@
 
 ### REV63: `NetworkStatusRow` 的图标 `tint` 与文本 `color` 在 `Crossfade` 过渡期间绑定到**外层** `animateColorAsState` 而非**逐行 `isActive` 目标**，导致淡出行图标/文字与颜色短暂不一致 [已修复]
 - **修复状态**: 已修复（本审查批次，分支 `fix/rev63-networkstatusrow-color-crossfade-target`，基于 PR #170 head `4bd6f8b`）
+- **提交哈希**: `4bd6f8b`
+- **修复难度**: 低。将颜色派生值改为在 `Crossfade` 逐行 lambda 内根据 `isActive` 计算，并移除外层共享颜色动画。
 - **位置**: `android/app/src/main/java/com/netproxy/gateway/ui/screens/MainScreen.kt`（`NetworkStatusRow`，原约 838–864 行）
   - `Crossfade(targetState = active, label = "network_status_icon") { isActive -> Icon(..., tint = animatedColor) }`（`tint` 原读取外层 `animatedColor`，约 852 行）
   - `Crossfade(targetState = active, label = "network_status_text") { isActive -> Text(..., color = animatedColor) }`（`color` 原读取外层 `animatedColor`，约 864 行）
