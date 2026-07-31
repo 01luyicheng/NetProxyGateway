@@ -2457,6 +2457,7 @@
 ### C-2: `API_ALLOWED_ORIGINS` 含无 scheme 的 origin 时 `cors.New` 启动 panic，API 服务器启动即崩溃 [已修复]
 - **修复状态**: 已修复（本审查批次，分支 `fix/cors-scheme-validation-prevent-startup-panic`，基于 dev `b217d54`）
 - **严重程度**: **CRITICAL（应用崩溃）**
+- **修复难度**: 低。过滤不含 `http://` 或 `https://` scheme 的 origin，并在全部配置无效时回退到安全默认值。
 - **引入**: PR #176（commit `b217d54`，2026-07-31 13:25 +0800，~14h 前合并），env-var 驱动的 CORS allowlist。原 REV59 审查（PR #154，2026-07-30，见本文件 REV59/REV60 复审确认段）称 "CORS allowlist 完整正确"，**遗漏了 scheme-less origin 的 panic 路径**——审查仅验证了带 scheme 的 origin 与 wildcard 拒绝，未覆盖运维误填无 scheme 值的场景。
 - **位置**: `server/api/main.go`
   - `parseCORSAllowedOrigins`（约 1485 行）：合并时仅拒绝 wildcard（含 `*`）的 origin，**不校验 scheme**，无 scheme 的 origin 直接入 `AllowOrigins`。
@@ -2478,6 +2479,7 @@
 
 ### C-1: 生产环境缺失 `API_ALLOWED_ORIGINS` 时静默回退 localhost 默认值，无 fail-fast [待修复]
 - **严重程度**: MEDIUM（用户可感知的功能退化）
+- **修复难度**: 中。需要区分开发与生产环境，并在生产缺失配置时增加 fail-fast 启动校验。
 - **引入**: PR #176（同 C-2，~14h 前合并）
 - **位置**: `server/api/main.go` (`parseCORSAllowedOrigins` 的 `raw == ""` 分支)
 - **问题描述**: 生产环境未设 `API_ALLOWED_ORIGINS` 时，`parseCORSAllowedOrigins("")` 静默返回 dev-only localhost 默认值（`http://localhost:3000`、`http://localhost:8080`）。`gin-contrib/cors` 对不在 allowlist 的 Origin 调 `c.AbortWithStatus(http.StatusForbidden)`，故生产前端的跨源请求**全部 403**。而 `/health` 是公开端点仍返回 200，健康检查绿色，**掩盖了故障**。这与 `INTERNAL_API_KEY` 的 fail-fast 模式（生产缺失即 `log.Fatalf`）不一致——`API_ALLOWED_ORIGINS` 是同等重要的生产部署变量，却无对应守卫。
@@ -2489,6 +2491,7 @@
 
 ### B-1: REV55 修复未清理修复前已投毒的 `device_status` 行，历史遗留远未来 `last_seen` 行永久锁定 [待评估]
 - **严重程度**: MEDIUM（数据完整性）
+- **修复难度**: 高。需要设计兼容滚动升级的幂等迁移或后台清理任务，并谨慎处理时间单位与事件排序语义。
 - **引入/关联**: PR #173（REV55 修复，commit `eaa7a56`，~15h 前合并）
 - **位置**: `server/api/main.go` (`upsertDeviceStatusDB` 的 `WHERE excluded.last_seen > device_status.last_seen` 单调守卫)
 - **问题描述**: REV55（PR #173）对 `updateDeviceStatus` 的**新** client `last_seen` 增加上界 cap（`now + LastSeenFutureTolerance`，5 分钟），但**仅作用于新请求**，对修复部署**之前**已存在的远未来 `last_seen` 的 `device_status` 行（如公元 3000 年、`math.MaxInt64`）没有清理/迁移机制。这些投毒行仍受单调守卫保护：受害设备用真实 `last_seen ≈ now` 上报时，`excluded.last_seen(now) > device_status.last_seen(远未来)` 为 false，UPDATE 被**静默跳过**（handler 丢弃 `sql.Result`、不检查 `RowsAffected()`，仍返回 `200 {"status":"updated"}`），设备状态**永久锁定**为投毒时的值，无自愈。
