@@ -71,5 +71,5 @@ object IpAddressUtils {
         }
 
         return AppResult.success(octets)
-        }
+    }
 }
