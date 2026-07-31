@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/netproxy/shared/ratelimit"
@@ -2352,5 +2353,203 @@ func TestCreateSessionToken_SecondRequestAfterFirstCompletesReturns409(t *testin
 	}
 	if !strings.Contains(rec2.Body.String(), ErrSessionTokenAlreadyIssued.Error()) {
 		t.Fatalf("second request: expected error to contain %q, got %s", ErrSessionTokenAlreadyIssued.Error(), rec2.Body.String())
+	}
+}
+
+// --- CORS hard-coded origins regression tests (CORS-HARDCODED-ORIGINS-1 / REV59 C1) ---
+//
+// These tests pin the fix for the production blocker introduced by PR #108,
+// where AllowOrigins was hard-coded to localhost only. gin-contrib/cors@v1.7.x
+// calls c.AbortWithStatus(http.StatusForbidden) for any Origin not in the
+// allowlist, so a deployed frontend at https://app.example.com received 403
+// for every cross-origin request. See docs/ISSUES.md CORS-HARDCODED-ORIGINS-1.
+
+func TestParseCORSAllowedOrigins_EmptyReturnsDefaults(t *testing.T) {
+	got := parseCORSAllowedOrigins("")
+	if len(got) != len(defaultCORSAllowedOrigins) {
+		t.Fatalf("expected %d default origins, got %v", len(defaultCORSAllowedOrigins), got)
+	}
+	for i, want := range defaultCORSAllowedOrigins {
+		if got[i] != want {
+			t.Fatalf("default origin[%d] = %q, want %q", i, got[i], want)
+		}
+	}
+}
+
+func TestParseCORSAllowedOrigins_SingleOrigin(t *testing.T) {
+	got := parseCORSAllowedOrigins("https://app.example.com")
+	if len(got) != 1 || got[0] != "https://app.example.com" {
+		t.Fatalf("expected [https://app.example.com], got %v", got)
+	}
+}
+
+func TestParseCORSAllowedOrigins_MultipleOriginsTrimsAndDropsEmpties(t *testing.T) {
+	got := parseCORSAllowedOrigins("  https://app.example.com , ,, https://admin.example.com  ,")
+	want := []string{"https://app.example.com", "https://admin.example.com"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Fatalf("origin[%d] = %q, want %q", i, got[i], w)
+		}
+	}
+}
+
+func TestParseCORSAllowedOrigins_OnlyWhitespaceReturnsDefaults(t *testing.T) {
+	got := parseCORSAllowedOrigins("   ,  ,  ")
+	if len(got) != len(defaultCORSAllowedOrigins) {
+		t.Fatalf("expected defaults when all entries are whitespace, got %v", got)
+	}
+}
+
+// Wildcard origins must be rejected: gin-contrib/cors treats a raw "*" entry
+// as AllowAllOrigins, silently disabling the allowlist while
+// AllowCredentials=true. parseCORSAllowedOrigins must never pass one through.
+func TestParseCORSAllowedOrigins_RejectsWildcardEntries(t *testing.T) {
+	got := parseCORSAllowedOrigins("*")
+	if len(got) != len(defaultCORSAllowedOrigins) {
+		t.Fatalf("expected defaults when input is only a wildcard, got %v", got)
+	}
+
+	got = parseCORSAllowedOrigins("https://app.example.com, *, https://*.example.com")
+	if len(got) != 1 || got[0] != "https://app.example.com" {
+		t.Fatalf("expected wildcard entries to be dropped, got %v", got)
+	}
+}
+
+func TestBuildCorsConfig_DefaultsWhenEnvUnset(t *testing.T) {
+	cfg := buildCorsConfig("")
+	if len(cfg.AllowOrigins) != 2 {
+		t.Fatalf("expected 2 default origins, got %v", cfg.AllowOrigins)
+	}
+	if cfg.AllowOrigins[0] != "http://localhost:3000" || cfg.AllowOrigins[1] != "http://localhost:8080" {
+		t.Fatalf("unexpected default origins: %v", cfg.AllowOrigins)
+	}
+	if !cfg.AllowCredentials {
+		t.Fatalf("AllowCredentials must be true")
+	}
+	// Verify the other config knobs are still set so we don't silently regress
+	// the rest of the PR #108 config when refactoring.
+	if len(cfg.AllowMethods) == 0 || len(cfg.AllowHeaders) == 0 {
+		t.Fatalf("AllowMethods/AllowHeaders must not be empty: methods=%v headers=%v", cfg.AllowMethods, cfg.AllowHeaders)
+	}
+	if cfg.MaxAge != 12*time.Hour {
+		t.Fatalf("MaxAge = %v, want 12h", cfg.MaxAge)
+	}
+}
+
+func TestBuildCorsConfig_UsesEnvVarOrigins(t *testing.T) {
+	cfg := buildCorsConfig("https://app.example.com,https://admin.example.com")
+	if len(cfg.AllowOrigins) != 2 {
+		t.Fatalf("expected 2 origins from env, got %v", cfg.AllowOrigins)
+	}
+	if cfg.AllowOrigins[0] != "https://app.example.com" || cfg.AllowOrigins[1] != "https://admin.example.com" {
+		t.Fatalf("unexpected origins: %v", cfg.AllowOrigins)
+	}
+	for _, def := range defaultCORSAllowedOrigins {
+		for _, got := range cfg.AllowOrigins {
+			if got == def {
+				t.Fatalf("default localhost origin %q should NOT appear when env var is set", def)
+			}
+		}
+	}
+}
+
+// newCORSTestRouter mounts a Gin engine with the given CORS config and a
+// trivial /health route. Mirrors the wiring in main().
+func newCORSTestRouter(t *testing.T, corsConfig cors.Config) *gin.Engine {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(gin.Recovery())
+	r.Use(cors.New(corsConfig))
+	r.GET("/health", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+	return r
+}
+
+func doCORSRequest(t *testing.T, r *gin.Engine, method, origin, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, nil)
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestCORSIntegration_DefaultsRejectProductionOrigin — regression guard for the
+// original PR #108 bug: with the env var UNSET (defaults), a production origin
+// must NOT receive 200. It receives 403 from the library. This proves the
+// production-breakage scenario and pins it as the behavior we are fixing.
+func TestCORSIntegration_DefaultsRejectProductionOrigin(t *testing.T) {
+	r := newCORSTestRouter(t, buildCorsConfig(""))
+
+	rec := doCORSRequest(t, r, http.MethodGet, "https://app.example.com", "/health")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("with defaults, production origin must be rejected with 403 (regression guard); got %d", rec.Code)
+	}
+}
+
+// TestCORSIntegration_EnvVarAllowsProductionOrigin — the FIX: when
+// API_ALLOWED_ORIGINS lists the production origin, the request reaches the
+// handler and returns 200 with the proper ACAO header. Without this fix the
+// same request would receive 403 (see previous test).
+func TestCORSIntegration_EnvVarAllowsProductionOrigin(t *testing.T) {
+	r := newCORSTestRouter(t, buildCorsConfig("https://app.example.com"))
+
+	rec := doCORSRequest(t, r, http.MethodGet, "https://app.example.com", "/health")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("with env var set, production origin must reach handler (200); got %d", rec.Code)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
+		t.Fatalf("ACAO header = %q, want %q", got, "https://app.example.com")
+	}
+}
+
+// TestCORSIntegration_LocalhostDefaultStillAllowed — dev ergonomics guard:
+// when the env var is unset, the dev defaults shipped with PR #108 must keep
+// working so local development is not broken by the fix.
+func TestCORSIntegration_LocalhostDefaultStillAllowed(t *testing.T) {
+	r := newCORSTestRouter(t, buildCorsConfig(""))
+
+	rec := doCORSRequest(t, r, http.MethodGet, "http://localhost:3000", "/health")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("with defaults, localhost:3000 must still be allowed (200); got %d", rec.Code)
+	}
+}
+
+// TestCORSIntegration_DisallowedOriginStillRejectedAfterEnvSet — security
+// guard: even after the fix, an origin NOT in the env-var allowlist must still
+// be rejected with 403. The fix only expands the allowlist via env var; it
+// does NOT open the door to all origins.
+func TestCORSIntegration_DisallowedOriginStillRejectedAfterEnvSet(t *testing.T) {
+	r := newCORSTestRouter(t, buildCorsConfig("https://app.example.com"))
+
+	rec := doCORSRequest(t, r, http.MethodGet, "https://evil.example.com", "/health")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("origin not in env-var allowlist must still be rejected (403); got %d", rec.Code)
+	}
+}
+
+// TestCORSIntegration_AllowedOriginPreflightReturns204 — verifies preflight
+// handling for an allowed production origin: the library must respond 204 and
+// echo the ACAO header, not 403.
+func TestCORSIntegration_AllowedOriginPreflightReturns204(t *testing.T) {
+	r := newCORSTestRouter(t, buildCorsConfig("https://app.example.com"))
+
+	req := httptest.NewRequest(http.MethodOptions, "/health", nil)
+	req.Header.Set("Origin", "https://app.example.com")
+	req.Header.Set("Access-Control-Request-Method", "GET")
+	req.Header.Set("Access-Control-Request-Headers", "Authorization")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("preflight for allowed origin must return 204; got %d", rec.Code)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
+		t.Fatalf("ACAO header = %q, want %q", got, "https://app.example.com")
 	}
 }
