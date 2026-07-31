@@ -2397,8 +2397,8 @@
   - 在测试或重试场景下可导致进程级 FD 耗尽。
 - **风险**: **中高**。在单次启动场景下影响有限（进程退出即回收），但在测试和重试场景下可导致资源耗尽。
 - **修复方式**:
-  - dev 分支上 `db.Ping` / `initSchema` 失败分支的 `db.Close()` 已由提交 `6661ec3` 独立修复（dev 无 `db.Prepare` 分支，预编译语句优化未移植）。
-  - 本次从 PR #148 抢救的增量为**回归测试**，防止未来 rebase/重构再次误删 `db.Close()`（PR #112 历史上发生过：`3caadf9` 误删 `4556282` 的修复）。
+  - dev 分支上 `db.Ping` / `initSchema` 失败分支原本**缺失** `db.Close()`（pre-existing 泄漏），PR #174 将两处 `db.Close()` 补齐（dev 无 `db.Prepare` 分支，预编译语句优化未移植）。
+  - 本次从 PR #148 抢救的增量为**修复本体（两处 `db.Close()`）+ 回归测试**，防止未来 rebase/重构再次误删 `db.Close()`（PR #112 历史上发生过：`3caadf9` 误删 `4556282` 的修复）。
 - **测试覆盖**:
   - `TestNewServer_ClosesDBOnInitSchemaFailure`：核心回归测试。预创建一个 schema 不匹配的 SQLite db（`pairing_sessions` 表只有 `dummy_col` 列），使 `initSchema` 的索引创建失败。然后调用 `NewServer()`，断言：(1) 返回 error 且 Server 为 nil；(2) 通过 `/proc/self/fd` 计数验证无 FD 泄漏（Linux/CI 上生效，其他平台跳过 FD 断言）。
 - **关联**: 原发现于 PR #112 分支（`db.Prepare` 分支回归由提交 `3caadf9` 引入）。原修复 PR #148 因 base 分支（#112）废弃而关闭，回归测试经本次抢救入 dev。
@@ -2413,4 +2413,38 @@
 - **验证**: 使用 PR #144 head 的 `check_ci_permissions.py` 运行现有 16 个单元测试，**11 个失败**，覆盖 N90/H1/H2/H3/H4/CI-DEP-1 全部不再被检出。
 - **影响**: 这是 REV54 / CI-DEP-1 / N90 / H1-H5 此前修复的精确回归。若 PR #144 以当前状态合入，任何引入 CVSS≥7.0 依赖 CVE 的 PR 都将静默通过 CI。
 - **建议**: PR #144 应移除所有 CI 相关改动（`pr-checks.yml`、`check_ci_permissions.py`、`patch_pr_checks.sh`、`patch_android.sh`、`.Jules/palette.md`），仅保留 `MainScreen.kt` 的 UI 动画部分（经审查无功能性 bug）。
+
+## REV61: createSessionToken 双花漏洞 + tunnel Register 在线时间戳竞态 [已修复]
+
+> 以下问题由多个 subagent 对 REV60 提交 (`28e87e7`) 进行提交后正确性检查时发现，并经独立 subagent 通过静态分析与动态复现测试双重确认。REV60 恢复了 `createSessionToken` 的乐观锁与过期检查，但乐观锁对同一 "connected" 会话的并发签发是空操作（写回相同值），无法防止双花；tunnel `Register` 的在线 `last_seen` 在写锁释放后、阻塞 `Close()` 后捕获，违反了 REV51 不变式。
+>
+> **审查范围**：`fix/pr108-missing-guards-rev60` 分支 REV60 提交后的工作区变更。
+
+### REV61-A1: createSessionToken 乐观锁为空操作重写，并发请求可双花签发多个 token [已修复]
+- **严重程度**: 高（安全 / 数据完整性）
+- **位置**: `server/api/main.go` (`createSessionToken` handler、`compareAndUpdatePairingSessionDB`)
+- **问题描述**: `createSessionToken` 通过 `compareAndUpdatePairingSessionDB` 做"乐观锁"重验，但该 UPDATE 写回的 `status`/`engineer_id`/`used` 与已存储值完全相同（"connected" 会话的 `used` 已在 `updatePairingSession` 中置为 `true`）。SQLite 的 `RowsAffected` 返回匹配行数（即使值未变），因此第二个并发请求的 `WHERE status='connected' AND engineer_id=?` 仍匹配 → `rowsAffected=1` → 通过乐观锁 → 签发第二个 token。乐观锁仅能防护外部写者改变了 `status`/`engineer_id` 的场景，对同一会话的并发签发完全无效。`session_tokens` 表的 PRIMARY KEY 仅在 `token` 上，无 `(device_id, engineer_id)` 唯一约束，DB 层也不阻止多 token。
+- **触发条件**: 工程师客户端因网络超时重试 `POST /api/session/token`、双击提交、或两个标签页/设备同时发起请求 → 两个并发请求都返回 201 Created 并签发不同 token → 同一配对会话产生多个有效 token。动态复现：2 并发 → 2 token；5 并发 → 5 token；200 次无同步朴素调度 200/200 双花。此漏洞在 PR #108 之前就已存在（乐观锁一直是空操作），REV60 恢复乐观锁但未修复此根因。
+- **修复方式**: 将乐观锁重验与 token 插入包裹在单个 `BEGIN IMMEDIATE` 事务中（通过 DSN 添加 `_txlock=immediate` 使 `db.Begin()` 使用 `BEGIN IMMEDIATE`）。事务内先执行乐观锁 UPDATE（获取写锁），再查询是否已存在未过期 token（`SELECT COUNT(*) FROM session_tokens WHERE device_id=? AND engineer_id=? AND expires_at > ?`），若存在则返回 409 `ErrSessionTokenAlreadyIssued`，否则插入 token 并提交。第二个并发请求的 `BEGIN IMMEDIATE` 阻塞直到第一个提交，其 COUNT 查询能看到第一个请求插入的 token → 返回 409。
+- **关联测试**: `TestCreateSessionToken_ConcurrentRequestsIssueSingleToken`（2/5/10 并发均仅签发 1 个 token）、`TestCreateSessionToken_SecondRequestAfterFirstCompletesReturns409`（顺序第二次请求返回 409）
+
+### REV61-A2: tunnel Register 在线 last_seen 在写锁外捕获，与并发 cleanup 竞态导致设备永久卡 "online" [已修复]
+- **严重程度**: 中高（数据完整性 / 用户可感知功能退化，无自纠正）
+- **位置**: `server/tunnel/main.go` (`Register`)
+- **问题描述**: REV60 将 `Register` 的在线 `lastSeen` 捕获放在 `m.mu.Unlock()` 之后、`oldTunnel.Close()` 之后（原第 295 行）。`oldTunnel.Close()` 会阻塞等待 `connMu`（sendLoop 的 WriteMessage 设有 10s 写超时）。REV51 不变式要求"任何后续 Register 的在线 last_seen 严格新于 Unregister 的离线 last_seen"——但该不变式仅在 Register 于写锁内捕获 last_seen 时成立（写锁与读锁互斥保证顺序）。将捕获移到锁外后，`cleanupDeadTunnelsOnce` 可在 `Close()` 阻塞期间删除新注册的 tunnel 并捕获离线 `last_seen`（T_off），随后 Register 捕获更晚的在线 `last_seen`（T_on > T_off）。API 的严格 `WHERE excluded.last_seen > device_status.last_seen` 守卫会接受陈旧在线通知、拒绝合法离线通知。API 侧无任何 `device_status` 对账/清理/超时机制，设备将永久显示 "online"。
+- **触发条件**: `HeartbeatTimeout` 配置较短（< ~10s，即 sendLoop 写超时上限）时可触发。默认 90s 不可触发（潜伏）。设备快速断连重连 → `Register` 阻塞在 `oldTunnel.Close()` → 清理 goroutine 判定新 tunnel 死亡并发送离线 → `Register` 恢复后发送在线（T_on > T_off）→ 设备永久卡 "online"。
+- **修复方式**: 将 `lastSeen := time.Now().UnixMilli()` 从 `m.mu.Unlock()` 之后移到 `m.mu.Lock()` 块内（设置 `m.tunnels[deviceID] = tunnel` 之后、`m.mu.Unlock()` 之前），使 T_on 在写锁内捕获。任何并发 Unregister/cleanup 的 RLock 捕获的 T_off 必然在 WLock 释放之后 → T_off > T_on。`Close()` 仍在锁外执行，无死锁。
+- **关联测试**: 无（该修复本体在 dev 上已存在于 `server/tunnel/main.go` 的 Register 写锁内捕获 lastSeen 处，本次抢救未移植源提交 c501b77 中的 `TestRegister_OnlineLastSeenNotNewerThanConcurrentOffline` 测试，该测试在本仓库不存在）
+
+### REV61-B1: createSessionToken 残留 ExpiresAt TOCTOU 窗口（次要，未修复） [已知限制]
+- **严重程度**: 低（毫秒级窗口）
+- **位置**: `server/api/main.go` (`createSessionToken`)
+- **问题描述**: 乐观锁 `compareAndUpdatePairingSessionDB` 的 WHERE 子句仅检查 `status` 和 `engineer_id`，不检查 `ExpiresAt`。在读取时过期检查（第 1124 行）与乐观锁 UPDATE 之间存在残留 TOCTOU 窗口：会话可能在窗口内过期（`ExpiresAt` 到达但 status 仍为 "connected"，未被清理 goroutine 扫描）。窗口为毫秒级（读取到 UPDATE 之间几次函数调用），配对 TTL 为 15 分钟，影响可忽略。
+- **当前状态**: 已知限制，不单独修复。REV61-A1 的事务已缩小整体窗口。
+
+### REV61-B2: upsertDeviceStatusDB 混合单位守卫（迁移期，未修复） [已知限制]
+- **严重程度**: 低（仅滚动升级期间）
+- **位置**: `server/api/main.go` (`upsertDeviceStatusDB`)
+- **问题描述**: `WHERE excluded.last_seen > device_status.last_seen` 守卫比较原始整数。滚动升级期间，旧代码写入的秒级行（~1.77e9）与新代码写入的毫秒级 upsert（~1.77e12）共存。新 upsert 始终"新于"旧行（数值更大）→ 覆盖；旧 upsert 始终"旧于"新行 → 被拒绝。`getDeviceStatusDB` 的读侧兼容转换（`< 1e12` 则 ×1000）不影响比较路径。
+- **当前状态**: 已知限制，仅影响滚动升级窗口。升级完成后所有行均为毫秒级，问题消失。
 

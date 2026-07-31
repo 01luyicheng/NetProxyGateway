@@ -71,6 +71,7 @@ var (
 	ErrMissingInternalAPIKey              = errors.New("missing internal api key")
 	ErrInvalidInternalAPIKey              = errors.New("invalid internal api key")
 	ErrConcurrentModification             = errors.New("session was modified by another request, please retry")
+	ErrSessionTokenAlreadyIssued          = errors.New("a session token was already issued for this pairing session")
 )
 
 var (
@@ -205,8 +206,11 @@ func NewServer() (*Server, error) {
 		dbPath = DefaultDBPath
 	}
 
-	// Open database connection
-	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
+	// Open database connection. _txlock=immediate makes db.Begin() use
+	// BEGIN IMMEDIATE, which acquires the write lock up-front. This is required
+	// so that createSessionToken's read-check-insert transaction serializes
+	// concurrent token-issuance attempts and prevents double-spend (REV61).
+	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000&_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -525,6 +529,33 @@ func (s *Server) compareAndUpdatePairingSessionDB(session *PairingSession, expec
 	}
 
 	result, err := s.db.Exec(
+		`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ? AND status = ? AND engineer_id = ?`,
+		session.Status,
+		session.EngineerID,
+		boolToInt(session.Used),
+		session.Code,
+		expectedStatus,
+		expectedEngineerID,
+	)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return ErrConcurrentModification
+	}
+	return nil
+}
+
+// compareAndUpdatePairingSessionTx is the transaction-scoped variant of
+// compareAndUpdatePairingSessionDB. It runs the optimistic-lock UPDATE within
+// the caller's *sql.Tx so the lock and the subsequent token insert commit
+// atomically, preventing double-spend (REV61).
+func compareAndUpdatePairingSessionTx(tx *sql.Tx, session *PairingSession, expectedStatus, expectedEngineerID string) error {
+	result, err := tx.Exec(
 		`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ? AND status = ? AND engineer_id = ?`,
 		session.Status,
 		session.EngineerID,
@@ -1171,10 +1202,32 @@ func (s *Server) createSessionToken(c *gin.Context) {
 		ExpiresAt:  time.Now().Add(SessionTokenTTL),
 	}
 
-	// Re-verify session hasn't been concurrently modified before creating the token.
-	// Uses optimistic locking: if the session status or engineer_id changed between
-	// our read and this write, the UPDATE will affect 0 rows and we abort.
-	if err := s.compareAndUpdatePairingSessionDB(session, expectedStatus, expectedEngineerID); err != nil {
+	// The optimistic-lock re-verification and the token insertion MUST be atomic.
+	// Previously they were two separate auto-commit statements, which allowed
+	// double-spend: two concurrent createSessionToken calls for the same
+	// "connected" session both passed the optimistic lock (the UPDATE writes back
+	// identical values, so the second call's WHERE still matched) and both issued
+	// tokens. Wrapping them in a single BEGIN IMMEDIATE transaction (enabled via
+	// _txlock=immediate in the DSN) serializes concurrent callers: the second
+	// caller's BEGIN blocks until the first commits, so its existence check sees
+	// the first caller's token and returns 409 (REV61).
+	tx, err := s.db.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateSession.Error()})
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Re-verify the session hasn't been concurrently modified before creating the
+	// token. Uses optimistic locking: if the session status or engineer_id changed
+	// between our read and this write, the UPDATE affects 0 rows and we abort with
+	// 409 instead of issuing a token for a stale/revoked/transferred session.
+	if err := compareAndUpdatePairingSessionTx(tx, session, expectedStatus, expectedEngineerID); err != nil {
 		if errors.Is(err, ErrConcurrentModification) {
 			c.JSON(http.StatusConflict, gin.H{"error": ErrConcurrentModification.Error()})
 			return
@@ -1183,10 +1236,45 @@ func (s *Server) createSessionToken(c *gin.Context) {
 		return
 	}
 
-	if err := s.createSessionTokenDB(sessionToken); err != nil {
+	// Double-spend guard: a concurrent request that committed before us may have
+	// already issued a non-expired token for this device+engineer. The BEGIN
+	// IMMEDIATE transaction serializes us after any such commit, so this COUNT
+	// reliably sees it. Reject with 409 instead of issuing a second token.
+	// The created_at >= session.CreatedAt bound scopes the check to tokens
+	// issued for THIS pairing session: a token from an earlier session (same
+	// device+engineer) predates the current session's creation and must not
+	// block a legitimate re-pairing.
+	var existing int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM session_tokens WHERE device_id = ? AND engineer_id = ? AND expires_at > ? AND created_at >= ?`,
+		session.DeviceID, engineerID, time.Now().Unix(), session.CreatedAt.Unix(),
+	).Scan(&existing); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToQueryDatabase.Error()})
+		return
+	}
+	if existing > 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": ErrSessionTokenAlreadyIssued.Error()})
+		return
+	}
+
+	if _, err := tx.Exec(
+		`INSERT INTO session_tokens (token, device_id, engineer_id, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		sessionToken.Token,
+		sessionToken.DeviceID,
+		sessionToken.EngineerID,
+		sessionToken.CreatedAt.Unix(),
+		sessionToken.ExpiresAt.Unix(),
+	); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToCreateToken.Error()})
 		return
 	}
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateSession.Error()})
+		return
+	}
+	committed = true
 
 	c.JSON(http.StatusCreated, sessionToken)
 }
