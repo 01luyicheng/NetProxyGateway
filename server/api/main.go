@@ -1240,10 +1240,14 @@ func (s *Server) createSessionToken(c *gin.Context) {
 	// already issued a non-expired token for this device+engineer. The BEGIN
 	// IMMEDIATE transaction serializes us after any such commit, so this COUNT
 	// reliably sees it. Reject with 409 instead of issuing a second token.
+	// The created_at >= session.CreatedAt bound scopes the check to tokens
+	// issued for THIS pairing session: a token from an earlier session (same
+	// device+engineer) predates the current session's creation and must not
+	// block a legitimate re-pairing.
 	var existing int
 	if err := tx.QueryRow(
-		`SELECT COUNT(*) FROM session_tokens WHERE device_id = ? AND engineer_id = ? AND expires_at > ?`,
-		session.DeviceID, engineerID, time.Now().Unix(),
+		`SELECT COUNT(*) FROM session_tokens WHERE device_id = ? AND engineer_id = ? AND expires_at > ? AND created_at >= ?`,
+		session.DeviceID, engineerID, time.Now().Unix(), session.CreatedAt.Unix(),
 	).Scan(&existing); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToQueryDatabase.Error()})
 		return

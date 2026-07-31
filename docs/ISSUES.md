@@ -2434,7 +2434,7 @@
 - **问题描述**: REV60 将 `Register` 的在线 `lastSeen` 捕获放在 `m.mu.Unlock()` 之后、`oldTunnel.Close()` 之后（原第 295 行）。`oldTunnel.Close()` 会阻塞等待 `connMu`（sendLoop 的 WriteMessage 设有 10s 写超时）。REV51 不变式要求"任何后续 Register 的在线 last_seen 严格新于 Unregister 的离线 last_seen"——但该不变式仅在 Register 于写锁内捕获 last_seen 时成立（写锁与读锁互斥保证顺序）。将捕获移到锁外后，`cleanupDeadTunnelsOnce` 可在 `Close()` 阻塞期间删除新注册的 tunnel 并捕获离线 `last_seen`（T_off），随后 Register 捕获更晚的在线 `last_seen`（T_on > T_off）。API 的严格 `WHERE excluded.last_seen > device_status.last_seen` 守卫会接受陈旧在线通知、拒绝合法离线通知。API 侧无任何 `device_status` 对账/清理/超时机制，设备将永久显示 "online"。
 - **触发条件**: `HeartbeatTimeout` 配置较短（< ~10s，即 sendLoop 写超时上限）时可触发。默认 90s 不可触发（潜伏）。设备快速断连重连 → `Register` 阻塞在 `oldTunnel.Close()` → 清理 goroutine 判定新 tunnel 死亡并发送离线 → `Register` 恢复后发送在线（T_on > T_off）→ 设备永久卡 "online"。
 - **修复方式**: 将 `lastSeen := time.Now().UnixMilli()` 从 `m.mu.Unlock()` 之后移到 `m.mu.Lock()` 块内（设置 `m.tunnels[deviceID] = tunnel` 之后、`m.mu.Unlock()` 之前），使 T_on 在写锁内捕获。任何并发 Unregister/cleanup 的 RLock 捕获的 T_off 必然在 WLock 释放之后 → T_off > T_on。`Close()` 仍在锁外执行，无死锁。
-- **关联测试**: `TestRegister_OnlineLastSeenNotNewerThanConcurrentOffline`（模拟阻塞 Close + 短 HeartbeatTimeout + 并发 cleanup，断言 online last_seen <= offline last_seen，-race -count=3 通过）
+- **关联测试**: 无（该修复本体在 dev 上已存在于 `server/tunnel/main.go` 的 Register 写锁内捕获 lastSeen 处，本次抢救未移植源提交 c501b77 中的 `TestRegister_OnlineLastSeenNotNewerThanConcurrentOffline` 测试，该测试在本仓库不存在）
 
 ### REV61-B1: createSessionToken 残留 ExpiresAt TOCTOU 窗口（次要，未修复） [已知限制]
 - **严重程度**: 低（毫秒级窗口）
