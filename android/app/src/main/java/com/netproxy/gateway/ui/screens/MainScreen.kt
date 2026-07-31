@@ -605,16 +605,26 @@ fun PairingSection(
                 modifier = Modifier.fillMaxWidth(),
                 enabled = pairingCode.length >= 6 && !uiState.isPairingInProgress
             ) {
-                if (uiState.isPairingInProgress) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        strokeWidth = 2.dp
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(stringResource(R.string.pairing_in_progress))
-                } else {
-                    Text(stringResource(R.string.pair))
+                androidx.compose.animation.AnimatedContent(
+                    targetState = uiState.isPairingInProgress,
+                    label = "pairing_button_content"
+                ) { isPairing ->
+                    Row(
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (isPairing) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(stringResource(R.string.pairing_in_progress))
+                        } else {
+                            Text(stringResource(R.string.pair))
+                        }
+                    }
                 }
             }
 
