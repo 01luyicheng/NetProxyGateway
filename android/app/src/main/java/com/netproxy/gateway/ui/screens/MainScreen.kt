@@ -12,6 +12,7 @@ import android.content.ContextWrapper
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.ui.draw.rotate
@@ -863,24 +864,43 @@ private fun NetworkStatusRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Icon(
-            imageVector = if (active) activeIcon else inactiveIcon,
-            contentDescription = null,
-            modifier = Modifier.size(20.dp),
-            tint = if (active) activeColor else inactiveColor
-        )
+        Crossfade(targetState = active, label = "network_status_icon") { isActive ->
+            Icon(
+                imageVector = if (isActive) activeIcon else inactiveIcon,
+                contentDescription = null,
+                modifier = Modifier.size(20.dp),
+                tint = networkStatusRowColor(isActive, activeColor, inactiveColor)
+            )
+        }
         Text(
             text = label,
             style = MaterialTheme.typography.bodyMedium,
             modifier = Modifier.weight(1f)
         )
-        Text(
-            text = stringResource(if (active) R.string.network_in_use else R.string.network_not_in_use),
-            style = MaterialTheme.typography.bodyMedium,
-            color = if (active) activeColor else inactiveColor
-        )
+        Crossfade(targetState = active, label = "network_status_text") { isActive ->
+            Text(
+                text = stringResource(if (isActive) R.string.network_in_use else R.string.network_not_in_use),
+                style = MaterialTheme.typography.bodyMedium,
+                color = networkStatusRowColor(isActive, activeColor, inactiveColor)
+            )
+        }
     }
 }
+
+// REV63: during a Crossfade transition Compose composes BOTH the fading-out row
+// (isActive = OLD state) and the fading-in row (isActive = NEW state) against the
+// *current* outer `active`. The row color must therefore be derived from the per-row
+// `isActive` target, NOT from an outer animateColorAsState — otherwise the fading-out
+// row renders the OLD icon tinted with a color moving toward the NEW color, while the
+// fading-in row renders the NEW icon tinted with a color still near the OLD color
+// (a ~300ms user-visible icon/color mismatch on every WiFi/cellular transition). This
+// is the same anti-pattern REV62 fixed for the ConnectionStatusCard spinner and the
+// VpnStatusCard indicator. `internal` for same-module test access (see REV62).
+internal fun networkStatusRowColor(
+    isActive: Boolean,
+    activeColor: Color,
+    inactiveColor: Color
+): Color = if (isActive) activeColor else inactiveColor
 
 @Composable
 private fun DiagnosticsCard(uiState: UiState) {
