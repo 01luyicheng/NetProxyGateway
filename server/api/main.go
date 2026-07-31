@@ -1449,7 +1449,7 @@ var defaultCORSAllowedOrigins = []string{"http://localhost:3000", "http://localh
 // dropped. When the env var is unset or contains no valid origins, the
 // dev-only localhost defaults are used so local development keeps working.
 //
-// Without this env-var-driven allowlist, gin-contrib/cors@v1.7.7 would
+// Without this env-var-driven allowlist, gin-contrib/cors@v1.7.x would
 // `AbortWithStatus(http.StatusForbidden)` for every cross-origin request
 // whose Origin is not localhost, hard-breaking any non-dev deployment.
 // See docs/ISSUES.md CORS-HARDCODED-ORIGINS-1 (REV59 / C1).
@@ -1467,6 +1467,12 @@ func buildCorsConfig(allowedOriginsEnv string) cors.Config {
 // parseCORSAllowedOrigins splits a comma-separated origin list, trimming
 // whitespace and dropping empty entries. Returns the dev-only localhost
 // defaults when the input contains no valid origin.
+//
+// Wildcard entries (anything containing "*") are rejected and skipped with a
+// warning: gin-contrib/cors's Validate() does not scheme-check entries
+// containing "*", so a raw "*" would silently match EVERY origin while
+// AllowCredentials=true — disabling the allowlist this feature exists to
+// enforce.
 func parseCORSAllowedOrigins(raw string) []string {
 	if raw == "" {
 		return defaultCORSAllowedOrigins
@@ -1474,9 +1480,14 @@ func parseCORSAllowedOrigins(raw string) []string {
 	origins := make([]string, 0, 4)
 	for _, item := range strings.Split(raw, ",") {
 		origin := strings.TrimSpace(item)
-		if origin != "" {
-			origins = append(origins, origin)
+		if origin == "" {
+			continue
 		}
+		if strings.Contains(origin, "*") {
+			log.Printf("WARNING: API_ALLOWED_ORIGINS: ignoring wildcard origin %q — wildcards are not allowed with credentials enabled", origin)
+			continue
+		}
+		origins = append(origins, origin)
 	}
 	if len(origins) == 0 {
 		return defaultCORSAllowedOrigins

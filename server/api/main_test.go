@@ -2359,7 +2359,7 @@ func TestCreateSessionToken_SecondRequestAfterFirstCompletesReturns409(t *testin
 // --- CORS hard-coded origins regression tests (CORS-HARDCODED-ORIGINS-1 / REV59 C1) ---
 //
 // These tests pin the fix for the production blocker introduced by PR #108,
-// where AllowOrigins was hard-coded to localhost only. gin-contrib/cors@v1.7.7
+// where AllowOrigins was hard-coded to localhost only. gin-contrib/cors@v1.7.x
 // calls c.AbortWithStatus(http.StatusForbidden) for any Origin not in the
 // allowlist, so a deployed frontend at https://app.example.com received 403
 // for every cross-origin request. See docs/ISSUES.md CORS-HARDCODED-ORIGINS-1.
@@ -2400,6 +2400,21 @@ func TestParseCORSAllowedOrigins_OnlyWhitespaceReturnsDefaults(t *testing.T) {
 	got := parseCORSAllowedOrigins("   ,  ,  ")
 	if len(got) != len(defaultCORSAllowedOrigins) {
 		t.Fatalf("expected defaults when all entries are whitespace, got %v", got)
+	}
+}
+
+// Wildcard origins must be rejected: gin-contrib/cors treats a raw "*" entry
+// as AllowAllOrigins, silently disabling the allowlist while
+// AllowCredentials=true. parseCORSAllowedOrigins must never pass one through.
+func TestParseCORSAllowedOrigins_RejectsWildcardEntries(t *testing.T) {
+	got := parseCORSAllowedOrigins("*")
+	if len(got) != len(defaultCORSAllowedOrigins) {
+		t.Fatalf("expected defaults when input is only a wildcard, got %v", got)
+	}
+
+	got = parseCORSAllowedOrigins("https://app.example.com, *, https://*.example.com")
+	if len(got) != 1 || got[0] != "https://app.example.com" {
+		t.Fatalf("expected wildcard entries to be dropped, got %v", got)
 	}
 }
 
