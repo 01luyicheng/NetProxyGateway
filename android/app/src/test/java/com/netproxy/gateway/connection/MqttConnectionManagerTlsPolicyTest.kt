@@ -64,9 +64,9 @@ class MqttConnectionManagerTlsPolicyTest {
     }
 
     @Test
-    fun shouldTrustAllCertificatesForCurrentBuild_debugBuildUsesSettingValue() {
+    fun shouldTrustAllCertificatesForCurrentBuild_debugBuildAlwaysFalse() {
         DebugSettingsStore.setSkipMqttCertValidationEnabled(context, true)
-        assertTrue(manager.shouldTrustAllCertificatesForCurrentBuild(isDebugBuild = true))
+        assertFalse(manager.shouldTrustAllCertificatesForCurrentBuild(isDebugBuild = true))
 
         DebugSettingsStore.setSkipMqttCertValidationEnabled(context, false)
         assertFalse(manager.shouldTrustAllCertificatesForCurrentBuild(isDebugBuild = true))
