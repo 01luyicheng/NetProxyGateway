@@ -2418,6 +2418,58 @@ func TestParseCORSAllowedOrigins_RejectsWildcardEntries(t *testing.T) {
 	}
 }
 
+// Scheme-less origins must be rejected and skipped: gin-contrib/cors v1.7.x's
+// Validate() returns an error for any origin that contains no "*" and does not
+// start with an allowed schema (http:// or https://), and newCors() panics on
+// that error — crashing the API server at startup. parseCORSAllowedOrigins
+// must never pass one through. See docs/ISSUES.md CORS-SCHEMELESS-STARTUP-PANIC (C-2).
+//
+// Trigger scenario: an operator sets API_ALLOWED_ORIGINS="localhost:3000"
+// (a very natural value, copied from the dev defaults' host:port form) and the
+// API server crashes on the next restart with a cryptic library panic instead
+// of serving traffic.
+func TestParseCORSAllowedOrigins_RejectsSchemelessEntries(t *testing.T) {
+	// Only scheme-less entries -> fall back to dev defaults (no valid origin).
+	got := parseCORSAllowedOrigins("localhost:3000")
+	if len(got) != len(defaultCORSAllowedOrigins) {
+		t.Fatalf("expected defaults when input is only a scheme-less origin, got %v", got)
+	}
+
+	// A bare host, "null", and a file:// origin must all be dropped too.
+	got = parseCORSAllowedOrigins("app.example.com, null, file:///index.html")
+	if len(got) != len(defaultCORSAllowedOrigins) {
+		t.Fatalf("expected defaults when all entries are scheme-less, got %v", got)
+	}
+
+	// Mixed: valid origins survive, scheme-less ones are silently dropped.
+	got = parseCORSAllowedOrigins("https://app.example.com, localhost:3000, http://admin.example.com")
+	want := []string{"https://app.example.com", "http://admin.example.com"}
+	if len(got) != len(want) {
+		t.Fatalf("expected scheme-less entries to be dropped, got %v", got)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Fatalf("origin[%d] = %q, want %q", i, got[i], w)
+		}
+	}
+
+	// Uppercase schemes (HTTP://, HTTPS://) are rejected too: gin-contrib/cors
+	// v1.7.x's schema test is case-sensitive and panics on them with
+	// "bad origin: origins must contain '*' or include http://,https://".
+	// Browsers always emit lowercase Origin, so the allowed origin must be
+	// lowercase; rejecting uppercase is consistent with the library and
+	// prevents the same startup panic. Only-uppercase input -> dev defaults.
+	got = parseCORSAllowedOrigins("HTTPS://app.example.com")
+	if len(got) != len(defaultCORSAllowedOrigins) {
+		t.Fatalf("expected defaults when input is only an uppercase-scheme origin, got %v", got)
+	}
+	// Mixed: uppercase dropped, lowercase valid origin survives.
+	got = parseCORSAllowedOrigins("HTTP://app.example.com, https://admin.example.com")
+	if len(got) != 1 || got[0] != "https://admin.example.com" {
+		t.Fatalf("expected uppercase-scheme entry to be dropped, got %v", got)
+	}
+}
+
 func TestBuildCorsConfig_DefaultsWhenEnvUnset(t *testing.T) {
 	cfg := buildCorsConfig("")
 	if len(cfg.AllowOrigins) != 2 {
@@ -2551,5 +2603,42 @@ func TestCORSIntegration_AllowedOriginPreflightReturns204(t *testing.T) {
 	}
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
 		t.Fatalf("ACAO header = %q, want %q", got, "https://app.example.com")
+	}
+}
+
+// TestCORSIntegration_SchemelessOriginDoesNotPanicAtStartup — the core
+// regression guard for C-2. Before the fix, an operator setting
+// API_ALLOWED_ORIGINS="localhost:3000" (a natural host:port value) would cause
+// cors.New -> Validate() to return an error and newCors() to panic, crashing
+// the API server at startup with a cryptic library-level message.
+//
+// This test deliberately constructs the offending config and mounts it through
+// cors.New (the real panic site). If the fix in parseCORSAllowedOrigins ever
+// regresses, this test panics instead of failing cleanly — which Go reports as
+// a test failure, so the bug cannot slip past CI.
+func TestCORSIntegration_SchemelessOriginDoesNotPanicAtStartup(t *testing.T) {
+	// Must not panic. The scheme-less "localhost:3000" is dropped and the valid
+	// https origin survives, so Validate() sees only scheme-bearing entries.
+	r := newCORSTestRouter(t, buildCorsConfig("localhost:3000, https://app.example.com"))
+
+	// The valid origin is still served; the scheme-less one is simply ignored.
+	rec := doCORSRequest(t, r, http.MethodGet, "https://app.example.com", "/health")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("valid origin must still be allowed after dropping scheme-less entries; got %d", rec.Code)
+	}
+}
+
+// TestCORSIntegration_OnlySchemelessOriginsDoesNotPanicAtStartup — the
+// degenerate case: if EVERY entry is scheme-less, parseCORSAllowedOrigins
+// falls back to the dev defaults rather than passing an empty/invalid list to
+// the library. An empty AllowOrigins with AllowCredentials=true also trips
+// Validate(), so the fallback is load-bearing here.
+func TestCORSIntegration_OnlySchemelessOriginsDoesNotPanicAtStartup(t *testing.T) {
+	// Must not panic; falls back to localhost dev defaults.
+	r := newCORSTestRouter(t, buildCorsConfig("localhost:3000"))
+
+	rec := doCORSRequest(t, r, http.MethodGet, "http://localhost:3000", "/health")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("localhost dev default must still be allowed after scheme-less fallback; got %d", rec.Code)
 	}
 }

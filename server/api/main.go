@@ -1473,6 +1473,15 @@ func buildCorsConfig(allowedOriginsEnv string) cors.Config {
 // containing "*", so a raw "*" would silently match EVERY origin while
 // AllowCredentials=true — disabling the allowlist this feature exists to
 // enforce.
+//
+// Scheme-less entries (e.g. "localhost:3000", "app.example.com", "null",
+// "file://...") are also rejected and skipped: gin-contrib/cors v1.7.x's
+// Validate() returns an error for any origin that contains no "*" and does
+// not start with an allowed schema (http:// or https://, since
+// AllowFiles/AllowBrowserExtensions/AllowWebSockets/CustomSchemas are not
+// configured), and newCors() panics on that error — crashing the API server
+// at startup. Filtering here converts that confusing library-level panic
+// into an actionable warning.
 func parseCORSAllowedOrigins(raw string) []string {
 	if raw == "" {
 		return defaultCORSAllowedOrigins
@@ -1487,9 +1496,20 @@ func parseCORSAllowedOrigins(raw string) []string {
 			log.Printf("WARNING: API_ALLOWED_ORIGINS: ignoring wildcard origin %q — wildcards are not allowed with credentials enabled", origin)
 			continue
 		}
+		if !strings.HasPrefix(origin, "http://") && !strings.HasPrefix(origin, "https://") {
+			log.Printf("WARNING: API_ALLOWED_ORIGINS: ignoring invalid origin %q — origins must start with http:// or https:// (otherwise gin-contrib/cors panics at startup)", origin)
+			continue
+		}
 		origins = append(origins, origin)
 	}
 	if len(origins) == 0 {
+		// raw was non-empty (the raw == "" case returned above) but yielded no
+		// valid origin. Surface the fallback so a misconfigured production
+		// deployment does not silently degrade to 403-for-every-origin with a
+		// green /health. This is observability only; the fail-fast question
+		// (whether to log.Fatalf here, mirroring INTERNAL_API_KEY) is tracked
+		// as C-1 in docs/ISSUES.md.
+		log.Printf("WARNING: API_ALLOWED_ORIGINS=%q contained no valid origins; falling back to dev-only localhost defaults. Production cross-origin requests will be rejected (403) until API_ALLOWED_ORIGINS lists at least one http(s):// origin.", raw)
 		return defaultCORSAllowedOrigins
 	}
 	return origins

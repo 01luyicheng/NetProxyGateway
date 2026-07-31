@@ -2448,3 +2448,54 @@
 - **问题描述**: `WHERE excluded.last_seen > device_status.last_seen` 守卫比较原始整数。滚动升级期间，旧代码写入的秒级行（~1.77e9）与新代码写入的毫秒级 upsert（~1.77e12）共存。新 upsert 始终"新于"旧行（数值更大）→ 覆盖；旧 upsert 始终"旧于"新行 → 被拒绝。`getDeviceStatusDB` 的读侧兼容转换（`< 1e12` 则 ×1000）不影响比较路径。
 - **当前状态**: 已知限制，仅影响滚动升级窗口。升级完成后所有行均为毫秒级，问题消失。
 
+---
+
+## 提交后正确性检查发现（2026-08-01，多 subagent 审查过去 24h 各分支提交 + 活跃 PR）
+
+> 以下问题由多个 subagent 对过去 24 小时内各分支提交与活跃 PR 进行深度审查发现。重点审查 dev 分支近期合并：PR #176（env-var 驱动的 CORS allowlist，~14h 前合并）、PR #173（REV55 device_status last_seen 上界，~15h 前合并）、PR #175（REV61-A1 createSessionToken 双花修复，~15h 前合并）。PR #176 引入一处 **CRITICAL** 启动崩溃缺陷（C-2），已在本批次修复；并发现一处相关部署缺陷（C-1，待修复）与 REV55 的一处历史遗留数据完整性残余（B-1，待评估）。
+
+### C-2: `API_ALLOWED_ORIGINS` 含无 scheme 的 origin 时 `cors.New` 启动 panic，API 服务器启动即崩溃 [已修复]
+- **修复状态**: 已修复（本审查批次，分支 `fix/cors-scheme-validation-prevent-startup-panic`，基于 dev `b217d54`）
+- **严重程度**: **CRITICAL（应用崩溃）**
+- **引入**: PR #176（commit `b217d54`，2026-07-31 13:25 +0800，~14h 前合并），env-var 驱动的 CORS allowlist。原 REV59 审查（PR #154，2026-07-30，见本文件 REV59/REV60 复审确认段）称 "CORS allowlist 完整正确"，**遗漏了 scheme-less origin 的 panic 路径**——审查仅验证了带 scheme 的 origin 与 wildcard 拒绝，未覆盖运维误填无 scheme 值的场景。
+- **位置**: `server/api/main.go`
+  - `parseCORSAllowedOrigins`（约 1485 行）：合并时仅拒绝 wildcard（含 `*`）的 origin，**不校验 scheme**，无 scheme 的 origin 直接入 `AllowOrigins`。
+  - `main()`（约 1528 行）：`r.Use(cors.New(buildCorsConfig(os.Getenv("API_ALLOWED_ORIGINS"))))` 在路由构建期调用 `cors.New`。
+- **问题描述**: gin-contrib/cors v1.7.1（`go.mod` 锁定，hash 已校验）的 `cors.New` 内部调用 `Config.Validate()`，对 `AllowAllOrigins=false` 且未设 `AllowFiles`/`AllowBrowserExtensions`/`AllowWebSockets`/`CustomSchemas` 时，任何**不含 `*` 且不以 `http://`/`https://` 开头**的 origin 会让 `Validate()` 返回 error，`cors.New` 对该 error **直接 panic**（panic 消息：`bad origin: origins must contain '*' or include http://,https://`）。该 panic 发生在 `main()` 路由构建期，`gin.Recovery()`（请求级 recover）**不覆盖**构建期 panic，故 panic 直接传播出 `main()` 终止进程——API 服务器无法接受任何请求（连 `/health` 也无法响应）。
+  - 同型触发：大写 scheme（`HTTP://`/`HTTPS://`）同样 panic（库的 schema 测试大小写敏感）。
+  - 补充验证：空 `AllowOrigins` + `AllowCredentials=true` 也会 panic（`conflict settings: all origins disabled`），故"全部无效时回退到 dev 默认值"的 fallback 是 **load-bearing**（否则空列表同样崩）。
+- **触发场景**: 运维部署 API 服务器时设置 `API_ALLOWED_ORIGINS=localhost:3000`——这是一个**极自然**的值，从 dev 默认值 `http://localhost:3000` 的 host:port 形式复制而漏掉 `http://` scheme（或从前端开发地址 `localhost:3000` 直接粘贴）。下一次重启 API 服务器即崩溃，错误信息为库级 panic，对运维不直观。其他自然误填：`app.example.com`、`null`（沙箱 iframe origin）、`file://...`。
+- **影响**: **CRITICAL**。服务器启动崩溃，零可用，无降级。无数据丢失/安全影响，但属"应用崩溃"高影响缺陷。
+- **修复方式**: 在 `parseCORSAllowedOrigins` 中，wildcard 检查之后增加 scheme 前缀检查：不以 `http://` 或 `https://` 开头的 origin 记录 WARNING 并跳过（与库的 schema 允许集精确一致，无假阴性/假阳性）。全部 entry 无效时回退到 `defaultCORSAllowedOrigins`（dev-only localhost 默认值）并记录一条 fallback WARNING，说明生产跨源请求将被 403 拒绝。这是**可观测性改进**，不改变行为；fail-fast（见 C-1）单独评估。修改最小、高置信度，单调用点（`buildCorsConfig` → `main`）不受影响。
+- **测试覆盖**（`server/api/main_test.go`）:
+  - `TestParseCORSAllowedOrigins_RejectsSchemelessEntries`：`localhost:3000`、`app.example.com`、`null`、`file:///index.html`、`HTTP://`/`HTTPS://` 大写 scheme 均被丢弃；混合输入中有效 origin 存活。
+  - `TestCORSIntegration_SchemelessOriginDoesNotPanicAtStartup`：**核心回归**——通过 `newCORSTestRouter`→`cors.New`（真实 panic 点）挂载含 `localhost:3000` 的配置，确认不 panic 且有效 origin 仍 200。
+  - `TestCORSIntegration_OnlySchemelessOriginsDoesNotPanicAtStartup`：全部 entry 无 scheme 时回退到 dev 默认值，`cors.New` 不 panic，localhost 仍 200。
+  - 负向确认（临时测试，已删除）：`cors.New` 对裸 `localhost:3000` 确实 panic `bad origin: ...`；对空 `AllowOrigins`+`AllowCredentials=true` 确实 panic `conflict settings: all origins disabled`——证明 bug 真实且 fallback 是 load-bearing。
+  - `go vet` 干净，全套 `go test ./...` 通过。
+- **关联**: PR #176（`b217d54`）、原 REV59 审查（PR #154）。修复分支 `fix/cors-scheme-validation-prevent-startup-panic`，基于 dev，作为 fix-up PR 提交到 dev。
+- **交叉验证**: 两个独立 subagent 复审确认（1 个 fix review：APPROVE-WITH-NITS，4 个 nit 中 1 个经实证为误报——空 `AllowOrigins` 确实 panic，原测试注释正确；其余 nit 已采纳：补 fallback 日志 + 大写 scheme 测试；1 个 root-cause 验证：CONFIRMED，库版本 hash 校验 + 数据流 + panic 路径 + 引入时间均确认）。
+
+### C-1: 生产环境缺失 `API_ALLOWED_ORIGINS` 时静默回退 localhost 默认值，无 fail-fast [待修复]
+- **严重程度**: MEDIUM（用户可感知的功能退化）
+- **引入**: PR #176（同 C-2，~14h 前合并）
+- **位置**: `server/api/main.go` (`parseCORSAllowedOrigins` 的 `raw == ""` 分支)
+- **问题描述**: 生产环境未设 `API_ALLOWED_ORIGINS` 时，`parseCORSAllowedOrigins("")` 静默返回 dev-only localhost 默认值（`http://localhost:3000`、`http://localhost:8080`）。`gin-contrib/cors` 对不在 allowlist 的 Origin 调 `c.AbortWithStatus(http.StatusForbidden)`，故生产前端的跨源请求**全部 403**。而 `/health` 是公开端点仍返回 200，健康检查绿色，**掩盖了故障**。这与 `INTERNAL_API_KEY` 的 fail-fast 模式（生产缺失即 `log.Fatalf`）不一致——`API_ALLOWED_ORIGINS` 是同等重要的生产部署变量，却无对应守卫。
+- **触发场景**: 生产部署漏配 `API_ALLOWED_ORIGINS`（或 CI/CD 模板遗漏）→ 前端全部跨源请求 403，但服务器正常运行、健康检查通过，无告警，故障难以及时发现。
+- **影响**: MEDIUM。生产前端不可用（用户可感知），但服务器不崩溃、无数据丢失/安全影响。
+- **当前状态**: 待修复。本批次（C-2 修复）已添加 fallback WARNING 日志（当 `raw` 非空但全部 entry 无效时记录回退），提升了可观测性；但 `raw == ""`（完全未设）的静默回退**未改变**，fail-fast 未实施。
+- **建议**: 生产环境（`APP_ENV != "development"`，镜像 `INTERNAL_API_KEY` 的判定）缺失 `API_ALLOWED_ORIGINS` 时 `log.Fatalf`，强制运维显式配置。涉及部署行为变更，需单独评估后实施，不在 C-2 最小修复范围内。
+- **关联**: PR #176、C-2。
+
+### B-1: REV55 修复未清理修复前已投毒的 `device_status` 行，历史遗留远未来 `last_seen` 行永久锁定 [待评估]
+- **严重程度**: MEDIUM（数据完整性）
+- **引入/关联**: PR #173（REV55 修复，commit `eaa7a56`，~15h 前合并）
+- **位置**: `server/api/main.go` (`upsertDeviceStatusDB` 的 `WHERE excluded.last_seen > device_status.last_seen` 单调守卫)
+- **问题描述**: REV55（PR #173）对 `updateDeviceStatus` 的**新** client `last_seen` 增加上界 cap（`now + LastSeenFutureTolerance`，5 分钟），但**仅作用于新请求**，对修复部署**之前**已存在的远未来 `last_seen` 的 `device_status` 行（如公元 3000 年、`math.MaxInt64`）没有清理/迁移机制。这些投毒行仍受单调守卫保护：受害设备用真实 `last_seen ≈ now` 上报时，`excluded.last_seen(now) > device_status.last_seen(远未来)` 为 false，UPDATE 被**静默跳过**（handler 丢弃 `sql.Result`、不检查 `RowsAffected()`，仍返回 `200 {"status":"updated"}`），设备状态**永久锁定**为投毒时的值，无自愈。
+- **与 REV55-残余 的区别**: REV55-残余（本文件已记录）是**持续攻击**维持锁定（攻击者每 ≤5 分钟发一次容差内请求）；B-1 是修复部署**前**已投毒的**历史遗留**行，单次投毒、无需持续攻击即永久锁定。二者根因不同（B-1 是缺清理/迁移，REV55-残余是 cap 仍可被持续利用）。
+- **触发场景**: REV55 修复部署前，持有共享 `INTERNAL_API_KEY` 的调用方已对某 `device_id` 投毒（`last_seen` 设为远未来）。部署 REV55 后，新请求被 cap 拒绝，但**已投毒的旧行**仍锁定，受害设备的真实上报始终被静默拒绝，设备在工程师端永久显示离线（实际在线）。唯一恢复手段是人工直连 DB `DELETE/UPDATE`。
+- **影响**: MEDIUM（数据完整性）。设备状态被不可恢复地锁定为错误值；DoS 仅限可见性（工程师端永久显示离线），**不影响流量路由**——socks5-proxy 通过固定 `TunnelEndpoint` 连接隧道服务器，不读取 `device_status`。需攻击者曾持有 internal API key。
+- **当前状态**: 待评估。本批次不实施代码修复——清理阈值、幂等性、与 REV33/REV51 事件排序语义的兼容性需谨慎设计。
+- **建议**: 增加 startup migration 或后台任务，将 `last_seen > now + LastSeenFutureTolerance` 的 `device_status` 行 clamp 到 `now`（或删除），使真实上报可覆盖。clamp 而非删除以保留 `device_id`/`tunnel_addr` 等字段。需确保与滚动升级期间 REV61-B2 混合单位守卫不冲突。
+- **关联**: PR #173（REV55）、REV55-残余、REV33、REV61-B2。
+
