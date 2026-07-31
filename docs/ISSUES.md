@@ -2397,8 +2397,8 @@
   - 在测试或重试场景下可导致进程级 FD 耗尽。
 - **风险**: **中高**。在单次启动场景下影响有限（进程退出即回收），但在测试和重试场景下可导致资源耗尽。
 - **修复方式**:
-  - dev 分支上 `db.Ping` / `initSchema` 失败分支的 `db.Close()` 已由提交 `6661ec3` 独立修复（dev 无 `db.Prepare` 分支，预编译语句优化未移植）。
-  - 本次从 PR #148 抢救的增量为**回归测试**，防止未来 rebase/重构再次误删 `db.Close()`（PR #112 历史上发生过：`3caadf9` 误删 `4556282` 的修复）。
+  - dev 分支上 `db.Ping` / `initSchema` 失败分支原本**缺失** `db.Close()`（pre-existing 泄漏），PR #174 将两处 `db.Close()` 补齐（dev 无 `db.Prepare` 分支，预编译语句优化未移植）。
+  - 本次从 PR #148 抢救的增量为**修复本体（两处 `db.Close()`）+ 回归测试**，防止未来 rebase/重构再次误删 `db.Close()`（PR #112 历史上发生过：`3caadf9` 误删 `4556282` 的修复）。
 - **测试覆盖**:
   - `TestNewServer_ClosesDBOnInitSchemaFailure`：核心回归测试。预创建一个 schema 不匹配的 SQLite db（`pairing_sessions` 表只有 `dummy_col` 列），使 `initSchema` 的索引创建失败。然后调用 `NewServer()`，断言：(1) 返回 error 且 Server 为 nil；(2) 通过 `/proc/self/fd` 计数验证无 FD 泄漏（Linux/CI 上生效，其他平台跳过 FD 断言）。
 - **关联**: 原发现于 PR #112 分支（`db.Prepare` 分支回归由提交 `3caadf9` 引入）。原修复 PR #148 因 base 分支（#112）废弃而关闭，回归测试经本次抢救入 dev。
