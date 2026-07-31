@@ -7,8 +7,9 @@ object DebugSettingsStore {
     private const val DEBUG_SETTINGS_PREFS = "debug_settings"
     private const val KEY_SKIP_MQTT_CERT_VALIDATION = "skip_mqtt_cert_validation"
 
+    // Certificate validation bypass is permanently disabled in all builds.
     val isSkipMqttCertValidationSupported: Boolean
-        get() = BuildConfig.DEBUG
+        get() = false
 
     fun isSkipMqttCertValidationEnabled(context: Context): Boolean {
         if (!BuildConfig.DEBUG) {

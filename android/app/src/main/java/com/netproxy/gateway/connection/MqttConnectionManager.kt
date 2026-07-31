@@ -45,7 +45,6 @@ import android.content.Context
 
 import com.netproxy.gateway.BuildConfig
 import com.netproxy.gateway.debug.AppAuditLogStore
-import com.netproxy.gateway.debug.DebugSettingsStore
 import com.netproxy.gateway.di.ApplicationScope
 import com.netproxy.gateway.result.AppResult
 
@@ -140,7 +139,10 @@ class MqttConnectionManager @Inject constructor(
         }
     }
 
-    internal fun shouldTrustAllCertificatesForCurrentBuild(isDebugBuild: Boolean = BuildConfig.DEBUG): Boolean {
+    /**
+     * Certificate validation is always enforced; debug builds cannot bypass it.
+     */
+    internal fun shouldTrustAllCertificatesForCurrentBuild(): Boolean {
         return false
     }
 
@@ -181,9 +183,7 @@ class MqttConnectionManager @Inject constructor(
     }
 
     /**
-     * 证书策略：
-     * - release 构建：始终使用生产证书校验。
-     * - debug 构建：可通过高级开关临时跳过证书校验。
+     * 证书策略：所有构建类型始终使用生产证书校验，禁止绕过证书验证。
      */
     private fun createSecureSocketFactory(): SSLSocketFactory {
         // 防御性检查：生产环境绝对不能允许信任所有证书
