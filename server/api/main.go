@@ -213,11 +213,13 @@ func NewServer() (*Server, error) {
 
 	// Verify database connection
 	if err := db.Ping(); err != nil {
+		db.Close()
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
 	// Create schema
 	if err := initSchema(db); err != nil {
+		db.Close()
 		return nil, fmt.Errorf("failed to init schema: %w", err)
 	}
 
