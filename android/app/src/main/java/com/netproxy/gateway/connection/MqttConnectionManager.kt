@@ -141,10 +141,7 @@ class MqttConnectionManager @Inject constructor(
     }
 
     internal fun shouldTrustAllCertificatesForCurrentBuild(isDebugBuild: Boolean = BuildConfig.DEBUG): Boolean {
-        if (!isDebugBuild) {
-            return false
-        }
-        return DebugSettingsStore.isSkipMqttCertValidationEnabled(context)
+        return false
     }
 
     /**
