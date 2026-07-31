@@ -2,7 +2,6 @@ package com.netproxy.gateway.connection
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
-import com.netproxy.gateway.debug.DebugSettingsStore
 import dagger.hilt.android.testing.HiltTestApplication
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -56,20 +55,14 @@ class MqttConnectionManagerTlsPolicyTest {
 
     @Test
     fun shouldTrustAllCertificatesForCurrentBuild_releaseBuildAlwaysFalse() {
-        DebugSettingsStore.setSkipMqttCertValidationEnabled(context, true)
-
         val result = manager.shouldTrustAllCertificatesForCurrentBuild(isDebugBuild = false)
-
         assertFalse(result)
     }
 
     @Test
     fun shouldTrustAllCertificatesForCurrentBuild_debugBuildAlwaysFalse() {
-        DebugSettingsStore.setSkipMqttCertValidationEnabled(context, true)
-        assertFalse(manager.shouldTrustAllCertificatesForCurrentBuild(isDebugBuild = true))
-
-        DebugSettingsStore.setSkipMqttCertValidationEnabled(context, false)
-        assertFalse(manager.shouldTrustAllCertificatesForCurrentBuild(isDebugBuild = true))
+        val result = manager.shouldTrustAllCertificatesForCurrentBuild(isDebugBuild = true)
+        assertFalse(result)
     }
 
     @Test

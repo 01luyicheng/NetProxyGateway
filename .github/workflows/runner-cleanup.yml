@@ -1,0 +1,58 @@
+# Daily cleanup for persistent self-hosted runner
+# Prevents disk space exhaustion from build artifacts and stale caches
+name: Runner Cleanup
+
+on:
+  schedule:
+    - cron: '0 4 * * *'   # daily at 04:00 UTC (low-traffic period)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    timeout-minutes: 30
+    steps:
+      - name: Disk usage before
+        run: df -h
+
+      - name: Clean stale runner temp directories
+        run: |
+          # Clean go-mod-*, go-build-*, gradle-* dirs older than 3 days in runner temp
+          find "$RUNNER_TEMP" -maxdepth 1 -type d -mtime +3 \
+            \( -name 'go-mod-*' -o -name 'go-build-*' -o -name 'gradle-*' \) \
+            -print -exec rm -rf {} + 2>/dev/null || true
+
+      - name: Clean /tmp Go caches
+        run: |
+          # Clean per-component Go caches from /tmp (used by CI workflow)
+          find /tmp -maxdepth 1 -type d -mtime +3 \
+            \( -name 'go-mod-*' -o -name 'go-build-*' \) \
+            -print -exec rm -rf {} + 2>/dev/null || true
+
+      - name: Clean Gradle build cache
+        run: |
+          rm -rf ~/.gradle/caches/build-cache-*
+          rm -rf ~/.gradle/caches/transforms-*
+
+      - name: Clean Android build directories
+        run: |
+          # Clean android/b/ build output (can be 2-5 GB per run)
+          WORK_ROOT="${GITHUB_WORKSPACE%/*/*}"
+          if [ -d "$WORK_ROOT" ]; then
+            find "$WORK_ROOT" -maxdepth 3 -type d -name 'b' -path '*/android/b' -mtime +1 \
+              -print -exec rm -rf {} + 2>/dev/null || true
+          fi
+
+      - name: Clean orphaned workspace directories
+        run: |
+          WORK_ROOT="${GITHUB_WORKSPACE%/*/*}"
+          if [ -d "$WORK_ROOT" ]; then
+            find "$WORK_ROOT" -maxdepth 2 -type d -name 'NetProxyGateway' -mtime +7 \
+              -print -exec rm -rf {} + 2>/dev/null || true
+          fi
+
+      - name: Disk usage after
+        run: df -h

@@ -16,6 +16,7 @@ import kotlinx.coroutines.withContext
 
 import java.security.KeyStore
 import java.security.SecureRandom
+import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
@@ -45,9 +46,9 @@ import android.content.Context
 
 import com.netproxy.gateway.BuildConfig
 import com.netproxy.gateway.debug.AppAuditLogStore
-import com.netproxy.gateway.debug.DebugSettingsStore
 import com.netproxy.gateway.di.ApplicationScope
 import com.netproxy.gateway.result.AppResult
+import com.netproxy.gateway.utils.securelyClear
 
 sealed class MqttConnectionState {
     object Disconnected : MqttConnectionState()
@@ -194,18 +195,8 @@ class MqttConnectionManager @Inject constructor(
             )
         }
 
-        val trustAllCertificates = shouldTrustAllCertificatesForCurrentBuild()
-
-        return if (trustAllCertificates) {
-            AppAuditLogStore.warn(
-                "MQTT",
-                "TLS certificate validation disabled (debug override)"
-            )
-            createDevSocketFactory()
-        } else {
-            AppAuditLogStore.info("MQTT", "TLS certificate validation enabled")
-            createProductionSocketFactory()
-        }
+        AppAuditLogStore.info("MQTT", "TLS certificate validation enabled")
+        return createProductionSocketFactory()
     }
 
     /**
@@ -257,30 +248,13 @@ class MqttConnectionManager @Inject constructor(
         return createSSLContext(arrayOf<TrustManager>(pinningTrustManager)).socketFactory
     }
 
-    /**
-     * debug 构建：信任所有证书（仅用于开发测试）
-     * 警告：此方式不安全，仅用于 debug 构建连接自签名证书服务器
-     * 安全限制：仅在 BuildConfig.DEBUG 为 true 时允许使用
-     * 注意：debug 版本仍启用主机名验证以防止中间人攻击
-     */
-    private fun createDevSocketFactory(): SSLSocketFactory {
-        val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
-            override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {
-                // debug 构建：信任所有客户端证书
-            }
-            override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {
-                // debug 构建：信任所有服务器证书（包括自签名）
-            }
-            override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
-        })
-        return createSSLContext(trustAllCerts).socketFactory
-    }
+
 
     fun connect(deviceId: String, authToken: CharArray) {
         var generation = 0L
         lateinit var jobToStart: Job
         synchronized(this@MqttConnectionManager) {
-            activeTokenSnapshot?.fill('\u0000')
+            activeTokenSnapshot.securelyClear()
             activeTokenSnapshot = authToken.copyOf()
             shouldStayConnected = true
             reconnectJob?.cancel()
@@ -491,12 +465,12 @@ class MqttConnectionManager @Inject constructor(
                         }
                     }
                 } finally {
-                    tokenSnapshot.fill('\u0000')
+                    tokenSnapshot.securelyClear()
                     // CR14-1: Paho MqttConnectOptions.setPassword() internally copies the
                     // CharArray via Arrays.copyOf(), so options.password and tokenSnapshot
                     // are independent.  Clear the copy held by MqttConnectOptions so that
                     // the password does not linger in heap memory after the client is closed.
-                    connectOptions?.password?.fill('\u0000')
+                    connectOptions?.password?.securelyClear()
                 }
             }
 
@@ -539,7 +513,7 @@ class MqttConnectionManager @Inject constructor(
                     }
                     connect(deviceId, tokenCopy)
                 } finally {
-                    tokenCopy.fill('\u0000')
+                    tokenCopy.securelyClear()
                 }
             }
             reconnectJob = jobToStart
@@ -690,7 +664,7 @@ class MqttConnectionManager @Inject constructor(
             connectJob = null
             reconnectDelay = INITIAL_RECONNECT_DELAY
 
-            activeTokenSnapshot?.fill('\u0000')
+            activeTokenSnapshot.securelyClear()
             activeTokenSnapshot = null
 
             val c = mqttClient

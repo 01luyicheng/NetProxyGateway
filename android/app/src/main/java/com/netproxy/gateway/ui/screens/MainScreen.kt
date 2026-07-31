@@ -10,6 +10,12 @@ import android.content.Context
 import android.content.ContextWrapper
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.ui.draw.rotate
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -17,11 +23,16 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SignalCellularAlt
@@ -31,22 +42,25 @@ import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.hilt.navigation.compose.hiltViewModel
 
 import com.netproxy.gateway.R
 import com.netproxy.gateway.debug.AppAuditLogStore
 import com.netproxy.gateway.debug.AuditLogEntry
 import com.netproxy.gateway.debug.AuditLogLevel
-import com.netproxy.gateway.debug.DebugSettingsStore
 import com.netproxy.gateway.i18n.AppLocale
 import com.netproxy.gateway.ui.theme.LocalStatusColors
 import com.netproxy.gateway.ui.viewmodel.MainViewModel
@@ -221,9 +235,6 @@ private fun SettingsScreen(
     onOpenAuditLogs: () -> Unit
 ) {
     val context = LocalContext.current
-    var skipMqttCertValidation by rememberSaveable {
-        mutableStateOf(DebugSettingsStore.isSkipMqttCertValidationEnabled(context))
-    }
 
     Column(
         modifier = Modifier
@@ -255,61 +266,7 @@ private fun SettingsScreen(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                if (DebugSettingsStore.isSkipMqttCertValidationSupported) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .toggleable(
-                                value = skipMqttCertValidation,
-                                role = Role.Switch,
-                                onValueChange = { enabled ->
-                                    val success = DebugSettingsStore.setSkipMqttCertValidationEnabled(context, enabled)
-                                    if (success) {
-                                        skipMqttCertValidation = enabled
-                                        if (enabled) {
-                                            AppAuditLogStore.warn(
-                                                "Settings",
-                                                "MQTT certificate validation disabled (debug only)"
-                                            )
-                                        } else {
-                                            AppAuditLogStore.info(
-                                                "Settings",
-                                                "MQTT certificate validation enabled"
-                                            )
-                                        }
-                                    }
-                                }
-                            ),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = stringResource(R.string.settings_skip_mqtt_cert_validation),
-                                style = MaterialTheme.typography.bodyLarge
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = stringResource(R.string.settings_skip_mqtt_cert_validation_desc),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
 
-                        Spacer(modifier = Modifier.width(12.dp))
-
-                        Switch(
-                            checked = skipMqttCertValidation,
-                            onCheckedChange = null
-                        )
-                    }
-                } else {
-                    Text(
-                        text = stringResource(R.string.settings_debug_only),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
             }
         }
     }
@@ -325,6 +282,7 @@ private fun AuditLogsScreen(
         DateTimeFormatter.ofPattern("HH:mm:ss", Locale.getDefault())
             .withZone(ZoneId.systemDefault())
     }
+    var showClearDialog by rememberSaveable { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -334,13 +292,42 @@ private fun AuditLogsScreen(
     ) {
         OutlinedButton(
             onClick = {
-                AppAuditLogStore.clear()
-            }
+                showClearDialog = true
+            },
+            enabled = visibleEntries.isNotEmpty()
         ) {
             Text(stringResource(R.string.clear_logs))
         }
 
         Spacer(modifier = Modifier.height(12.dp))
+
+        if (showClearDialog) {
+            AlertDialog(
+                onDismissRequest = { showClearDialog = false },
+                title = { Text(stringResource(R.string.clear_logs_confirm_title)) },
+                text = { Text(stringResource(R.string.clear_logs_confirm_text)) },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            AppAuditLogStore.clear()
+                            showClearDialog = false
+                        }
+                    ) {
+                        Text(
+                            text = stringResource(R.string.action_clear),
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = { showClearDialog = false }
+                    ) {
+                        Text(stringResource(R.string.action_cancel))
+                    }
+                }
+            )
+        }
 
         if (visibleEntries.isEmpty()) {
             Text(
@@ -431,40 +418,45 @@ private fun ConnectionStatusCard(uiState: UiState, onRetry: () -> Unit) {
     val statusTextRes = statusData.textRes
     val statusIcon = statusData.icon
 
+    val animatedContainerColor by animateColorAsState(targetValue = containerColor, label = "ConnectionContainerColor")
+    val animatedContentColor by animateColorAsState(targetValue = contentColor, label = "ConnectionContentColor")
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = containerColor,
-            contentColor = contentColor
+            containerColor = animatedContainerColor,
+            contentColor = animatedContentColor
         )
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                if (uiState.mqttState == MqttUiState.Connecting) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(24.dp),
-                        color = contentColor,
-                        strokeWidth = 2.dp
-                    )
-                } else if (statusIcon != null) {
-                    Icon(
-                        imageVector = statusIcon,
-                        contentDescription = null,
-                        modifier = Modifier.size(24.dp),
-                        tint = contentColor
+            AnimatedContent(targetState = statusData, label = "ConnectionStatusAnimated") { targetStatus ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (targetStatus.showsSpinner()) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(24.dp),
+                            color = animatedContentColor,
+                            strokeWidth = 2.dp
+                        )
+                    } else if (targetStatus.icon != null) {
+                        Icon(
+                            imageVector = targetStatus.icon,
+                            contentDescription = null,
+                            modifier = Modifier.size(24.dp),
+                            tint = animatedContentColor
+                        )
+                    }
+                    Text(
+                        text = stringResource(targetStatus.textRes),
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = animatedContentColor
                     )
                 }
-                Text(
-                    text = stringResource(statusTextRes),
-                    style = MaterialTheme.typography.headlineSmall,
-                    color = contentColor
-                )
             }
 
             if (uiState.peerId.isNotEmpty()) {
@@ -501,6 +493,7 @@ fun PairingSection(
     viewModel: MainViewModel
 ) {
     var pairingCode by rememberSaveable { mutableStateOf("") }
+    val focusManager = LocalFocusManager.current
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -516,10 +509,35 @@ fun PairingSection(
 
             OutlinedTextField(
                 value = pairingCode,
-                onValueChange = { pairingCode = it },
+                onValueChange = { newValue ->
+                    if (newValue.length <= 6 && newValue.all { it in '0'..'9' }) {
+                        pairingCode = newValue
+                    }
+                },
                 label = { Text(stringResource(R.string.pairing_code_input_label)) },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !uiState.isPairingInProgress
+                enabled = !uiState.isPairingInProgress,
+                singleLine = true,
+                placeholder = { Text(stringResource(R.string.pairing_hint)) },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(
+                    onDone = {
+                        if (pairingCode.length >= 6 && !uiState.isPairingInProgress) {
+                            focusManager.clearFocus()
+                            viewModel.pairWithCode(pairingCode)
+                        }
+                    }
+                ),
+                trailingIcon = {
+                    if (pairingCode.isNotEmpty() && !uiState.isPairingInProgress) {
+                        IconButton(onClick = { pairingCode = "" }) {
+                            Icon(
+                                imageVector = Icons.Default.Clear,
+                                contentDescription = stringResource(R.string.clear_input)
+                            )
+                        }
+                    }
+                }
             )
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -619,12 +637,23 @@ private fun ConnectedOptionsSection(
     }
 }
 
-private data class StatusCardData(
+internal data class StatusCardData(
     val containerColor: Color,
     val contentColor: Color,
     val textRes: Int,
     val icon: ImageVector?
 )
+
+// REV62: during an AnimatedContent crossfade both the fading-out and fading-in rows are
+// composed against the *current* UiState. The spinner / VPN indicator must therefore be
+// derived from the per-row target StatusCardData (the AnimatedContent lambda parameter),
+// NOT from the shared uiState — otherwise the fading-out row briefly renders a spinner /
+// indicator that belongs to the new state, disagreeing with its own icon and text.
+// (Previously the spinner read `uiState.mqttState == Connecting` and the VPN indicator
+// read `uiState.isVpnEnabled`; both produced a ~300ms mismatch during transitions.)
+internal fun StatusCardData.showsSpinner(): Boolean = icon == null
+
+internal fun StatusCardData.isVpnRunning(): Boolean = textRes == R.string.vpn_running
 
 @Composable
 private fun VpnStatusCard(uiState: UiState) {
@@ -649,47 +678,52 @@ private fun VpnStatusCard(uiState: UiState) {
     val statusTextRes = vpnData.textRes
     val icon = vpnData.icon
 
+    val animatedContainerColor by animateColorAsState(targetValue = containerColor, label = "VpnContainerColor")
+    val animatedContentColor by animateColorAsState(targetValue = contentColor, label = "VpnContentColor")
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = containerColor,
-            contentColor = contentColor
+            containerColor = animatedContainerColor,
+            contentColor = animatedContentColor
         )
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            if (icon != null) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    modifier = Modifier.size(24.dp),
-                    tint = contentColor
-                )
-            }
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = stringResource(R.string.vpn_tunnel),
-                    style = MaterialTheme.typography.titleSmall,
-                    color = contentColor
-                )
-                Text(
-                    text = stringResource(statusTextRes),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = contentColor
-                )
-            }
-            Box(
-                modifier = Modifier.size(12.dp),
-                contentAlignment = Alignment.Center
+        AnimatedContent(targetState = vpnData, label = "VpnStatusAnimated") { targetVpnData ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                val indicatorColor = if (uiState.isVpnEnabled) statusColors.success else MaterialTheme.colorScheme.outline
-                androidx.compose.foundation.Canvas(modifier = Modifier.fillMaxSize()) {
-                    drawCircle(color = indicatorColor)
+                if (targetVpnData.icon != null) {
+                    Icon(
+                        imageVector = targetVpnData.icon,
+                        contentDescription = null,
+                        modifier = Modifier.size(24.dp),
+                        tint = animatedContentColor
+                    )
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(R.string.vpn_tunnel),
+                        style = MaterialTheme.typography.titleSmall,
+                        color = animatedContentColor
+                    )
+                    Text(
+                        text = stringResource(targetVpnData.textRes),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = animatedContentColor
+                    )
+                }
+                Box(
+                    modifier = Modifier.size(12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    val indicatorColor = if (targetVpnData.isVpnRunning()) statusColors.success else MaterialTheme.colorScheme.outline
+                    androidx.compose.foundation.Canvas(modifier = Modifier.fillMaxSize()) {
+                        drawCircle(color = indicatorColor)
+                    }
                 }
             }
         }
@@ -772,24 +806,43 @@ private fun NetworkStatusRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Icon(
-            imageVector = if (active) activeIcon else inactiveIcon,
-            contentDescription = null,
-            modifier = Modifier.size(20.dp),
-            tint = if (active) activeColor else inactiveColor
-        )
+        Crossfade(targetState = active, label = "network_status_icon") { isActive ->
+            Icon(
+                imageVector = if (isActive) activeIcon else inactiveIcon,
+                contentDescription = null,
+                modifier = Modifier.size(20.dp),
+                tint = networkStatusRowColor(isActive, activeColor, inactiveColor)
+            )
+        }
         Text(
             text = label,
             style = MaterialTheme.typography.bodyMedium,
             modifier = Modifier.weight(1f)
         )
-        Text(
-            text = stringResource(if (active) R.string.network_in_use else R.string.network_not_in_use),
-            style = MaterialTheme.typography.bodyMedium,
-            color = if (active) activeColor else inactiveColor
-        )
+        Crossfade(targetState = active, label = "network_status_text") { isActive ->
+            Text(
+                text = stringResource(if (isActive) R.string.network_in_use else R.string.network_not_in_use),
+                style = MaterialTheme.typography.bodyMedium,
+                color = networkStatusRowColor(isActive, activeColor, inactiveColor)
+            )
+        }
     }
 }
+
+// REV63: during a Crossfade transition Compose composes BOTH the fading-out row
+// (isActive = OLD state) and the fading-in row (isActive = NEW state) against the
+// *current* outer `active`. The row color must therefore be derived from the per-row
+// `isActive` target, NOT from an outer animateColorAsState — otherwise the fading-out
+// row renders the OLD icon tinted with a color moving toward the NEW color, while the
+// fading-in row renders the NEW icon tinted with a color still near the OLD color
+// (a ~300ms user-visible icon/color mismatch on every WiFi/cellular transition). This
+// is the same anti-pattern REV62 fixed for the ConnectionStatusCard spinner and the
+// VpnStatusCard indicator. `internal` for same-module test access (see REV62).
+internal fun networkStatusRowColor(
+    isActive: Boolean,
+    activeColor: Color,
+    inactiveColor: Color
+): Color = if (isActive) activeColor else inactiveColor
 
 @Composable
 private fun DiagnosticsCard(uiState: UiState) {
@@ -824,15 +877,21 @@ private fun DiagnosticsCard(uiState: UiState) {
                     text = stringResource(R.string.diagnostics_title),
                     style = MaterialTheme.typography.titleMedium
                 )
-                Text(
-                    text = if (expanded) "▲" else "▼",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                val rotation by animateFloatAsState(
+                    targetValue = if (expanded) 180f else 0f,
+                    label = "expand_icon_rotation"
+                )
+                Icon(
+                    imageVector = Icons.Default.KeyboardArrowDown,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.rotate(rotation)
                 )
             }
 
-            if (expanded) {
-                Spacer(modifier = Modifier.height(12.dp))
+            AnimatedVisibility(visible = expanded) {
+                Column {
+                    Spacer(modifier = Modifier.height(12.dp))
 
                 val durationSec = uiState.connectionDurationMs / 1000
                 DiagnosticsRow(
@@ -896,6 +955,7 @@ private fun DiagnosticsCard(uiState: UiState) {
                         if (uiState.networkIsValidated) R.string.network_in_use else R.string.network_not_in_use
                     )
                 )
+                }
             }
         }
     }

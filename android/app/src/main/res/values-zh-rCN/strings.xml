@@ -10,6 +10,7 @@
     <string name="pair">配对</string>
     <string name="pairing_in_progress">配对中...</string>
     <string name="disconnect">断开连接</string>
+    <string name="clear_input">清空输入框</string>
 
     <string name="remote_control">远程控制</string>
     <string name="vpn_tunnel">VPN隧道</string>
@@ -70,6 +71,10 @@
     <string name="audit_logs_title">审计日志</string>
     <string name="audit_logs_empty">暂无近期日志。</string>
     <string name="clear_logs">清空日志</string>
+    <string name="clear_logs_confirm_title">清空审计日志？</string>
+    <string name="clear_logs_confirm_text">此操作无法撤销。所有近期的审计日志将被永久删除。</string>
+    <string name="action_clear">清空</string>
+    <string name="action_cancel">取消</string>
 
     <string name="diagnostics_title">诊断信息</string>
     <string name="diagnostics_connection_duration">连接时长</string>

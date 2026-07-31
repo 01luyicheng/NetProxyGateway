@@ -36,7 +36,7 @@ val validateReleaseConfig by tasks.registering {
         }
         // C1 修复：构建时静态检查，防止 release 构建误启用信任所有证书
         val trustAllCerts = providers.gradleProperty("MQTT_TRUST_ALL_CERTS").orNull
-        if (trustAllCerts == "true") {
+        if (trustAllCerts.equals("true", ignoreCase = true)) {
             throw GradleException(
                 "SECURITY VIOLATION: MQTT_TRUST_ALL_CERTS=true is not allowed in release builds. " +
                 "This would bypass all TLS certificate validation and is insecure. " +
@@ -118,6 +118,17 @@ android {
     testOptions {
         unitTests {
             isIncludeAndroidResources = true
+            all {
+                // N87: serialize test forks to prevent deadlock under CI CPU contention.
+                it.maxParallelForks = 1
+                it.jvmArgs(
+                    "-Xmx2g",
+                    "-XX:MaxMetaspaceSize=512m",
+                    "-XX:+HeapDumpOnOutOfMemoryError"
+                )
+                // Set per-test timeout via JUnit system properties (5 min per test method)
+                it.systemProperty("junit.jupiter.execution.timeout.default", "5m")
+            }
         }
     }
 

@@ -9,11 +9,14 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/netproxy/shared/ratelimit"
@@ -75,10 +78,15 @@ func newPairingTestServer(t *testing.T) *Server {
 		_ = db.Close()
 	})
 
-	return &Server{
+	server := &Server{
 		db:          db,
 		rateLimiter: ratelimit.NewRateLimiterWithDefaults(),
 	}
+	t.Cleanup(func() {
+		server.rateLimiter.Stop()
+	})
+
+	return server
 }
 
 func insertPendingPairingSession(t *testing.T, server *Server, code string, deviceID string) {
@@ -579,6 +587,54 @@ func TestServerCloseStopsCleanupWorkers(t *testing.T) {
 	}
 }
 
+// TestServerCloseIsIdempotent is a regression test for REV56: Server.Close()
+// must be safe to call more than once. The pre-fix implementation did
+// `close(s.cleanupStop)` with no guard, which panicked with "close of closed
+// channel" on the second call (mirroring the REV53 ratelimit Stop() defect).
+// It also re-invoked *sql.DB.Close(); this returns an error rather than
+// panicking, but the idempotent contract should return nil on a second call.
+func TestServerCloseIsIdempotent(t *testing.T) {
+	db, err := sql.Open("sqlite3", "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("failed to open in-memory db: %v", err)
+	}
+	if err := initSchema(db); err != nil {
+		_ = db.Close()
+		t.Fatalf("failed to init schema: %v", err)
+	}
+
+	server := &Server{
+		db:                      db,
+		rateLimiter:             ratelimit.NewRateLimiterWithDefaults(),
+		cleanupSessionsInterval: 10 * time.Millisecond,
+	}
+	server.startCleanupWorkers()
+
+	// First call must succeed and actually close resources.
+	if err := server.Close(); err != nil {
+		t.Fatalf("first Close() failed: %v", err)
+	}
+	if err := db.Ping(); err == nil {
+		t.Fatal("expected database to be closed after first Close()")
+	}
+
+	// Subsequent calls must neither panic nor return an error. Run under a
+	// recover so a failure surfaces as a clear assertion instead of aborting
+	// the test binary.
+	for i := 0; i < 3; i++ {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("Close() call #%d panicked: %v", i+2, r)
+				}
+			}()
+			if err := server.Close(); err != nil {
+				t.Fatalf("Close() call #%d returned unexpected error: %v", i+2, err)
+			}
+		}()
+	}
+}
+
 func TestValidateSessionExpiredTokenDeleteFailureDoesNotLogRawToken(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -1027,6 +1083,94 @@ func TestCompareAndUpdatePairingSessionDB_StatusChangedConcurrently(t *testing.T
 	}
 }
 
+// TestCompareAndUpdatePairingSessionDB_DoesNotRejectExpiredSession verifies that
+// compareAndUpdatePairingSessionDB enforces only optimistic-locking invariants
+// (code + expected status + expected engineer_id). Expiry is intentionally NOT
+// part of the WHERE clause: markSessionExpired must be able to write
+// status="expired" for sessions whose expires_at is already in the past, and
+// all callers perform an explicit time.Now().After(session.ExpiresAt) check
+// before mutating state. Including expires_at > now (REV36) made
+// markSessionExpired always return ErrConcurrentModification, leaving the
+// expired status unwritten and causing updatePairingSession to regress from
+// 410 Gone to 409 Conflict.
+func TestCompareAndUpdatePairingSessionDB_DoesNotRejectExpiredSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+
+	// Insert an already-expired pending session.
+	expiredSession := &PairingSession{
+		Code:      "000000",
+		DeviceID:  "device-expired",
+		Status:    "pending",
+		CreatedAt: time.Now().Add(-2 * PairingCodeTTL),
+		ExpiresAt: time.Now().Add(-time.Minute),
+		Used:      false,
+	}
+	if err := server.createPairingSessionDB(expiredSession); err != nil {
+		t.Fatalf("failed to insert expired session: %v", err)
+	}
+
+	// Updating an expired session must succeed when the optimistic-locking
+	// invariants (status + engineer_id) match. Expiry enforcement is the
+	// caller's responsibility.
+	err := server.compareAndUpdatePairingSessionDB(&PairingSession{
+		Code:       "000000",
+		DeviceID:   "device-expired",
+		Status:     "expired",
+		EngineerID: "engineer-1",
+		Used:       true,
+		CreatedAt:  expiredSession.CreatedAt,
+		ExpiresAt:  expiredSession.ExpiresAt,
+	}, "pending", "")
+	if err != nil {
+		t.Fatalf("expected nil error for expired session with matching invariants, got %v", err)
+	}
+
+	// Verify the session WAS overwritten with the new status.
+	current, err := server.getPairingSessionDB("000000")
+	if err != nil {
+		t.Fatalf("failed to get session after update: %v", err)
+	}
+	if current.Status != "expired" {
+		t.Fatalf("status = %q, want %q; expired session was not updated", current.Status, "expired")
+	}
+}
+
+// TestMarkSessionExpired_SucceedsForExpiredSession verifies that
+// markSessionExpired can write status="expired" for an already-expired session.
+// This is the core regression from REV36: the expires_at > now WHERE clause
+// made this operation always fail with ErrConcurrentModification.
+func TestMarkSessionExpired_SucceedsForExpiredSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+
+	expiredSession := &PairingSession{
+		Code:      "111111",
+		DeviceID:  "device-mark-expired",
+		Status:    "pending",
+		CreatedAt: time.Now().Add(-2 * PairingCodeTTL),
+		ExpiresAt: time.Now().Add(-time.Minute),
+		Used:      false,
+	}
+	if err := server.createPairingSessionDB(expiredSession); err != nil {
+		t.Fatalf("failed to insert expired session: %v", err)
+	}
+
+	if err := server.markSessionExpired(expiredSession, "pending", ""); err != nil {
+		t.Fatalf("markSessionExpired failed for expired session: %v", err)
+	}
+
+	current, err := server.getPairingSessionDB("111111")
+	if err != nil {
+		t.Fatalf("failed to get session after markSessionExpired: %v", err)
+	}
+	if current.Status != "expired" {
+		t.Fatalf("status = %q, want %q; markSessionExpired did not persist expired status", current.Status, "expired")
+	}
+}
+
 // TestUpdatePairingSession_ConcurrentModificationReturns409 exercises the full
 // HTTP handler path (not just the DB layer) to verify that when two requests
 // race to claim the same pending pairing session, exactly one succeeds and
@@ -1036,6 +1180,7 @@ func TestUpdatePairingSession_ConcurrentModificationReturns409(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	server := newPairingTestServer(t)
+	insertPendingPairingSession(t, server, "race-001", "device-race")
 
 	router := gin.New()
 	router.PUT("/pair/:code", func(c *gin.Context) {
@@ -1043,49 +1188,1368 @@ func TestUpdatePairingSession_ConcurrentModificationReturns409(t *testing.T) {
 		server.updatePairingSession(c)
 	})
 
-	sendConnectRequest := func(code, engineerID string) int {
-		req := httptest.NewRequest(http.MethodPut, "/pair/"+code, strings.NewReader(`{"status":"connected"}`))
+	// Two-party barrier: both requests must reach compareAndUpdatePairingSessionDB
+	// before either proceeds, guaranteeing both read pending state and one UPDATE
+	// wins while the other gets ErrConcurrentModification.
+	arrived := make(chan struct{}, 2)
+	proceed := make(chan struct{})
+	server.testHookCompareAndUpdatePairingSessionDB = func() {
+		arrived <- struct{}{}
+		<-proceed
+	}
+
+	sendConnectRequest := func(engineerID string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPut, "/pair/race-001", strings.NewReader(`{"status":"connected"}`))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Engineer-ID", engineerID)
 		recorder := httptest.NewRecorder()
 		router.ServeHTTP(recorder, req)
-		return recorder.Code
+		return recorder
 	}
 
-	const trials = 30
-	sawConflict := false
+	var wg sync.WaitGroup
+	recorders := make([]*httptest.ResponseRecorder, 2)
+	wg.Add(2)
+	go func() { defer wg.Done(); recorders[0] = sendConnectRequest("engineer-A") }()
+	go func() { defer wg.Done(); recorders[1] = sendConnectRequest("engineer-B") }()
 
-	for i := 0; i < trials; i++ {
-		pairingCode := fmt.Sprintf("race-%03d", i)
-		insertPendingPairingSession(t, server, pairingCode, "device-race")
+	for i := 0; i < 2; i++ {
+		select {
+		case <-arrived:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for goroutines to reach barrier")
+		}
+	}
+	close(proceed)
+	wg.Wait()
 
-		var wg sync.WaitGroup
-		statusCodes := make([]int, 2)
-		wg.Add(2)
-		go func() { defer wg.Done(); statusCodes[0] = sendConnectRequest(pairingCode, "engineer-A") }()
-		go func() { defer wg.Done(); statusCodes[1] = sendConnectRequest(pairingCode, "engineer-B") }()
-		wg.Wait()
+	var codes [2]int
+	for i, rec := range recorders {
+		codes[i] = rec.Code
+	}
 
-		successCount := 0
-		for _, statusCode := range statusCodes {
-			switch statusCode {
-			case http.StatusOK:
-				successCount++
-			case http.StatusConflict:
-				sawConflict = true
-			case http.StatusForbidden:
-				// Acceptable: this request only read the session after the
-				// other had already committed its update.
-			default:
-				t.Fatalf("trial %d: unexpected status code %d (codes=%v)", i, statusCode, statusCodes)
+	if codes[0] == http.StatusOK && codes[1] == http.StatusConflict {
+		return
+	}
+	if codes[1] == http.StatusOK && codes[0] == http.StatusConflict {
+		return
+	}
+	t.Fatalf("expected one 200 and one 409, got %v", codes)
+}
+
+// TestUpdatePairingSession_ExpiredReturns410Gone verifies that updating an
+// expired pairing session returns 410 Gone, not 409 Conflict. This is the
+// user-facing regression from REV36: the expires_at > now WHERE clause made
+// markSessionExpired always return ErrConcurrentModification, which the
+// updatePairingSession handler mapped to 409 Conflict instead of 410 Gone.
+func TestUpdatePairingSession_ExpiredReturns410Gone(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+
+	// Insert an already-expired pending session.
+	expiredSession := &PairingSession{
+		Code:      "222222",
+		DeviceID:  "device-expired-update",
+		Status:    "pending",
+		CreatedAt: time.Now().Add(-2 * PairingCodeTTL),
+		ExpiresAt: time.Now().Add(-time.Minute),
+		Used:      false,
+	}
+	if err := server.createPairingSessionDB(expiredSession); err != nil {
+		t.Fatalf("failed to insert expired session: %v", err)
+	}
+
+	router := gin.New()
+	router.PUT("/pair/:code", func(c *gin.Context) {
+		c.Set("engineer_id", c.GetHeader("X-Engineer-ID"))
+		server.updatePairingSession(c)
+	})
+
+	req := httptest.NewRequest(http.MethodPut, "/pair/222222", strings.NewReader(`{"status":"connected"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Engineer-ID", "engineer-1")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusGone {
+		t.Fatalf("expected 410 Gone for expired session, got %d (body=%s)", recorder.Code, recorder.Body.String())
+	}
+
+	// Verify the session status was persisted as "expired".
+	current, err := server.getPairingSessionDB("222222")
+	if err != nil {
+		t.Fatalf("failed to get session after update: %v", err)
+	}
+	if current.Status != "expired" {
+		t.Fatalf("status = %q, want %q; markSessionExpired did not persist expired status", current.Status, "expired")
+	}
+}
+
+func TestUpsertDeviceStatusDB_WritesMillisecondTimestamp(t *testing.T) {
+	server := newPairingTestServer(t)
+
+	// Use a time with sub-second nanoseconds so Unix() and UnixMilli() differ.
+	lastSeen := time.Unix(1700000000, 123456789)
+	status := &DeviceStatus{
+		DeviceID:   "device-ms",
+		Status:     "online",
+		LastSeen:   lastSeen,
+		TunnelAddr: "192.168.1.1:8080",
+	}
+	if err := server.upsertDeviceStatusDB(status); err != nil {
+		t.Fatalf("upsertDeviceStatusDB failed: %v", err)
+	}
+
+	var storedMs int64
+	err := server.db.QueryRow("SELECT last_seen FROM device_status WHERE device_id = ?", status.DeviceID).Scan(&storedMs)
+	if err != nil {
+		t.Fatalf("failed to read stored last_seen: %v", err)
+	}
+
+	wantMs := lastSeen.UnixMilli()
+	if storedMs != wantMs {
+		t.Fatalf("stored last_seen = %d, want %d (millisecond precision)", storedMs, wantMs)
+	}
+
+	stored, err := server.getDeviceStatusDB(status.DeviceID)
+	if err != nil {
+		t.Fatalf("getDeviceStatusDB failed: %v", err)
+	}
+	if stored.LastSeen.UnixMilli() != wantMs {
+		t.Fatalf("parsed LastSeen = %d, want %d", stored.LastSeen.UnixMilli(), wantMs)
+	}
+}
+
+func TestGetDeviceStatusDB_BackwardCompatibleWithSecondPrecision(t *testing.T) {
+	server := newPairingTestServer(t)
+
+	// Simulate a legacy row where last_seen was stored in seconds (REV33).
+	deviceID := "device-legacy"
+	legacySeconds := int64(1700000000)
+	_, err := server.db.Exec(
+		"INSERT INTO device_status (device_id, status, last_seen, tunnel_addr) VALUES (?, ?, ?, ?)",
+		deviceID, "online", legacySeconds, "192.168.1.1:8080",
+	)
+	if err != nil {
+		t.Fatalf("failed to insert legacy row: %v", err)
+	}
+
+	stored, err := server.getDeviceStatusDB(deviceID)
+	if err != nil {
+		t.Fatalf("getDeviceStatusDB failed: %v", err)
+	}
+
+	wantMs := legacySeconds * 1000
+	if stored.LastSeen.UnixMilli() != wantMs {
+		t.Fatalf("legacy second-precision last_seen parsed as %d ms, want %d ms", stored.LastSeen.UnixMilli(), wantMs)
+	}
+}
+
+func TestUpsertDeviceStatusDB_StaleOfflineDoesNotOverwriteNewerOnline(t *testing.T) {
+	server := newPairingTestServer(t)
+	base := time.Unix(1700000000, 0)
+
+	// A newer online event is stored first.
+	if err := server.upsertDeviceStatusDB(&DeviceStatus{
+		DeviceID: "device-stale",
+		Status:   "online",
+		LastSeen: base.Add(time.Millisecond),
+	}); err != nil {
+		t.Fatalf("upsert online failed: %v", err)
+	}
+
+	// A delayed offline notification with an older timestamp must be ignored.
+	if err := server.upsertDeviceStatusDB(&DeviceStatus{
+		DeviceID: "device-stale",
+		Status:   "offline",
+		LastSeen: base,
+	}); err != nil {
+		t.Fatalf("upsert stale offline failed: %v", err)
+	}
+
+	stored, err := server.getDeviceStatusDB("device-stale")
+	if err != nil {
+		t.Fatalf("getDeviceStatusDB failed: %v", err)
+	}
+	if stored.Status != "online" {
+		t.Fatalf("status = %q, want %q; stale offline overwrote newer online", stored.Status, "online")
+	}
+}
+
+func TestUpsertDeviceStatusDB_SameMillisecondEventIsIgnored(t *testing.T) {
+	server := newPairingTestServer(t)
+	ts := time.Unix(1700000000, 0)
+
+	if err := server.upsertDeviceStatusDB(&DeviceStatus{
+		DeviceID: "device-same-ms",
+		Status:   "online",
+		LastSeen: ts,
+	}); err != nil {
+		t.Fatalf("upsert online failed: %v", err)
+	}
+
+	// An event with the exact same timestamp must not overwrite the existing row
+	// because the guard uses a strict greater-than comparison.
+	if err := server.upsertDeviceStatusDB(&DeviceStatus{
+		DeviceID: "device-same-ms",
+		Status:   "offline",
+		LastSeen: ts,
+	}); err != nil {
+		t.Fatalf("upsert same-ms offline failed: %v", err)
+	}
+
+	stored, err := server.getDeviceStatusDB("device-same-ms")
+	if err != nil {
+		t.Fatalf("getDeviceStatusDB failed: %v", err)
+	}
+	if stored.Status != "online" {
+		t.Fatalf("status = %q, want %q; same-millisecond event overwrote existing row", stored.Status, "online")
+	}
+}
+
+func TestUpdateDeviceStatus_AcceptsLastSeenFromRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	server.internalAPIKey = []byte("internal-secret")
+
+	router := gin.New()
+	router.POST("/api/device/status", server.internalAuthMiddleware(), server.updateDeviceStatus)
+
+	base := time.Now()
+	onlineTs := base.Add(time.Millisecond).UnixMilli()
+	offlineTs := base.UnixMilli()
+
+	// Online event with explicit last_seen.
+	reqBody := fmt.Sprintf(`{"device_id":"device-req","status":"online","last_seen":%d}`, onlineTs)
+	req := httptest.NewRequest(http.MethodPost, "/api/device/status", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-API-Key", "internal-secret")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("online update expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	// Delayed offline event with an older last_seen.
+	reqBody = fmt.Sprintf(`{"device_id":"device-req","status":"offline","last_seen":%d}`, offlineTs)
+	req = httptest.NewRequest(http.MethodPost, "/api/device/status", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-API-Key", "internal-secret")
+	recorder = httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("offline update expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	stored, err := server.getDeviceStatusDB("device-req")
+	if err != nil {
+		t.Fatalf("getDeviceStatusDB failed: %v", err)
+	}
+	if stored.Status != "online" {
+		t.Fatalf("status = %q, want %q; stale offline from request overwrote newer online", stored.Status, "online")
+	}
+	if stored.LastSeen.UnixMilli() != onlineTs {
+		t.Fatalf("LastSeen = %d, want %d", stored.LastSeen.UnixMilli(), onlineTs)
+	}
+}
+
+// TestUpdateDeviceStatus_RejectsFutureLastSeen verifies REV55: a client-supplied
+// last_seen that lies beyond LastSeenFutureTolerance in the future must be
+// rejected with 400. Without this guard the value would be persisted and then
+// permanently reject every subsequent legitimate update via the monotonic
+// `excluded.last_seen > device_status.last_seen` guard in upsertDeviceStatusDB.
+func TestUpdateDeviceStatus_RejectsFutureLastSeen(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	server.internalAPIKey = []byte("internal-secret")
+
+	router := gin.New()
+	router.POST("/api/device/status", server.internalAuthMiddleware(), server.updateDeviceStatus)
+
+	// A timestamp far beyond the future tolerance (year 3000).
+	farFuture := time.Now().Add(365 * 24 * time.Hour).UnixMilli()
+	reqBody := fmt.Sprintf(`{"device_id":"dev-fut","status":"online","last_seen":%d}`, farFuture)
+	req := httptest.NewRequest(http.MethodPost, "/api/device/status", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-API-Key", "internal-secret")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for far-future last_seen, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	// The row must not have been created.
+	stored, err := server.getDeviceStatusDB("dev-fut")
+	if err != nil {
+		t.Fatalf("getDeviceStatusDB failed: %v", err)
+	}
+	if stored != nil {
+		t.Fatalf("device_status row should not exist after rejection, got status=%q last_seen=%d", stored.Status, stored.LastSeen.UnixMilli())
+	}
+}
+
+// TestUpdateDeviceStatus_FutureLastSeenDoesNotPermanentlyLockRow is the core
+// REV55 regression test. It reproduces the original attack: poison a row with a
+// future last_seen, then prove that subsequent real updates eventually take
+// effect once wall-clock passes the (tolerance-capped) stored value. Before the
+// fix an attacker could store an arbitrarily large value and lock the row forever.
+func TestUpdateDeviceStatus_FutureLastSeenDoesNotPermanentlyLockRow(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	server.internalAPIKey = []byte("internal-secret")
+
+	router := gin.New()
+	router.POST("/api/device/status", server.internalAuthMiddleware(), server.updateDeviceStatus)
+
+	now := time.Now()
+	// Attacker attempts to poison with an unbounded future timestamp.
+	// The handler must reject it (400) so no row is created at all.
+	attackTs := now.Add(10 * 365 * 24 * time.Hour).UnixMilli()
+	attackBody := fmt.Sprintf(`{"device_id":"dev-lock","status":"offline","last_seen":%d}`, attackTs)
+	req := httptest.NewRequest(http.MethodPost, "/api/device/status", strings.NewReader(attackBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-API-Key", "internal-secret")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("poisoning attempt should be rejected with 400, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	// Now a legitimate update (no last_seen, server stamps time.Now()) must
+	// succeed because no poisoned row was ever written.
+	legitBody := `{"device_id":"dev-lock","status":"online"}`
+	req = httptest.NewRequest(http.MethodPost, "/api/device/status", strings.NewReader(legitBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-API-Key", "internal-secret")
+	recorder = httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("legitimate update expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	stored, err := server.getDeviceStatusDB("dev-lock")
+	if err != nil {
+		t.Fatalf("getDeviceStatusDB failed: %v", err)
+	}
+	if stored == nil {
+		t.Fatal("expected device_status row to exist after legitimate update")
+	}
+	if stored.Status != "online" {
+		t.Fatalf("status = %q, want %q (poisoned row blocked legitimate update)", stored.Status, "online")
+	}
+}
+
+// TestUpdateDeviceStatus_AcceptsLastSeenWithinFutureTolerance ensures the
+// tolerance does not reject legitimate client-supplied timestamps that are
+// only marginally in the future (normal clock skew between tunnel and API).
+func TestUpdateDeviceStatus_AcceptsLastSeenWithinFutureTolerance(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	server.internalAPIKey = []byte("internal-secret")
+
+	router := gin.New()
+	router.POST("/api/device/status", server.internalAuthMiddleware(), server.updateDeviceStatus)
+
+	// A timestamp just inside the future tolerance (1 second ahead).
+	withinTolerance := time.Now().Add(time.Second).UnixMilli()
+	reqBody := fmt.Sprintf(`{"device_id":"dev-skew","status":"online","last_seen":%d}`, withinTolerance)
+	req := httptest.NewRequest(http.MethodPost, "/api/device/status", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-API-Key", "internal-secret")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200 for last_seen within future tolerance, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	stored, err := server.getDeviceStatusDB("dev-skew")
+	if err != nil {
+		t.Fatalf("getDeviceStatusDB failed: %v", err)
+	}
+	if stored == nil {
+		t.Fatal("expected device_status row to exist")
+	}
+	if stored.Status != "online" {
+		t.Fatalf("status = %q, want %q", stored.Status, "online")
+	}
+	if stored.LastSeen.UnixMilli() != withinTolerance {
+		t.Fatalf("LastSeen = %d, want %d (client value should be preserved within tolerance)", stored.LastSeen.UnixMilli(), withinTolerance)
+	}
+}
+
+func TestRateLimitKeyPrefersAuthenticatedIdentity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name       string
+		setup      func(*gin.Context)
+		remoteAddr string
+		wantPrefix string
+	}{
+		{
+			name: "internal role",
+			setup: func(c *gin.Context) {
+				c.Set("role", "internal")
+			},
+			wantPrefix: "internal",
+		},
+		{
+			name: "jwt engineer_id",
+			setup: func(c *gin.Context) {
+				c.Set("engineer_id", "engineer-1")
+			},
+			wantPrefix: "jwt:engineer-1",
+		},
+		{
+			name:       "no identity falls back to client ip",
+			remoteAddr: "192.0.2.1:1234",
+			wantPrefix: "192.0.2.1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+			c.Request.RemoteAddr = tt.remoteAddr
+			if tt.setup != nil {
+				tt.setup(c)
+			}
+
+			got := rateLimitKey(c)
+			if got != tt.wantPrefix {
+				t.Errorf("rateLimitKey() = %q, want %q", got, tt.wantPrefix)
+			}
+		})
+	}
+}
+
+func TestRateLimitMiddlewareAllowsRequestsUnderLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := &Server{
+		rateLimiter: ratelimit.NewRateLimiterWithDefaults(),
+	}
+	defer server.rateLimiter.Stop()
+
+	router := gin.New()
+	router.GET("/limited", func(c *gin.Context) {
+		c.Set("engineer_id", "engineer-1")
+		c.Next()
+	}, server.rateLimitMiddleware(), func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	for i := 0; i < 5; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/limited", nil)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("request %d: expected 200, got %d", i+1, recorder.Code)
+		}
+	}
+}
+
+func TestRateLimitMiddlewareBlocksRequestsOverLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := &Server{
+		rateLimiter: ratelimit.NewRateLimiterWithDefaults(),
+	}
+	defer server.rateLimiter.Stop()
+
+	router := gin.New()
+	router.GET("/limited", func(c *gin.Context) {
+		c.Set("engineer_id", "engineer-1")
+		c.Next()
+	}, server.rateLimitMiddleware(), func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	for i := 0; i < 5; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/limited", nil)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("setup request %d: expected 200, got %d", i+1, recorder.Code)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/limited", nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after exceeding rate limit, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), ErrRateLimitExceeded.Error()) {
+		t.Fatalf("expected error %q in response, got %s", ErrRateLimitExceeded.Error(), recorder.Body.String())
+	}
+}
+
+func TestRateLimitMiddlewareUsesSeparateBucketsPerIdentity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := &Server{
+		rateLimiter: ratelimit.NewRateLimiterWithDefaults(),
+	}
+	defer server.rateLimiter.Stop()
+
+	router := gin.New()
+	router.GET("/limited/:engineer", func(c *gin.Context) {
+		c.Set("engineer_id", c.Param("engineer"))
+		c.Next()
+	}, server.rateLimitMiddleware(), func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	// Exhaust the limit for engineer-A.
+	for i := 0; i < 5; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/limited/engineer-A", nil)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("setup request %d for engineer-A: expected 200, got %d", i+1, recorder.Code)
+		}
+	}
+
+	blockedRecorder := httptest.NewRecorder()
+	router.ServeHTTP(blockedRecorder, httptest.NewRequest(http.MethodGet, "/limited/engineer-A", nil))
+	if blockedRecorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected engineer-A to be rate limited, got %d", blockedRecorder.Code)
+	}
+
+	// engineer-B should still be allowed because it uses a separate bucket.
+	allowedRecorder := httptest.NewRecorder()
+	router.ServeHTTP(allowedRecorder, httptest.NewRequest(http.MethodGet, "/limited/engineer-B", nil))
+	if allowedRecorder.Code != http.StatusOK {
+		t.Fatalf("expected engineer-B to be allowed, got %d", allowedRecorder.Code)
+	}
+}
+
+// TestGetPairingSessionRateLimit_AllowsLegitimatePolling verifies that
+// successful session lookups (200) reset the rate-limiter failure counter, so
+// engineers polling a valid pairing code are never blocked. This is the REV34
+// fix: previously getPairingSession never called rateLimiter.Success, so every
+// poll incremented the failure counter and after 5 polls within 5 minutes the
+// engineer was blocked for 15 minutes.
+func TestGetPairingSessionRateLimit_AllowsLegitimatePolling(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	server.jwtSecret = []byte("jwt-secret")
+	server.internalAPIKey = []byte("internal-secret")
+	insertPendingPairingSession(t, server, "123456", "device-1")
+
+	tokenString := issueAuthToken(t, server.jwtSecret, jwt.MapClaims{
+		"sub":  "engineer-1",
+		"role": "engineer",
+		"iat":  time.Now().Unix(),
+		"exp":  time.Now().Add(10 * time.Minute).Unix(),
+	})
+
+	router := gin.New()
+	router.GET("/api/pair/:code", server.internalOrUserAuthMiddleware(), server.rateLimitMiddleware(), server.getPairingSession)
+
+	makeRequest := func(code string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/pair/"+code, nil)
+		req.Header.Set("Authorization", "Bearer "+tokenString)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, req)
+		return recorder
+	}
+
+	// Legitimate polling of a valid code must never be rate-limited, even well
+	// past the brute-force threshold (MaxAttempts=5).
+	for i := 0; i < 20; i++ {
+		recorder := makeRequest("123456")
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("legitimate poll %d: expected 200, got %d (body=%s)", i+1, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
+// TestGetPairingSessionRateLimit_BlocksBruteForce verifies that repeated
+// lookups of a non-existent code (404) ARE rate-limited, preserving the
+// brute-force protection that REV34 intended.
+func TestGetPairingSessionRateLimit_BlocksBruteForce(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	server.jwtSecret = []byte("jwt-secret")
+	server.internalAPIKey = []byte("internal-secret")
+
+	tokenString := issueAuthToken(t, server.jwtSecret, jwt.MapClaims{
+		"sub":  "engineer-2",
+		"role": "engineer",
+		"iat":  time.Now().Unix(),
+		"exp":  time.Now().Add(10 * time.Minute).Unix(),
+	})
+
+	router := gin.New()
+	router.GET("/api/pair/:code", server.internalOrUserAuthMiddleware(), server.rateLimitMiddleware(), server.getPairingSession)
+
+	makeRequest := func(code string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/pair/"+code, nil)
+		req.Header.Set("Authorization", "Bearer "+tokenString)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, req)
+		return recorder
+	}
+
+	// First MaxAttempts (5) failed lookups return 404 and count toward the limit.
+	for i := 0; i < 5; i++ {
+		recorder := makeRequest("999999")
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("brute-force probe %d: expected 404, got %d", i+1, recorder.Code)
+		}
+	}
+
+	// The 6th attempt must be blocked.
+	recorder := makeRequest("999999")
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after exceeding rate limit on brute-force probes, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), ErrRateLimitExceeded.Error()) {
+		t.Fatalf("expected error %q in response, got %s", ErrRateLimitExceeded.Error(), recorder.Body.String())
+	}
+}
+
+// TestGetPairingSession_ConcurrentModification_RefreshDBError verifies that when
+// markSessionExpired hits ErrConcurrentModification and the refresh query fails,
+// the handler returns 500 Internal Server Error instead of masking the failure
+// as 410 Gone (REV31).
+func TestGetPairingSession_ConcurrentModification_RefreshDBError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	callCount := 0
+	server.testHookGetPairingSessionDB = func(code string) (*PairingSession, error) {
+		defer func() { callCount++ }()
+		if callCount == 0 {
+			// Initial read returns an expired session.
+			return &PairingSession{
+				Code:      code,
+				DeviceID:  "device-1",
+				Status:    "pending",
+				CreatedAt: time.Now().Add(-PairingCodeTTL),
+				ExpiresAt: time.Now().Add(-time.Minute),
+				Used:      false,
+			}, nil
+		}
+		// Refresh query fails.
+		return nil, errors.New("simulated database failure")
+	}
+
+	router := gin.New()
+	router.GET("/api/pair/:code", server.getPairingSession)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/pair/123456", nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 on refresh DB error, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), ErrFailedToQueryDatabase.Error()) {
+		t.Fatalf("expected error %q in response, got %s", ErrFailedToQueryDatabase.Error(), recorder.Body.String())
+	}
+}
+
+// TestGetPairingSession_ConcurrentModification_StillExpired verifies that when
+// markSessionExpired hits ErrConcurrentModification but the refreshed session
+// is still expired, the handler returns 410 Gone consistent with the normal
+// expiration path (REV31).
+func TestGetPairingSession_ConcurrentModification_StillExpired(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	server.testHookGetPairingSessionDB = func(code string) (*PairingSession, error) {
+		return &PairingSession{
+			Code:      code,
+			DeviceID:  "device-1",
+			Status:    "pending",
+			CreatedAt: time.Now().Add(-PairingCodeTTL),
+			ExpiresAt: time.Now().Add(-time.Minute),
+			Used:      false,
+		}, nil
+	}
+
+	router := gin.New()
+	router.GET("/api/pair/:code", server.getPairingSession)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/pair/123456", nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusGone {
+		t.Fatalf("expected 410 when session still expired after refresh, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), ErrSessionExpired.Error()) {
+		t.Fatalf("expected error %q in response, got %s", ErrSessionExpired.Error(), recorder.Body.String())
+	}
+}
+
+// TestGetPairingSession_ConcurrentModification_RefreshedToUnexpired verifies
+// that when markSessionExpired hits ErrConcurrentModification and the refreshed
+// session is no longer expired, the handler returns 200 OK with the current
+// session state (REV31).
+func TestGetPairingSession_ConcurrentModification_RefreshedToUnexpired(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	refreshedSession := &PairingSession{
+		Code:       "123456",
+		DeviceID:   "device-1",
+		Status:     "connected",
+		EngineerID: "engineer-1",
+		CreatedAt:  time.Now(),
+		ExpiresAt:  time.Now().Add(PairingCodeTTL),
+		Used:       true,
+	}
+	callCount := 0
+	server.testHookGetPairingSessionDB = func(code string) (*PairingSession, error) {
+		defer func() { callCount++ }()
+		if callCount == 0 {
+			// Initial read sees an expired session.
+			return &PairingSession{
+				Code:      code,
+				DeviceID:  "device-1",
+				Status:    "pending",
+				CreatedAt: time.Now().Add(-PairingCodeTTL),
+				ExpiresAt: time.Now().Add(-time.Minute),
+				Used:      false,
+			}, nil
+		}
+		// Refresh sees the session that was concurrently updated to unexpired.
+		return refreshedSession, nil
+	}
+
+	router := gin.New()
+	router.GET("/api/pair/:code", server.getPairingSession)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/pair/123456", nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200 when refreshed to unexpired, got %d", recorder.Code)
+	}
+
+	var got PairingSession
+	if err := json.Unmarshal(recorder.Body.Bytes(), &got); err != nil {
+		t.Fatalf("failed to decode response body: %v", err)
+	}
+	if got.Status != refreshedSession.Status || got.EngineerID != refreshedSession.EngineerID {
+		t.Fatalf("response mismatch: got %+v, want %+v", got, refreshedSession)
+	}
+}
+
+// TestCreateSessionToken_RejectsExpiredSession verifies that createSessionToken
+// rejects pairing sessions whose ExpiresAt has passed, even if the session
+// status is still "connected". (REV43)
+func TestCreateSessionToken_RejectsExpiredSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	// Insert a session that is already expired but still "connected"
+	if err := server.createPairingSessionDB(&PairingSession{
+		Code:       "exp-1",
+		DeviceID:   "device-exp",
+		Status:     "connected",
+		EngineerID: "engineer-1",
+		Used:       true,
+		CreatedAt:  time.Now().Add(-2 * PairingCodeTTL),
+		ExpiresAt:  time.Now().Add(-1 * time.Second), // already expired
+	}); err != nil {
+		t.Fatalf("failed to create expired session: %v", err)
+	}
+
+	router := gin.New()
+	router.POST("/session/token", func(c *gin.Context) {
+		c.Set("engineer_id", "engineer-1")
+		server.createSessionToken(c)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/session/token", strings.NewReader(`{"code":"exp-1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for expired session, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+// TestGetPairingSession_ConcurrentModificationReturns410 verifies that
+// getPairingSession returns 410 Gone (not 200) when a session is expired
+// but marking it as expired fails due to concurrent modification. (REV44)
+func TestGetPairingSession_ConcurrentModificationReturns410(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+
+	// Create a session that is expired but still "connected" (simulate race where
+	// another request set status=connected after the session expired)
+	if err := server.createPairingSessionDB(&PairingSession{
+		Code:       "concurrent-exp",
+		DeviceID:   "device-ce",
+		Status:     "connected",
+		EngineerID: "other-engineer",
+		Used:       false,
+		CreatedAt:  time.Now().Add(-2 * PairingCodeTTL),
+		ExpiresAt:  time.Now().Add(-1 * time.Second), // already expired
+	}); err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+
+	router := gin.New()
+	router.GET("/pair/:code", func(c *gin.Context) {
+		server.getPairingSession(c)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/pair/concurrent-exp", nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	// Should return 410 Gone, not 200 OK, even though the session status
+	// is "connected" — the session is expired by ExpiresAt.
+	// The optimistic lock in markSessionExpired will fail (status != pending),
+	// but we should still return 410, not 200.
+	if recorder.Code != http.StatusGone {
+		t.Fatalf("expected 410 Gone for expired session with concurrent modification, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestGenerateCode(t *testing.T) {
+	for i := 0; i < 1000; i++ {
+		code, err := generateCode()
+		if err != nil {
+			t.Fatalf("generateCode() returned error: %v", err)
+		}
+		if len(code) != 6 {
+			t.Errorf("generateCode() returned code of length %d, expected 6: %s", len(code), code)
+		}
+		for _, ch := range code {
+			if ch < '0' || ch > '9' {
+				t.Errorf("generateCode() returned non-numeric character in code: %s", code)
+				break
 			}
 		}
-		if successCount != 1 {
-			t.Fatalf("trial %d: expected exactly one concurrent request to succeed, got %d (codes=%v)", i, successCount, statusCodes)
-		}
+	}
+}
+
+func TestValidateJWTSecret(t *testing.T) {
+	tests := []struct {
+		name      string
+		secret    string
+		wantErr   bool
+		errMsgStr string
+	}{
+		{
+			name:      "empty secret",
+			secret:    "",
+			wantErr:   true,
+			errMsgStr: "JWT_SECRET environment variable is not set",
+		},
+		{
+			name:      "short secret",
+			secret:    strings.Repeat("a", MinJWTSecretLength-1),
+			wantErr:   true,
+			errMsgStr: fmt.Sprintf("JWT_SECRET must be at least %d characters long", MinJWTSecretLength),
+		},
+		{
+			name:    "exact length secret",
+			secret:  strings.Repeat("a", MinJWTSecretLength),
+			wantErr: false,
+		},
+		{
+			name:    "long secret",
+			secret:  strings.Repeat("a", MinJWTSecretLength+10),
+			wantErr: false,
+		},
 	}
 
-	if !sawConflict {
-		t.Fatalf("expected at least one of %d trials to trigger a 409 Conflict from concurrent modification", trials)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateJWTSecret(tt.secret)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateJWTSecret() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantErr && !strings.Contains(err.Error(), tt.errMsgStr) {
+				t.Errorf("validateJWTSecret() error msg = %v, want to contain %v", err.Error(), tt.errMsgStr)
+			}
+		})
+	}
+}
+
+func TestGenerateSecureRandomString(t *testing.T) {
+	tests := []struct {
+		name   string
+		length int
+	}{
+		{"length 0", 0},
+		{"length 1", 1},
+		{"length 32", 32},
+		{"length 100", 100},
+		{"length 1000", 1000},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			str, err := generateSecureRandomString(tt.length)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if len(str) != tt.length {
+				t.Errorf("expected length %d, got %d", tt.length, len(str))
+			}
+
+			for _, char := range str {
+				if !((char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9')) {
+					t.Errorf("string contains invalid character: %c in %q", char, str)
+				}
+			}
+		})
+	}
+
+	t.Run("uniqueness", func(t *testing.T) {
+		seen := make(map[string]bool)
+		for i := 0; i < 1000; i++ {
+			str, err := generateSecureRandomString(32)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if seen[str] {
+				t.Fatalf("generated duplicate string: %s", str)
+			}
+			seen[str] = true
+		}
+	})
+}
+
+// countOpenFDs returns the number of open file descriptors for the current
+// process. Used to detect resource (FD) leaks in NewServer error paths.
+// Returns -1 on platforms where /proc/self/fd is unavailable.
+func countOpenFDs(t *testing.T) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return -1
+	}
+	return len(entries)
+}
+
+// TestNewServer_ClosesDBOnInitSchemaFailure is the core REV57 regression test.
+// It verifies that when NewServer() fails (at initSchema), the *sql.DB pool is
+// properly closed via db.Close() — preventing a resource leak of file
+// descriptors and SQLite file locks.
+//
+// The test:
+//  1. Pre-creates a SQLite db with a `pairing_sessions` table whose columns
+//     don't match the schema initSchema expects — CREATE TABLE IF NOT EXISTS
+//     is a no-op, but CREATE INDEX referencing the missing columns fails.
+//  2. Counts open FDs before and after NewServer(). If db.Close() is not
+//     called on the error path, the SQLite connection FD leaks.
+func TestNewServer_ClosesDBOnInitSchemaFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test_rev57.db")
+
+	// Pre-create the pairing_sessions table without the columns the schema's
+	// CREATE INDEX statements reference. initSchema uses CREATE TABLE IF NOT
+	// EXISTS, so this table won't be recreated — but CREATE INDEX fails
+	// because the referenced columns (device_id, expires_at) don't exist.
+	preDb, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
+	if err != nil {
+		t.Fatalf("pre-open failed: %v", err)
+	}
+	_, err = preDb.Exec(`CREATE TABLE IF NOT EXISTS pairing_sessions (dummy_col TEXT NOT NULL)`)
+	if err != nil {
+		preDb.Close()
+		t.Fatalf("pre-create wrong schema failed: %v", err)
+	}
+	if err := preDb.Close(); err != nil {
+		t.Fatalf("pre-close failed: %v", err)
+	}
+
+	// Configure all env vars NewServer requires (avoid log.Fatalf paths).
+	t.Setenv("JWT_SECRET", strings.Repeat("a", MinJWTSecretLength))
+	t.Setenv("ADMIN_USER", "test-admin")
+	t.Setenv("ADMIN_PASS", "test-pass")
+	t.Setenv("INTERNAL_API_KEY", "test-internal-key")
+	t.Setenv("DB_PATH", dbPath)
+
+	before := countOpenFDs(t)
+
+	server, err := NewServer()
+
+	after := countOpenFDs(t)
+
+	if err == nil {
+		if server != nil {
+			server.Close()
+		}
+		t.Fatal("expected NewServer to fail when initSchema fails on mismatched schema, but it succeeded")
+	}
+
+	if server != nil {
+		t.Fatalf("expected nil Server on error, got non-nil")
+	}
+
+	// The fix: db.Close() must be called on the initSchema error path.
+	// Without it, the SQLite connection FD leaks (after > before).
+	if before >= 0 && after >= 0 && after > before {
+		t.Errorf("FD leak detected: before=%d after=%d — db.Close() was not called on NewServer initSchema failure (REV57 regression)", before, after)
+	}
+}
+
+// insertConnectedSession creates a pairing session row already in the
+// "connected" state for the given engineer, with the supplied ExpiresAt. It is
+// used by the createSessionToken regression tests below.
+func insertConnectedSession(t *testing.T, server *Server, code, deviceID, engineerID string, expiresAt time.Time) {
+	t.Helper()
+
+	session := &PairingSession{
+		Code:       code,
+		DeviceID:   deviceID,
+		Status:     "connected",
+		EngineerID: engineerID,
+		CreatedAt:  time.Now().Add(-PairingCodeTTL),
+		ExpiresAt:  expiresAt,
+		Used:       true,
+	}
+	if err := server.createPairingSessionDB(session); err != nil {
+		t.Fatalf("failed to insert connected session %s: %v", code, err)
+	}
+}
+
+func newCreateSessionTokenRouter(server *Server) *gin.Engine {
+	router := gin.New()
+	router.POST("/session/token", func(c *gin.Context) {
+		c.Set("engineer_id", c.GetHeader("X-Engineer-ID"))
+		server.createSessionToken(c)
+	})
+	return router
+}
+
+func runCreateSessionTokenRequest(router *gin.Engine, code, engineerID string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/session/token", strings.NewReader(fmt.Sprintf(`{"code":%q}`, code)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Engineer-ID", engineerID)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+	return recorder
+}
+
+// TestCreateSessionToken_ConcurrentRequestsIssueSingleToken verifies the REV61
+// double-spend fix: N concurrent POST /session/token requests for the SAME
+// "connected" pairing session must result in exactly ONE token being issued.
+// Without the transaction + existence-check fix, the optimistic lock was a
+// no-op re-write (it wrote back identical status/engineer_id/used values), so
+// every concurrent request's WHERE clause still matched and every request
+// issued a distinct token.
+func TestCreateSessionToken_ConcurrentRequestsIssueSingleToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for _, concurrency := range []int{2, 5, 10} {
+		t.Run(fmt.Sprintf("n=%d", concurrency), func(t *testing.T) {
+			server := newPairingTestServer(t)
+			code := fmt.Sprintf("DBL-%d", concurrency)
+			deviceID := fmt.Sprintf("device-dbl-%d", concurrency)
+			insertConnectedSession(t, server, code, deviceID, "engineer-A", time.Now().Add(10*time.Minute))
+
+			router := newCreateSessionTokenRouter(server)
+
+			type result struct {
+				code int
+				body string
+			}
+			results := make([]result, concurrency)
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			wg.Add(concurrency)
+
+			for i := 0; i < concurrency; i++ {
+				go func(idx int) {
+					defer wg.Done()
+					<-start // fire all goroutines simultaneously
+					recorder := runCreateSessionTokenRequest(router, code, "engineer-A")
+					results[idx] = result{code: recorder.Code, body: recorder.Body.String()}
+				}(i)
+			}
+			close(start)
+			wg.Wait()
+
+			created, conflict, other := 0, 0, 0
+			for _, r := range results {
+				switch r.code {
+				case http.StatusCreated:
+					created++
+				case http.StatusConflict:
+					conflict++
+				default:
+					other++
+					t.Logf("unexpected response: code=%d body=%s", r.code, r.body)
+				}
+			}
+
+			if created != 1 {
+				t.Fatalf("expected exactly 1 token issued (201), got %d created, %d conflict, %d other", created, conflict, other)
+			}
+			if conflict != concurrency-1 {
+				t.Fatalf("expected %d conflicts (409), got %d", concurrency-1, conflict)
+			}
+			if other != 0 {
+				t.Fatalf("expected 0 unexpected responses, got %d", other)
+			}
+
+			// Verify exactly one token row exists for this device.
+			tokens, err := server.db.Query(`SELECT COUNT(*) FROM session_tokens WHERE device_id = ?`, deviceID)
+			if err != nil {
+				t.Fatalf("failed to count tokens: %v", err)
+			}
+			defer tokens.Close()
+			count := 0
+			if tokens.Next() {
+				_ = tokens.Scan(&count)
+			}
+			if count != 1 {
+				t.Fatalf("expected exactly 1 token row in DB, got %d", count)
+			}
+		})
+	}
+}
+
+// TestCreateSessionToken_SecondRequestAfterFirstCompletesReturns409 verifies
+// the sequential (non-concurrent) case: after a token is issued, a second
+// request for the same session is rejected with 409 ErrSessionTokenAlreadyIssued.
+func TestCreateSessionToken_SecondRequestAfterFirstCompletesReturns409(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := newPairingTestServer(t)
+	insertConnectedSession(t, server, "SEQ409", "device-seq", "engineer-A", time.Now().Add(10*time.Minute))
+
+	router := newCreateSessionTokenRouter(server)
+
+	// First request succeeds.
+	rec1 := runCreateSessionTokenRequest(router, "SEQ409", "engineer-A")
+	if rec1.Code != http.StatusCreated {
+		t.Fatalf("first request: expected 201, got %d (body=%s)", rec1.Code, rec1.Body.String())
+	}
+
+	// Second request for the same session is rejected.
+	rec2 := runCreateSessionTokenRequest(router, "SEQ409", "engineer-A")
+	if rec2.Code != http.StatusConflict {
+		t.Fatalf("second request: expected 409, got %d (body=%s)", rec2.Code, rec2.Body.String())
+	}
+	if !strings.Contains(rec2.Body.String(), ErrSessionTokenAlreadyIssued.Error()) {
+		t.Fatalf("second request: expected error to contain %q, got %s", ErrSessionTokenAlreadyIssued.Error(), rec2.Body.String())
+	}
+}
+
+// --- CORS hard-coded origins regression tests (CORS-HARDCODED-ORIGINS-1 / REV59 C1) ---
+//
+// These tests pin the fix for the production blocker introduced by PR #108,
+// where AllowOrigins was hard-coded to localhost only. gin-contrib/cors@v1.7.x
+// calls c.AbortWithStatus(http.StatusForbidden) for any Origin not in the
+// allowlist, so a deployed frontend at https://app.example.com received 403
+// for every cross-origin request. See docs/ISSUES.md CORS-HARDCODED-ORIGINS-1.
+
+func TestParseCORSAllowedOrigins_EmptyReturnsDefaults(t *testing.T) {
+	got := parseCORSAllowedOrigins("")
+	if len(got) != len(defaultCORSAllowedOrigins) {
+		t.Fatalf("expected %d default origins, got %v", len(defaultCORSAllowedOrigins), got)
+	}
+	for i, want := range defaultCORSAllowedOrigins {
+		if got[i] != want {
+			t.Fatalf("default origin[%d] = %q, want %q", i, got[i], want)
+		}
+	}
+}
+
+func TestParseCORSAllowedOrigins_SingleOrigin(t *testing.T) {
+	got := parseCORSAllowedOrigins("https://app.example.com")
+	if len(got) != 1 || got[0] != "https://app.example.com" {
+		t.Fatalf("expected [https://app.example.com], got %v", got)
+	}
+}
+
+func TestParseCORSAllowedOrigins_MultipleOriginsTrimsAndDropsEmpties(t *testing.T) {
+	got := parseCORSAllowedOrigins("  https://app.example.com , ,, https://admin.example.com  ,")
+	want := []string{"https://app.example.com", "https://admin.example.com"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Fatalf("origin[%d] = %q, want %q", i, got[i], w)
+		}
+	}
+}
+
+func TestParseCORSAllowedOrigins_OnlyWhitespaceReturnsDefaults(t *testing.T) {
+	got := parseCORSAllowedOrigins("   ,  ,  ")
+	if len(got) != len(defaultCORSAllowedOrigins) {
+		t.Fatalf("expected defaults when all entries are whitespace, got %v", got)
+	}
+}
+
+// Wildcard origins must be rejected: gin-contrib/cors treats a raw "*" entry
+// as AllowAllOrigins, silently disabling the allowlist while
+// AllowCredentials=true. parseCORSAllowedOrigins must never pass one through.
+func TestParseCORSAllowedOrigins_RejectsWildcardEntries(t *testing.T) {
+	got := parseCORSAllowedOrigins("*")
+	if len(got) != len(defaultCORSAllowedOrigins) {
+		t.Fatalf("expected defaults when input is only a wildcard, got %v", got)
+	}
+
+	got = parseCORSAllowedOrigins("https://app.example.com, *, https://*.example.com")
+	if len(got) != 1 || got[0] != "https://app.example.com" {
+		t.Fatalf("expected wildcard entries to be dropped, got %v", got)
+	}
+}
+
+func TestBuildCorsConfig_DefaultsWhenEnvUnset(t *testing.T) {
+	cfg := buildCorsConfig("")
+	if len(cfg.AllowOrigins) != 2 {
+		t.Fatalf("expected 2 default origins, got %v", cfg.AllowOrigins)
+	}
+	if cfg.AllowOrigins[0] != "http://localhost:3000" || cfg.AllowOrigins[1] != "http://localhost:8080" {
+		t.Fatalf("unexpected default origins: %v", cfg.AllowOrigins)
+	}
+	if !cfg.AllowCredentials {
+		t.Fatalf("AllowCredentials must be true")
+	}
+	// Verify the other config knobs are still set so we don't silently regress
+	// the rest of the PR #108 config when refactoring.
+	if len(cfg.AllowMethods) == 0 || len(cfg.AllowHeaders) == 0 {
+		t.Fatalf("AllowMethods/AllowHeaders must not be empty: methods=%v headers=%v", cfg.AllowMethods, cfg.AllowHeaders)
+	}
+	if cfg.MaxAge != 12*time.Hour {
+		t.Fatalf("MaxAge = %v, want 12h", cfg.MaxAge)
+	}
+}
+
+func TestBuildCorsConfig_UsesEnvVarOrigins(t *testing.T) {
+	cfg := buildCorsConfig("https://app.example.com,https://admin.example.com")
+	if len(cfg.AllowOrigins) != 2 {
+		t.Fatalf("expected 2 origins from env, got %v", cfg.AllowOrigins)
+	}
+	if cfg.AllowOrigins[0] != "https://app.example.com" || cfg.AllowOrigins[1] != "https://admin.example.com" {
+		t.Fatalf("unexpected origins: %v", cfg.AllowOrigins)
+	}
+	for _, def := range defaultCORSAllowedOrigins {
+		for _, got := range cfg.AllowOrigins {
+			if got == def {
+				t.Fatalf("default localhost origin %q should NOT appear when env var is set", def)
+			}
+		}
+	}
+}
+
+// newCORSTestRouter mounts a Gin engine with the given CORS config and a
+// trivial /health route. Mirrors the wiring in main().
+func newCORSTestRouter(t *testing.T, corsConfig cors.Config) *gin.Engine {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(gin.Recovery())
+	r.Use(cors.New(corsConfig))
+	r.GET("/health", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+	return r
+}
+
+func doCORSRequest(t *testing.T, r *gin.Engine, method, origin, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, nil)
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestCORSIntegration_DefaultsRejectProductionOrigin — regression guard for the
+// original PR #108 bug: with the env var UNSET (defaults), a production origin
+// must NOT receive 200. It receives 403 from the library. This proves the
+// production-breakage scenario and pins it as the behavior we are fixing.
+func TestCORSIntegration_DefaultsRejectProductionOrigin(t *testing.T) {
+	r := newCORSTestRouter(t, buildCorsConfig(""))
+
+	rec := doCORSRequest(t, r, http.MethodGet, "https://app.example.com", "/health")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("with defaults, production origin must be rejected with 403 (regression guard); got %d", rec.Code)
+	}
+}
+
+// TestCORSIntegration_EnvVarAllowsProductionOrigin — the FIX: when
+// API_ALLOWED_ORIGINS lists the production origin, the request reaches the
+// handler and returns 200 with the proper ACAO header. Without this fix the
+// same request would receive 403 (see previous test).
+func TestCORSIntegration_EnvVarAllowsProductionOrigin(t *testing.T) {
+	r := newCORSTestRouter(t, buildCorsConfig("https://app.example.com"))
+
+	rec := doCORSRequest(t, r, http.MethodGet, "https://app.example.com", "/health")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("with env var set, production origin must reach handler (200); got %d", rec.Code)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
+		t.Fatalf("ACAO header = %q, want %q", got, "https://app.example.com")
+	}
+}
+
+// TestCORSIntegration_LocalhostDefaultStillAllowed — dev ergonomics guard:
+// when the env var is unset, the dev defaults shipped with PR #108 must keep
+// working so local development is not broken by the fix.
+func TestCORSIntegration_LocalhostDefaultStillAllowed(t *testing.T) {
+	r := newCORSTestRouter(t, buildCorsConfig(""))
+
+	rec := doCORSRequest(t, r, http.MethodGet, "http://localhost:3000", "/health")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("with defaults, localhost:3000 must still be allowed (200); got %d", rec.Code)
+	}
+}
+
+// TestCORSIntegration_DisallowedOriginStillRejectedAfterEnvSet — security
+// guard: even after the fix, an origin NOT in the env-var allowlist must still
+// be rejected with 403. The fix only expands the allowlist via env var; it
+// does NOT open the door to all origins.
+func TestCORSIntegration_DisallowedOriginStillRejectedAfterEnvSet(t *testing.T) {
+	r := newCORSTestRouter(t, buildCorsConfig("https://app.example.com"))
+
+	rec := doCORSRequest(t, r, http.MethodGet, "https://evil.example.com", "/health")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("origin not in env-var allowlist must still be rejected (403); got %d", rec.Code)
+	}
+}
+
+// TestCORSIntegration_AllowedOriginPreflightReturns204 — verifies preflight
+// handling for an allowed production origin: the library must respond 204 and
+// echo the ACAO header, not 403.
+func TestCORSIntegration_AllowedOriginPreflightReturns204(t *testing.T) {
+	r := newCORSTestRouter(t, buildCorsConfig("https://app.example.com"))
+
+	req := httptest.NewRequest(http.MethodOptions, "/health", nil)
+	req.Header.Set("Origin", "https://app.example.com")
+	req.Header.Set("Access-Control-Request-Method", "GET")
+	req.Header.Set("Access-Control-Request-Headers", "Authorization")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("preflight for allowed origin must return 204; got %d", rec.Code)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
+		t.Fatalf("ACAO header = %q, want %q", got, "https://app.example.com")
 	}
 }

@@ -308,5 +308,68 @@ class Socks5ProxyHandlerTest {
             }
         }
     }
-}
 
+
+    // C77: Socks5ProxyHandler double-free 修复缺少 write-failure 回归测试
+    // RelayHandler 的可见性为 internal（同模块可见），因此这里直接构造它，
+    // 不再依赖反射访问私有构造函数，降低测试脆弱性。
+    @Test
+    fun relayHandler_onWriteFailure_closesChannelsAndDoesNotDoubleFree() {
+        val upstreamChannel = io.mockk.mockk<io.netty.channel.Channel>(relaxed = true)
+        val mockFuture = io.mockk.mockk<io.netty.channel.ChannelFuture>(relaxed = true)
+
+        io.mockk.every { upstreamChannel.isActive } returns true
+        io.mockk.every { upstreamChannel.writeAndFlush(any()) } returns mockFuture
+        io.mockk.every { mockFuture.addListener(any()) } answers {
+            val listener = it.invocation.args[0] as io.netty.util.concurrent.GenericFutureListener<io.netty.channel.ChannelFuture>
+
+            val failedFuture = io.mockk.mockk<io.netty.channel.ChannelFuture>(relaxed = true)
+            io.mockk.every { failedFuture.isSuccess } returns false
+
+            listener.operationComplete(failedFuture)
+            mockFuture
+        }
+
+        val relayHandler = RelayHandler(upstreamChannel)
+
+        val clientChannel = io.netty.channel.embedded.EmbeddedChannel(relayHandler)
+        val msg = io.netty.buffer.Unpooled.wrappedBuffer(byteArrayOf(1, 2, 3))
+
+        try {
+            clientChannel.writeInbound(msg)
+        } catch (e: io.netty.util.IllegalReferenceCountException) {
+            org.junit.Assert.fail("Double free detected: ${e.message}")
+        }
+
+        org.junit.Assert.assertFalse(clientChannel.isActive)
+        io.mockk.verify { upstreamChannel.close() }
+    }
+
+    // C77: 覆盖写入成功路径，确保不会误关闭上下游 channel
+    @Test
+    fun relayHandler_onWriteSuccess_doesNotCloseChannels() {
+        val upstreamChannel = io.mockk.mockk<io.netty.channel.Channel>(relaxed = true)
+        val mockFuture = io.mockk.mockk<io.netty.channel.ChannelFuture>(relaxed = true)
+
+        io.mockk.every { upstreamChannel.isActive } returns true
+        io.mockk.every { upstreamChannel.writeAndFlush(any()) } returns mockFuture
+        io.mockk.every { mockFuture.addListener(any()) } answers {
+            val listener = it.invocation.args[0] as io.netty.util.concurrent.GenericFutureListener<io.netty.channel.ChannelFuture>
+
+            val succeededFuture = io.mockk.mockk<io.netty.channel.ChannelFuture>(relaxed = true)
+            io.mockk.every { succeededFuture.isSuccess } returns true
+
+            listener.operationComplete(succeededFuture)
+            mockFuture
+        }
+
+        val relayHandler = RelayHandler(upstreamChannel)
+        val clientChannel = io.netty.channel.embedded.EmbeddedChannel(relayHandler)
+        val msg = io.netty.buffer.Unpooled.wrappedBuffer(byteArrayOf(1, 2, 3))
+
+        clientChannel.writeInbound(msg)
+
+        org.junit.Assert.assertTrue(clientChannel.isActive)
+        io.mockk.verify(exactly = 0) { upstreamChannel.close() }
+    }
+}

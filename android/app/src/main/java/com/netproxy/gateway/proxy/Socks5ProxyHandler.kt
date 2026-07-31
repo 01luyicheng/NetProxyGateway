@@ -278,7 +278,7 @@ private class NettyOutboundConnector : OutboundConnector {
 }
 
 @ChannelHandler.Sharable
-private class RelayHandler(
+internal class RelayHandler(
     private val relayChannel: Channel
 ) : ChannelInboundHandlerAdapter() {
 

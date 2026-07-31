@@ -1,0 +1,114 @@
+# Security scanning — NOT a required check
+# Triggers on dependency file changes and nightly schedule
+name: Security Scan
+
+on:
+  pull_request:
+    branches: [main, dev]
+    types: [opened, synchronize, reopened]
+    paths:
+      - '**/go.mod'
+      - '**/go.sum'
+      - 'android/**/*.gradle*'
+      - 'android/**/libs.versions.toml'
+  push:
+    branches: [main, dev]
+    paths:
+      - '**/go.mod'
+      - '**/go.sum'
+      - 'android/**/*.gradle*'
+      - 'android/**/libs.versions.toml'
+  schedule:
+    - cron: '0 2 * * *'   # nightly at 02:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  ANDROID_HOME: /opt/android-sdk
+  ANDROID_SDK_ROOT: /opt/android-sdk
+
+jobs:
+  go-vuln:
+    name: Go Vulnerability Scan
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [api, socks5-proxy, tunnel]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: server/${{ matrix.component }}/go.mod
+          cache: false
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        working-directory: server/${{ matrix.component }}
+        run: govulncheck ./...
+
+  android-dep-check:
+    name: Android Dependency Check
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Validate Android SDK
+        run: |
+          if [ ! -d "$ANDROID_HOME/platforms" ]; then
+            echo "::error::Android SDK missing at $ANDROID_HOME"
+            exit 1
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: wrapper
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x android/gradlew
+
+      - name: Run dependency vulnerability check
+        run: ./android/gradlew -p android dependencyCheckAnalyze --no-daemon
+
+  docker-build:
+    name: Docker Build Verification
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [api, socks5-proxy, tunnel]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Build Docker image for ${{ matrix.service }}
+        run: |
+          docker build -t netproxy/${{ matrix.service }}:ci-test \
+            -f server/${{ matrix.service }}/Dockerfile \
+            server/${{ matrix.service }}
+        continue-on-error: true  # Step 4.5: collect baseline before enforcing
+
+      - name: Cleanup Docker test image
+        if: always()
+        run: docker rmi netproxy/${{ matrix.service }}:ci-test 2>/dev/null || true

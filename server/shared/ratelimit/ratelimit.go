@@ -42,6 +42,7 @@ type RateLimiter struct {
 	mu           sync.RWMutex
 	config       Config
 	stopCh       chan struct{}
+	stopOnce     sync.Once
 	restartCount int32
 }
 
@@ -61,9 +62,11 @@ func NewRateLimiterWithDefaults() *RateLimiter {
 	return NewRateLimiter(DefaultConfig())
 }
 
-// Stop halts the background cleanup goroutine.
+// Stop halts the background cleanup goroutine. It is safe to call multiple
+// times; only the first call closes stopCh (REV53: previously a second call
+// panicked with "close of closed channel").
 func (rl *RateLimiter) Stop() {
-	close(rl.stopCh)
+	rl.stopOnce.Do(func() { close(rl.stopCh) })
 }
 
 // Allow checks whether the given key is permitted to proceed.
@@ -153,6 +156,16 @@ func (rl *RateLimiter) cleanupLoop() {
 				}
 			}
 		}()
+
+		// G1 (issue #90): if Stop() closed stopCh during the inner func,
+		// exit the outer loop. Otherwise the next iteration creates a new
+		// ticker then immediately reads from the closed stopCh and returns
+		// from the inner func, spinning forever (100% CPU + goroutine leak).
+		select {
+		case <-rl.stopCh:
+			return
+		default:
+		}
 
 		if atomic.LoadInt32(&rl.restartCount) > maxRestarts {
 			return

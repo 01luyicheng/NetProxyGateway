@@ -241,12 +241,14 @@ internal class VpnPacketProcessor {
         sum += tcpHeaderLen + payloadLen
 
         // TCP头和payload
-        for (i in ipHeaderLen until ipHeaderLen + tcpHeaderLen + payloadLen step 2) {
-            if (i + 1 < buffer.size) {
-                sum += ((buffer[i].toInt() and 0xFF) shl 8) or (buffer[i + 1].toInt() and 0xFF)
-            } else if (i < buffer.size) {
-                sum += (buffer[i].toInt() and 0xFF) shl 8
-            }
+        val endLimit = min(ipHeaderLen + tcpHeaderLen + payloadLen, buffer.size)
+        var i = ipHeaderLen
+        while (i < endLimit - 1) {
+            sum += ((buffer[i].toInt() and 0xFF) shl 8) or (buffer[i + 1].toInt() and 0xFF)
+            i += 2
+        }
+        if (i < endLimit) {
+            sum += (buffer[i].toInt() and 0xFF) shl 8
         }
 
         while (sum shr 16 != 0) {

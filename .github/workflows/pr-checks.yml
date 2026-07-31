@@ -1,0 +1,124 @@
+# Lightweight PR checks: commitlint + dependency-review.
+#
+# NOTE: This workflow is NOT path-filtered (it triggers on every PR to
+# main/dev). The `dependency-review` job below is the ONLY universally
+# triggered, non-masked, CVSS>=7.0 dependency-CVE gate covering both the Go
+# and Android ecosystems. Do NOT remove it, do NOT add `continue-on-error:
+# true` to its step, and do NOT downgrade `fail-on-severity` beyond `high`.
+# The `scripts/check_ci_permissions.py` guard (run via `ci-config-guard` job
+# below) enforces all three invariants. See `docs/ISSUES.md` CI-DEP-1 / N90
+# for prior regressions.
+name: PR Checks
+
+on:
+  pull_request:
+    branches: [main, dev]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write  # dependency-review needs this
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  commitlint:
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Check commit messages
+        uses: wagoid/commitlint-github-action@v6
+        with:
+          configFile: .commitlintrc.json
+
+  dependency-review:
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      # actions/dependency-review-action calls the dependency-graph compare
+      # API, which on PRIVATE repositories requires GitHub Advanced Security
+      # (GHAS) to be enabled (plus the dependency graph). This repo is private
+      # and does NOT currently have GHAS, so the action errors out with
+      # "Dependency review is not supported on this repository" — a
+      # repository-settings/billing limitation, NOT a CVE signal. That
+      # hard-error was blocking every PR targeting dev (issue #89). Probe the
+      # compare endpoint first; run the real CVE gate only when the API is
+      # actually available, so the gate stays a hard `fail-on-severity: high`
+      # check wherever GHAS is enabled and degrades to a skip (not a red
+      # error) where it is not. See issue #89 / #90 and docs/ISSUES.md
+      # CI-DEP-1. TODO(owner): enable GHAS (or make the repo public) then
+      # remove this probe so the gate runs unconditionally again.
+      - name: Probe dependency-review support
+        id: dep_probe
+        continue-on-error: true
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_BASE: ${{ github.event.pull_request.base.sha }}
+          GH_HEAD: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GH_REPO}/dependency-graph/compare/${GH_BASE}...${GH_HEAD}" || echo '000')
+          echo "probe_http=${code}" >> "$GITHUB_OUTPUT"
+          # 403/404 => dependency-review API unavailable on this repo (GHAS /
+          # dependency graph disabled). Anything else (200, transient network
+          # error) => run the real gate; never silently disable it on errors.
+          if [ "$code" = "403" ] || [ "$code" = "404" ]; then
+            echo "supported=false" >> "$GITHUB_OUTPUT"
+            echo "dependency-review API unavailable (HTTP ${code}); skipping gate (GHAS not enabled)."
+          else
+            echo "supported=true" >> "$GITHUB_OUTPUT"
+            echo "dependency-review API available (HTTP ${code}); running gate."
+          fi
+
+      # SECURITY GATE: do NOT add `continue-on-error: true` here.
+      # dependency-review-action with `fail-on-severity: high` must hard-fail
+      # the PR check when a high/critical CVE dependency is introduced.
+      # Adding continue-on-error would silently turn that red signal green
+      # (see docs/ISSUES.md N90 / CI-DEP-1). Removing this job entirely
+      # eliminates the only universally-triggered CVSS>=7.0 dependency-CVE
+      # gate (see docs/ISSUES.md CI-DEP-1, regression in PRs #79 / #82).
+      # The `scripts/check_ci_permissions.py` guard enforces this invariant.
+      # The step-level `if:` below ONLY skips the gate when the probe above
+      # proved the dependency-review API is unavailable on this repo (GHAS
+      # disabled) — it does NOT mask CVEs. When GHAS is enabled the gate runs
+      # unconditionally with `fail-on-severity: high`.
+      - name: Dependency review
+        if: ${{ steps.dep_probe.outputs.supported != 'false' }}
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+
+  # Regression guard for CI-PERM-1 (paths-filter permissions) and
+  # CI-MASK-1 / CI-MASK-2 (build/test/lint/dep-check must not be masked).
+  # Pure-stdlib Python — no dependencies, runs in seconds. Catches drift in
+  # .github/workflows/android-ci.yml and go-ci.yml before a PR merges.
+  ci-config-guard:
+    name: CI config guard
+    runs-on: [self-hosted, Linux, X64, do-sfo3]
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      # Calls `python3 scripts/check_ci_permissions.py` directly instead of
+      # `make ci-perms-check` because the self-hosted runner does not have
+      # `make` installed and lacks NOPASSWD sudo to apt-get install it.
+      # The Makefile target remains for local dev convenience.
+      # See docs/ISSUES.md MAKE-MISSING-1.
+      - name: Verify CI workflow configuration
+        run: python3 scripts/check_ci_permissions.py

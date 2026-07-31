@@ -561,41 +561,49 @@
 - **风险**: 低。运维和故障排查效率受影响
 - **修复难度**: 低。引入 `slog` 或 `zap` 等结构化日志库，统一日志格式
 
-### C74: SOCKS5连接池缺少并发回归测试
+### C74: SOCKS5连接池缺少并发回归测试 [已修复]
 - **提交哈希**: f8497b8
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/proxy/Socks5ConnectionPoolTest.kt`
 - **问题描述**: 测试仅覆盖单线程场景。ISSUES.md H5 记录的"连接池清理竞争条件"是关键缺陷，但测试中没有并发借用/归还/清理的竞态测试，修复后缺乏回归保护
 - **风险**: 中。关键缺陷缺乏回归测试，修复后可能再次引入
 - **修复难度**: 中。添加多线程并发测试，模拟 borrow/return/cleanup 竞态条件
 
-### C76: VpnService 回包缓冲区缺少分配行为回归测试
+### C76: VpnService 回包缓冲区缺少分配行为回归测试 [已修复]
 - **提交哈希**: d01ddd1
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/vpn/VpnServiceTest.kt`
 - **问题描述**: N52/N54 已将 ThreadLocal 方案替换为局部变量方案（`val buffer = ByteArray(PACKET_BUFFER_SIZE)`），现有测试未验证该分配行为在高并发场景下的内存表现，也未覆盖 `processTcpReturn` 的 `available() > 0` 边界条件。
 - **风险**: 低。缺少回归保护，后续重构可能重新引入 ThreadLocal 或不当的缓冲策略
 - **修复难度**: 低。补充 `processTcpReturn` 在 `available()` 返回不同值时的行为测试
 
-### C77: Socks5ProxyHandler double-free 修复缺少 write-failure 回归测试
+### C77: Socks5ProxyHandler double-free 修复缺少 write-failure 回归测试 [已修复]
 - **提交哈希**: 9f4b1b9
 - **位置**: `android/app/src/test/java/com/netproxy/gateway/proxy/Socks5ProxyHandlerTest.kt` (L22 起)
 - **问题描述**: N45 的修复修改了 `RelayHandler` 的 write-failure 分支，但当前测试只覆盖认证和 CONNECT 流程，没有构造 `relayChannel.writeAndFlush(msg)` 失败的路径来验证不会再次 release `msg`。
 - **风险**: 低。该修复点缺乏测试保护，未来容易被误改回双重释放
 - **修复难度**: 低。增加一个模拟 write 失败的 Netty 回归测试
 
-### C78: VpnService 回包路径缺少TCP状态机
+### C78: VpnService 回包路径缺少TCP状态机 [已修复]
+- **状态**: 已修复
 - **提交哈希**: 1f9acee
-- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/VpnService.kt` (L582-L624, L649-L726)
-- **问题描述**: `processTcpReturn()` 仅在有数据可读时构造回包（`available > 0 && read > 0`），无法发送纯TCP控制包（ACK/FIN/RST）。`constructReturnPacket()` 固定设置 `PSH+ACK` flags，序列号和确认号固定为0。这导致TCP连接建立/终止流程不完整，依赖对端容忍非标准行为。
-- **风险**: 中。与严格TCP实现不兼容，可能导致连接建立失败或异常断开
-- **修复难度**: 高。需要实现完整的TCP状态机，正确管理序列号、确认号和标志位
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/vpn/ConnectionSession.kt` (L8-102)、`ConnectionSessionManager.kt` (L138-197)、`VpnPacketProcessor.kt` (L106-130)
+- **修复说明**: 原 `VpnService.kt` 中的回包逻辑已拆分到三个文件：
+  - `ConnectionSession.kt`: `TcpState` 枚举（CLOSED/SYN_SENT/ESTABLISHED/FIN_WAIT/CLOSE_WAIT/LAST_ACK 等）、`seqNum`/`ackNum` 字段、`resolveTcpFlags()` 按状态返回 SYN+ACK/FIN+ACK/PSH+ACK、`advanceSeq`/`advanceAck`、`pendingControlFlags` + `needsControlPacket()` + `consumePendingFlags()`
+  - `VpnPacketProcessor.constructReturnPacket` (L130): `val flags = if (tcpFlags != 0) tcpFlags else session.resolveTcpFlags()` 使用动态 flags
+  - `ConnectionSessionManager.processTcpReturn` (L186-190): 即使无数据可读，只要 `session.needsControlPacket()` 为真仍构造 0 长度控制包注入
+- **残余风险**: 无（见关联问题 H14）
 - **关联问题**: ISSUES.md H14, N36
 
-### C79: StreamConn deadline 方法空实现导致 goroutine 泄漏
+### C79: StreamConn deadline 方法空实现导致 goroutine 泄漏 [部分已修复]
+- **状态**: 部分已修复
 - **提交哈希**: 9f4b1b9
-- **位置**: `server/socks5-proxy/main.go` (L464-L476)
-- **问题描述**: 详见 ISSUES.md N56。`SetReadDeadline`、`SetDeadline`、`SetWriteDeadline` 三个方法均为空实现，`Read()` 阻塞 select 无超时保护，远端静默时永久阻塞导致 goroutine 泄漏。
-- **风险**: 高
-- **修复难度**: 中
+- **位置**: `server/socks5-proxy/main.go` (L514-532)
+- **问题描述**: 详见 ISSUES.md N56。原报告：`SetReadDeadline`、`SetDeadline`、`SetWriteDeadline` 三个方法均为空实现，`Read()` 阻塞 select 无超时保护，远端静默时永久阻塞导致 goroutine 泄漏。
+- **当前实现**:
+  - `SetReadDeadline` (L522-526): 已实现，通过 `s.readDeadline.Store(&t)` 存储 `*time.Time`
+  - `SetDeadline` (L514-520): 已实现，调用 `SetReadDeadline` + `SetWriteDeadline`
+  - `Read()` (L288-303): 已使用 `readDeadline`，非零 deadline 时构造 `time.NewTimer(time.Until(*t))` 并在 select 中等待，超时返回 `os.ErrDeadlineExceeded`
+  - `SetWriteDeadline` (L528-532): **仍为空实现（no-op）**。注释说明：WebSocket 写入由 `writeMu` + `streamWriteLimit` 保护，`StreamConn.Write` 不涉及需要 deadline 控制的阻塞 I/O
+- **残余风险**: 低。读路径 goroutine 泄漏已修复；写路径因 WebSocket 写入已有独立超时保护，空实现可接受
 - **关联问题**: ISSUES.md N56
 
 ### C80: processReturnTraffic 单协程串行处理模型 [已修复]
@@ -606,3 +614,30 @@
 - **问题描述**: ~~详见 ISSUES.md N57。`processReturnTraffic` 使用单协程串行遍历所有活跃连接，单个连接 I/O 阻塞会导致所有后续连接回包处理停滞。~~ 已改为 `coroutineScope { async(Dispatchers.IO) }` 并行模型，每个连接独立协程处理回包。
 - **修复方式**: 串行 `snapshot.forEach` 改为并行 `coroutineScope { snapshot.map { async(Dispatchers.IO) { ... } }.awaitAll() }`
 - **关联问题**: ISSUES.md N57, TECH_DEBT.md C78
+
+### C81: AuthSessionStore 持久化路径 String(authToken) 残留
+- **提交哈希**: f433b6d
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/AuthSessionStore.kt` (L68, L85)
+- **问题描述**: `update()` 和 `updateWithResult()` 通过 `encryptedPrefs.edit().putString(KEY_AUTH_TOKEN, String(authToken))` 持久化 auth token。`String(authToken)` 调用 `java.lang.String(char[])` 构造函数，会创建不可变 String 对象，无法被 `fill('\u0000')` 零化，会一直残留在堆内存中直到 GC 回收。`loadSession()` 反向路径用 `getString` + `toCharArray()` 同样存在 String 中间对象。这是 Java/Kotlin 语言的硬约束（String 不可变），不是单纯 API 限制；EncryptedSharedPreferences 的 `Editor` 接口仅暴露 `putString/putStringSet/putInt/...`，无 `putByteArray`/`putCharArray`。代码注释已承认此限制。
+- **风险**: 中。auth token 明文 String 在堆内存中短期残留，理论上可被内存转储/堆 dump 提取。在 token 频繁更新的场景下窗口期累积。
+- **修复难度**: 高。需要迁移到 Jetpack Security Crypto 之外的方案（如 Tink 直接加密 ByteArray 并写入文件），属于架构变更。
+- **修复状态**: 待修复
+- **关联问题**: TECH_DEBT.md C4（C4 描述 `loadSession()` 中的 String 转换，C81 补充 `update` 路径的 `putString` 残留，两者共同构成完整限制）
+
+### C82: 敏感凭证零化路径测试覆盖严重不足 [已修复]
+- **状态**: 已修复
+- **提交哈希**: f433b6d（记录问题）；fix/c82-zeroing-test-coverage 分支（修复）
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/` 下 5 个文件的 22 处 `securelyClear()` 调用点
+- **问题描述**: 22 处 `securelyClear()` 调用点中，仅 5 处有直接断言"零化确实发生"（全部集中在 `MainViewModel.kt:251,268,340,355,426`）。其余 17 处完全没有零化断言，包括 CR14-1 关键修复点 `MqttConnectionManager.kt:502`（`connectOptions?.password?.securelyClear()`，清除 Paho 内部 `Arrays.copyOf` 拷贝）。
+  **特别危险项**: `Socks5ConnectionPoolTest.kt:359` 的测试名 `n37b10_createNewConnection_zerosCredentialPasswordAfterUse` 暗示有零化验证，但实际只验证原密码未被破坏，**未**断言拷贝被零化——这是"假覆盖"，比无测试更危险。
+- **风险**: 中-高。若未来重构误删某个 `securelyClear()` 调用，仅 5 处能被测试发现，其余 17 处会静默通过，敏感数据可能残留在内存中。
+- **修复方式**:
+  - 修正 `Socks5ConnectionPoolTest.kt:359` 假覆盖：捕获 `credentialProvider` 返回的拷贝引用，断言在 `createNewConnection` finally 后被零化（批 1）
+  - 新增 `AuthSessionStoreTest.kt` 6 个测试：反射读取 `inMemoryToken` 字段 + spyk 拦截 `loadSession` 私有方法（批 1）
+  - 新增 `MqttConnectionManagerZeroingTest.kt` 5 个测试：含 CR14-1 关键防回归测试，反射读取 `MqttConnectOptions.password` 字段验证 Paho 内部 `Arrays.copyOf` 拷贝被零化（批 2）
+  - 新增 `Socks5ConnectionPoolTest.kt:performSocks5Handshake_finally_zerosPassBytes`：通过自定义 `OutputStream` 捕获 `passBytes` 引用（批 3）
+  - 新增 `Socks5ProxyServiceTest.kt:credentialValidator_finally_zerosPasswordArray`：反射调用 Kotlin 编译器生成的合成方法 `initChannel$lambda$0` 触发 lambda finally 块（批 3，**脆弱，见下**）
+  - 新增 `MainViewModelTest.kt` 3 个测试：捕获 `_uiState.getAndUpdate` 返回的旧 authToken 引用（批 3）
+- **修复状态**: 已修复（22/22 处覆盖，含 1 处假覆盖修正）
+- **已知脆弱测试**: `Socks5ProxyServiceTest.kt:credentialValidator_finally_zerosPasswordArray` 依赖 Kotlin 2.1.x 编译器将 lambda 体编译为匿名内部类 `Socks5ProxyService$startProxyServer$1$bootstrap$1` 上的静态合成方法 `initChannel$lambda$0`。这是编译器实现细节，非语言规范保证。**触发条件**：升级 Kotlin 大版本、修改 `startProxyServer` 结构、将 lambda 提取为命名方法、或 lambda 被内联优化时，合成方法名或所在类会改变，导致测试断裂且不易诊断。**缓解**：若该测试失败，优先检查合成方法名是否变化；彻底解决需重构生产代码暴露 lambda 为可测试方法（违反"精准修改"原则，暂不实施）。
+- **关联问题**: ISSUES.md N8（N8 是核心业务逻辑测试缺口泛指，C82 聚焦安全敏感的凭证零化路径）

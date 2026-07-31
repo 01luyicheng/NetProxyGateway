@@ -16,9 +16,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
-	sqlite3 "github.com/mattn/go-sqlite3"
+	_ "github.com/mattn/go-sqlite3"
 	"github.com/netproxy/shared/ratelimit"
 )
 
@@ -32,6 +33,15 @@ const (
 	DefaultDBPath                 = "./api.db"
 	MinJWTSecretLength            = 32
 	MaxHTTPHeaderBytes            = 1 << 20
+
+	// LastSeenFutureTolerance caps how far a client-supplied last_seen may
+	// lie in the future relative to the server clock. upsertDeviceStatusDB
+	// only applies an update when excluded.last_seen > device_status.last_seen,
+	// so an unbounded future timestamp would permanently lock a device_status
+	// row (all subsequent real updates would be rejected by the guard).
+	// The tolerance absorbs normal clock skew between the tunnel server
+	// (the only legitimate caller) and the API server. See REV55.
+	LastSeenFutureTolerance = 5 * time.Minute
 )
 
 // Sentinel errors - unified ErrFailedToXxx naming convention
@@ -45,6 +55,7 @@ var (
 	ErrFailedToCreateSession              = errors.New("failed to create pairing session")
 	ErrFailedToUpdateSession              = errors.New("failed to update session")
 	ErrFailedToUpdateStatus               = errors.New("failed to update device status")
+	ErrLastSeenTooFarInFuture             = errors.New("last_seen is too far in the future")
 	ErrFailedToGenerateToken              = errors.New("failed to generate session token")
 	ErrFailedToCreateToken                = errors.New("failed to create session token")
 	ErrFailedToValidateToken              = errors.New("missing or invalid bearer token")
@@ -60,7 +71,8 @@ var (
 	ErrInternalAPIKeyNotConfigured        = errors.New("internal api key not configured")
 	ErrMissingInternalAPIKey              = errors.New("missing internal api key")
 	ErrInvalidInternalAPIKey              = errors.New("invalid internal api key")
-	ErrConcurrentModification            = errors.New("session was modified by another request, please retry")
+	ErrConcurrentModification             = errors.New("session was modified by another request, please retry")
+	ErrSessionTokenAlreadyIssued          = errors.New("a session token was already issued for this pairing session")
 )
 
 var (
@@ -108,8 +120,17 @@ type Server struct {
 	expectedPassHash [sha256.Size]byte
 
 	cleanupStop             chan struct{}
+	closeOnce               sync.Once
 	cleanupWorkers          sync.WaitGroup
 	cleanupSessionsInterval time.Duration
+
+	// testHookGetPairingSessionDB is used by tests to inject controlled
+	// responses from getPairingSessionDB. When nil the real database is used.
+	testHookGetPairingSessionDB func(code string) (*PairingSession, error)
+
+	// testHookCompareAndUpdatePairingSessionDB is used by tests to synchronize
+	// concurrent updates. When nil the real database update is executed.
+	testHookCompareAndUpdatePairingSessionDB func()
 }
 
 // handleBindError handles request binding errors uniformly.
@@ -186,19 +207,24 @@ func NewServer() (*Server, error) {
 		dbPath = DefaultDBPath
 	}
 
-	// Open database connection
-	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
+	// Open database connection. _txlock=immediate makes db.Begin() use
+	// BEGIN IMMEDIATE, which acquires the write lock up-front. This is required
+	// so that createSessionToken's read-check-insert transaction serializes
+	// concurrent token-issuance attempts and prevents double-spend (REV61).
+	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000&_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
 	// Verify database connection
 	if err := db.Ping(); err != nil {
+		db.Close()
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
 	// Create schema
 	if err := initSchema(db); err != nil {
+		db.Close()
 		return nil, fmt.Errorf("failed to init schema: %w", err)
 	}
 
@@ -214,16 +240,10 @@ func NewServer() (*Server, error) {
 }
 
 func isPairingCodeUniqueConstraintError(err error) bool {
-	var sqliteErr sqlite3.Error
-	if !errors.As(err, &sqliteErr) {
+	if err == nil {
 		return false
 	}
-
-	if sqliteErr.Code != sqlite3.ErrConstraint {
-		return false
-	}
-
-	return sqliteErr.ExtendedCode == sqlite3.ErrConstraintPrimaryKey || sqliteErr.ExtendedCode == sqlite3.ErrConstraintUnique
+	return strings.Contains(err.Error(), "UNIQUE constraint")
 }
 
 // initSchema initializes the database schema.
@@ -267,21 +287,28 @@ func initSchema(db *sql.DB) error {
 	return err
 }
 
-// Close closes server resources.
+// Close closes server resources. It is safe to call multiple times; only the
+// first call performs teardown (REV56: previously a second call panicked with
+// "close of closed channel" because cleanupStop was closed unguarded — mirroring
+// the REV53 ratelimit Stop() defect — and rateLimiter.Stop() is likewise
+// non-idempotent on dev until PR #131 merges). Gating the whole teardown behind
+// closeOnce makes Server.Close() idempotent regardless of whether its
+// sub-components are individually idempotent.
 func (s *Server) Close() error {
-	if s.rateLimiter != nil {
-		s.rateLimiter.Stop()
-	}
-
-	if s.cleanupStop != nil {
-		close(s.cleanupStop)
-		s.cleanupWorkers.Wait()
-	}
-
-	if s.db != nil {
-		return s.db.Close()
-	}
-	return nil
+	var dbErr error
+	s.closeOnce.Do(func() {
+		if s.rateLimiter != nil {
+			s.rateLimiter.Stop()
+		}
+		if s.cleanupStop != nil {
+			close(s.cleanupStop)
+			s.cleanupWorkers.Wait()
+		}
+		if s.db != nil {
+			dbErr = s.db.Close()
+		}
+	})
+	return dbErr
 }
 
 // generateCode generates a 6-digit pairing code using rejection sampling to avoid modulo bias.
@@ -438,6 +465,10 @@ func (s *Server) createPairingSessionDB(session *PairingSession) error {
 
 // getPairingSessionDB retrieves a pairing session from the database by code.
 func (s *Server) getPairingSessionDB(code string) (*PairingSession, error) {
+	if s.testHookGetPairingSessionDB != nil {
+		return s.testHookGetPairingSessionDB(code)
+	}
+
 	var session PairingSession
 	var createdAt, expiresAt int64
 	var used int
@@ -485,8 +516,47 @@ func (s *Server) updatePairingSessionDB(session *PairingSession) error {
 // compareAndUpdatePairingSessionDB performs a conditional update on a pairing session,
 // ensuring the session hasn't been modified since it was read (optimistic locking).
 // Returns ErrConcurrentModification if the session was modified concurrently.
+//
+// Expiry is intentionally NOT enforced here: markSessionExpired must be able to
+// write status="expired" for sessions that have already crossed their expires_at
+// threshold, and all callers already perform an explicit
+// time.Now().After(session.ExpiresAt) check before mutating state. Including
+// expires_at > now in the WHERE clause (REV36) made markSessionExpired always
+// return ErrConcurrentModification, leaving the expired status unwritten and
+// causing updatePairingSession to regress from 410 Gone to 409 Conflict.
 func (s *Server) compareAndUpdatePairingSessionDB(session *PairingSession, expectedStatus, expectedEngineerID string) error {
+	if s.testHookCompareAndUpdatePairingSessionDB != nil {
+		s.testHookCompareAndUpdatePairingSessionDB()
+	}
+
 	result, err := s.db.Exec(
+		`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ? AND status = ? AND engineer_id = ?`,
+		session.Status,
+		session.EngineerID,
+		boolToInt(session.Used),
+		session.Code,
+		expectedStatus,
+		expectedEngineerID,
+	)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return ErrConcurrentModification
+	}
+	return nil
+}
+
+// compareAndUpdatePairingSessionTx is the transaction-scoped variant of
+// compareAndUpdatePairingSessionDB. It runs the optimistic-lock UPDATE within
+// the caller's *sql.Tx so the lock and the subsequent token insert commit
+// atomically, preventing double-spend (REV61).
+func compareAndUpdatePairingSessionTx(tx *sql.Tx, session *PairingSession, expectedStatus, expectedEngineerID string) error {
+	result, err := tx.Exec(
 		`UPDATE pairing_sessions SET status = ?, engineer_id = ?, used = ? WHERE code = ? AND status = ? AND engineer_id = ?`,
 		session.Status,
 		session.EngineerID,
@@ -593,12 +663,21 @@ func (s *Server) getDeviceStatusDB(deviceID string) (*DeviceStatus, error) {
 		return nil, err
 	}
 
-	ds.LastSeen = time.Unix(lastSeen, 0)
+	// Backward compatibility: legacy rows stored last_seen in seconds. Any
+	// realistic second-precision timestamp is below 1e12, while a millisecond
+	// timestamp is above it, so treat small values as seconds and convert.
+	if lastSeen > 0 && lastSeen < 1e12 {
+		lastSeen *= 1000
+	}
+	ds.LastSeen = time.UnixMilli(lastSeen)
 
 	return &ds, nil
 }
 
 // upsertDeviceStatusDB inserts or updates device status in the database.
+// The update is applied only when the incoming last_seen is strictly newer
+// than the stored value, preventing delayed/stale notifications from
+// overwriting a more recent status (REV33).
 func (s *Server) upsertDeviceStatusDB(status *DeviceStatus) error {
 	_, err := s.db.Exec(
 		`INSERT INTO device_status (device_id, status, last_seen, tunnel_addr)
@@ -606,10 +685,11 @@ func (s *Server) upsertDeviceStatusDB(status *DeviceStatus) error {
 		 ON CONFLICT(device_id) DO UPDATE SET
 		 status = excluded.status,
 		 last_seen = excluded.last_seen,
-		 tunnel_addr = excluded.tunnel_addr`,
+		 tunnel_addr = excluded.tunnel_addr
+		 WHERE excluded.last_seen > device_status.last_seen`,
 		status.DeviceID,
 		status.Status,
-		status.LastSeen.Unix(),
+		status.LastSeen.UnixMilli(),
 		status.TunnelAddr,
 	)
 	return err
@@ -771,6 +851,37 @@ func (s *Server) internalAuthMiddleware() gin.HandlerFunc {
 	}
 }
 
+// rateLimitKey returns the key used for rate limiting.
+// It prefers the authenticated account identity (JWT sub or internal API key)
+// and falls back to the client IP when no identity is present.
+func rateLimitKey(c *gin.Context) string {
+	if role, exists := c.Get("role"); exists && role == "internal" {
+		return "internal"
+	}
+
+	if engineerIDValue, exists := c.Get("engineer_id"); exists {
+		if engineerID, ok := engineerIDValue.(string); ok && engineerID != "" {
+			return "jwt:" + engineerID
+		}
+	}
+
+	return c.ClientIP()
+}
+
+// rateLimitMiddleware enforces per-identity rate limiting using the server's
+// shared rate limiter. It must run after an authentication middleware so that
+// the authenticated identity is available in the Gin context.
+func (s *Server) rateLimitMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		key := rateLimitKey(c)
+		if !s.rateLimiter.Allow(key) {
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": ErrRateLimitExceeded.Error()})
+			return
+		}
+		c.Next()
+	}
+}
+
 // createPairingSession creates a new pairing session.
 func (s *Server) createPairingSession(c *gin.Context) {
 	clientIP := c.ClientIP()
@@ -848,11 +959,20 @@ func (s *Server) getPairingSession(c *gin.Context) {
 
 	// Check if expired
 	if time.Now().After(session.ExpiresAt) {
+		// The session was found (valid code), so this is not a brute-force
+		// attempt. Reset the failure counter to avoid blocking engineers who
+		// poll an expiring session (REV34 rate-limit fix).
+		s.rateLimiter.Success(rateLimitKey(c))
 		if err := s.markSessionExpired(session, session.Status, session.EngineerID); err != nil {
 			if errors.Is(err, ErrConcurrentModification) {
 				// Session was modified concurrently; re-fetch to return current state
 				refreshed, refreshErr := s.getPairingSessionDB(code)
-				if refreshErr != nil || refreshed == nil {
+				if refreshErr != nil {
+					log.Printf("Failed to refresh session %s after concurrent modification: %v", session.Code, refreshErr)
+					c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToQueryDatabase.Error()})
+					return
+				}
+				if refreshed == nil || time.Now().After(refreshed.ExpiresAt) {
 					c.JSON(http.StatusGone, gin.H{"error": ErrSessionExpired.Error()})
 					return
 				}
@@ -867,6 +987,9 @@ func (s *Server) getPairingSession(c *gin.Context) {
 		return
 	}
 
+	// Session found and valid: reset the failure counter so legitimate polling
+	// does not accumulate toward the brute-force block (REV34 rate-limit fix).
+	s.rateLimiter.Success(rateLimitKey(c))
 	c.JSON(http.StatusOK, session)
 }
 
@@ -1055,6 +1178,17 @@ func (s *Server) createSessionToken(c *gin.Context) {
 		return
 	}
 
+	// Check if expired (consistent with getPairingSession and updatePairingSession)
+	if time.Now().After(session.ExpiresAt) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": ErrSessionExpired.Error()})
+		return
+	}
+
+	// Verify session is still valid using optimistic locking before creating token.
+	// This prevents TOCTOU: session could have been modified between the read above and token creation.
+	expectedStatus := session.Status
+	expectedEngineerID := session.EngineerID
+
 	// Create session token
 	token, err := generateSessionToken()
 	if err != nil {
@@ -1069,10 +1203,79 @@ func (s *Server) createSessionToken(c *gin.Context) {
 		ExpiresAt:  time.Now().Add(SessionTokenTTL),
 	}
 
-	if err := s.createSessionTokenDB(sessionToken); err != nil {
+	// The optimistic-lock re-verification and the token insertion MUST be atomic.
+	// Previously they were two separate auto-commit statements, which allowed
+	// double-spend: two concurrent createSessionToken calls for the same
+	// "connected" session both passed the optimistic lock (the UPDATE writes back
+	// identical values, so the second call's WHERE still matched) and both issued
+	// tokens. Wrapping them in a single BEGIN IMMEDIATE transaction (enabled via
+	// _txlock=immediate in the DSN) serializes concurrent callers: the second
+	// caller's BEGIN blocks until the first commits, so its existence check sees
+	// the first caller's token and returns 409 (REV61).
+	tx, err := s.db.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateSession.Error()})
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Re-verify the session hasn't been concurrently modified before creating the
+	// token. Uses optimistic locking: if the session status or engineer_id changed
+	// between our read and this write, the UPDATE affects 0 rows and we abort with
+	// 409 instead of issuing a token for a stale/revoked/transferred session.
+	if err := compareAndUpdatePairingSessionTx(tx, session, expectedStatus, expectedEngineerID); err != nil {
+		if errors.Is(err, ErrConcurrentModification) {
+			c.JSON(http.StatusConflict, gin.H{"error": ErrConcurrentModification.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateSession.Error()})
+		return
+	}
+
+	// Double-spend guard: a concurrent request that committed before us may have
+	// already issued a non-expired token for this device+engineer. The BEGIN
+	// IMMEDIATE transaction serializes us after any such commit, so this COUNT
+	// reliably sees it. Reject with 409 instead of issuing a second token.
+	// The created_at >= session.CreatedAt bound scopes the check to tokens
+	// issued for THIS pairing session: a token from an earlier session (same
+	// device+engineer) predates the current session's creation and must not
+	// block a legitimate re-pairing.
+	var existing int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM session_tokens WHERE device_id = ? AND engineer_id = ? AND expires_at > ? AND created_at >= ?`,
+		session.DeviceID, engineerID, time.Now().Unix(), session.CreatedAt.Unix(),
+	).Scan(&existing); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToQueryDatabase.Error()})
+		return
+	}
+	if existing > 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": ErrSessionTokenAlreadyIssued.Error()})
+		return
+	}
+
+	if _, err := tx.Exec(
+		`INSERT INTO session_tokens (token, device_id, engineer_id, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		sessionToken.Token,
+		sessionToken.DeviceID,
+		sessionToken.EngineerID,
+		sessionToken.CreatedAt.Unix(),
+		sessionToken.ExpiresAt.Unix(),
+	); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToCreateToken.Error()})
 		return
 	}
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": ErrFailedToUpdateSession.Error()})
+		return
+	}
+	committed = true
 
 	c.JSON(http.StatusCreated, sessionToken)
 }
@@ -1106,6 +1309,7 @@ func (s *Server) updateDeviceStatus(c *gin.Context) {
 		DeviceID   string `json:"device_id" binding:"required"`
 		Status     string `json:"status" binding:"required"`
 		TunnelAddr string `json:"tunnel_addr"`
+		LastSeen   int64  `json:"last_seen"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1113,10 +1317,27 @@ func (s *Server) updateDeviceStatus(c *gin.Context) {
 		return
 	}
 
+	lastSeen := time.Now()
+	if req.LastSeen > 0 {
+		candidate := time.UnixMilli(req.LastSeen)
+		// Reject timestamps that lie too far in the future. Without this cap a
+		// single request carrying an unbounded future last_seen would be written
+		// and then permanently reject every subsequent legitimate update, because
+		// upsertDeviceStatusDB only applies the ON CONFLICT update when
+		// excluded.last_seen > device_status.last_seen (REV55). The tolerance
+		// absorbs normal clock skew between the tunnel server and the API server.
+		if candidate.After(lastSeen.Add(LastSeenFutureTolerance)) {
+			log.Printf("reject future last_seen: device=%s candidate=%s", req.DeviceID, candidate.UTC().Format(time.RFC3339Nano))
+			c.JSON(http.StatusBadRequest, gin.H{"error": ErrLastSeenTooFarInFuture.Error()})
+			return
+		}
+		lastSeen = candidate
+	}
+
 	status := &DeviceStatus{
 		DeviceID:   req.DeviceID,
 		Status:     req.Status,
-		LastSeen:   time.Now(),
+		LastSeen:   lastSeen,
 		TunnelAddr: req.TunnelAddr,
 	}
 
@@ -1215,6 +1436,65 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 	}
 }
 
+// defaultCORSAllowedOrigins is used when API_ALLOWED_ORIGINS is unset or empty.
+// Preserves the dev-only defaults shipped with PR #108 so local frontends on
+// :3000 / :8080 keep working without extra configuration.
+var defaultCORSAllowedOrigins = []string{"http://localhost:3000", "http://localhost:8080"}
+
+// buildCorsConfig constructs the CORS middleware config.
+//
+// allowedOriginsEnv is the raw value of the API_ALLOWED_ORIGINS environment
+// variable (comma-separated list of origins, e.g.
+// "https://app.example.com,https://admin.example.com"). Empty entries are
+// dropped. When the env var is unset or contains no valid origins, the
+// dev-only localhost defaults are used so local development keeps working.
+//
+// Without this env-var-driven allowlist, gin-contrib/cors@v1.7.x would
+// `AbortWithStatus(http.StatusForbidden)` for every cross-origin request
+// whose Origin is not localhost, hard-breaking any non-dev deployment.
+// See docs/ISSUES.md CORS-HARDCODED-ORIGINS-1 (REV59 / C1).
+func buildCorsConfig(allowedOriginsEnv string) cors.Config {
+	corsConfig := cors.DefaultConfig()
+	corsConfig.AllowOrigins = parseCORSAllowedOrigins(allowedOriginsEnv)
+	corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
+	corsConfig.AllowHeaders = []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Requested-With"}
+	corsConfig.ExposeHeaders = []string{"Content-Length"}
+	corsConfig.AllowCredentials = true
+	corsConfig.MaxAge = 12 * time.Hour
+	return corsConfig
+}
+
+// parseCORSAllowedOrigins splits a comma-separated origin list, trimming
+// whitespace and dropping empty entries. Returns the dev-only localhost
+// defaults when the input contains no valid origin.
+//
+// Wildcard entries (anything containing "*") are rejected and skipped with a
+// warning: gin-contrib/cors's Validate() does not scheme-check entries
+// containing "*", so a raw "*" would silently match EVERY origin while
+// AllowCredentials=true — disabling the allowlist this feature exists to
+// enforce.
+func parseCORSAllowedOrigins(raw string) []string {
+	if raw == "" {
+		return defaultCORSAllowedOrigins
+	}
+	origins := make([]string, 0, 4)
+	for _, item := range strings.Split(raw, ",") {
+		origin := strings.TrimSpace(item)
+		if origin == "" {
+			continue
+		}
+		if strings.Contains(origin, "*") {
+			log.Printf("WARNING: API_ALLOWED_ORIGINS: ignoring wildcard origin %q — wildcards are not allowed with credentials enabled", origin)
+			continue
+		}
+		origins = append(origins, origin)
+	}
+	if len(origins) == 0 {
+		return defaultCORSAllowedOrigins
+	}
+	return origins
+}
+
 func main() {
 	// Set Gin mode
 	gin.SetMode(gin.ReleaseMode)
@@ -1230,6 +1510,9 @@ func main() {
 
 	r := gin.New()
 	r.Use(gin.Recovery())
+	// Configure CORS (env-var-driven allowlist; defaults to localhost for dev)
+	corsConfig := buildCorsConfig(os.Getenv("API_ALLOWED_ORIGINS"))
+	r.Use(cors.New(corsConfig))
 	r.Use(gin.Logger())
 
 	// Health check (public)
@@ -1243,7 +1526,7 @@ func main() {
 	{
 		// Pairing session management
 		api.POST("/pair", server.authMiddleware(), server.createPairingSession)
-		api.GET("/pair/:code", server.internalOrUserAuthMiddleware(), server.getPairingSession)
+		api.GET("/pair/:code", server.internalOrUserAuthMiddleware(), server.rateLimitMiddleware(), server.getPairingSession)
 		api.PUT("/pair/:code", server.authMiddleware(), server.updatePairingSession)
 
 		// Session tokens

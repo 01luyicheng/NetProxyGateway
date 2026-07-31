@@ -28,6 +28,7 @@ import (
 	"github.com/netproxy/shared/recovery"
 	"github.com/netproxy/shared/stringutil"
 )
+
 // SOCKS5 protocol constants
 const (
 	socks5Version = 0x05
@@ -73,7 +74,6 @@ const (
 	tunnelReadTimeout     = 60 * time.Second
 	streamCloseWriteLimit = 2 * time.Second
 	streamWriteLimit      = 5 * time.Second
-
 )
 
 var streamIDGenerator = generateRandomStreamID
