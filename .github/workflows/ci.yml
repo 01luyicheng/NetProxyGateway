@@ -147,16 +147,11 @@ jobs:
         if: always()
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
 
-      - name: Run vulnerability check (advisory)
+      - name: Run vulnerability check
         if: always()
         working-directory: server/${{ matrix.component }}
-        # Advisory (non-gating): govulncheck@latest (v1.6.0) requires
-        # Go >=1.25 and auto-switches to go1.25.x, but go.mod declares
-        # go 1.22, producing stdlib CVEs (exit 3) that don't reflect
-        # real exposure and would block every PR. Mirror go-ci.yml by
-        # keeping this non-gating; findings stay visible in job logs.
         run: govulncheck ./...
-        continue-on-error: true
+        continue-on-error: false
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
