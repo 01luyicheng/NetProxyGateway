@@ -605,7 +605,7 @@ fun PairingSection(
                 modifier = Modifier.fillMaxWidth(),
                 enabled = pairingCode.length >= 6 && !uiState.isPairingInProgress
             ) {
-                androidx.compose.animation.AnimatedContent(
+                AnimatedContent(
                     targetState = uiState.isPairingInProgress,
                     label = "pairing_button_content"
                 ) { isPairing ->
@@ -616,7 +616,7 @@ fun PairingSection(
                         if (isPairing) {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(20.dp),
-                                color = MaterialTheme.colorScheme.onPrimary,
+                                color = LocalContentColor.current,
                                 strokeWidth = 2.dp
                             )
                             Spacer(modifier = Modifier.width(8.dp))

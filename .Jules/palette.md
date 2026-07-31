@@ -9,4 +9,4 @@
 
 ## 2024-08-01 - Smooth transitions for button states
 **Learning:** Abrupt state swaps in buttons (like showing a spinner during an async operation) can feel jarring.
-**Action:** Use `AnimatedContent` for button content to smoothly transition between normal and loading states.
+**Action:** Use `AnimatedContent` for button content to smoothly transition between normal and loading states. Ensure you compute derived properties inside the animation lambda.
