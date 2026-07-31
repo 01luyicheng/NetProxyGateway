@@ -11,7 +11,9 @@ import android.content.ContextWrapper
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.ui.draw.rotate
 import androidx.compose.foundation.layout.*
@@ -40,6 +42,7 @@ import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -473,40 +476,45 @@ private fun ConnectionStatusCard(uiState: UiState, onRetry: () -> Unit) {
     val statusTextRes = statusData.textRes
     val statusIcon = statusData.icon
 
+    val animatedContainerColor by animateColorAsState(targetValue = containerColor, label = "ConnectionContainerColor")
+    val animatedContentColor by animateColorAsState(targetValue = contentColor, label = "ConnectionContentColor")
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = containerColor,
-            contentColor = contentColor
+            containerColor = animatedContainerColor,
+            contentColor = animatedContentColor
         )
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                if (uiState.mqttState == MqttUiState.Connecting) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(24.dp),
-                        color = contentColor,
-                        strokeWidth = 2.dp
-                    )
-                } else if (statusIcon != null) {
-                    Icon(
-                        imageVector = statusIcon,
-                        contentDescription = null,
-                        modifier = Modifier.size(24.dp),
-                        tint = contentColor
+            AnimatedContent(targetState = statusData, label = "ConnectionStatusAnimated") { targetStatus ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (targetStatus.showsSpinner()) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(24.dp),
+                            color = animatedContentColor,
+                            strokeWidth = 2.dp
+                        )
+                    } else if (targetStatus.icon != null) {
+                        Icon(
+                            imageVector = targetStatus.icon,
+                            contentDescription = null,
+                            modifier = Modifier.size(24.dp),
+                            tint = animatedContentColor
+                        )
+                    }
+                    Text(
+                        text = stringResource(targetStatus.textRes),
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = animatedContentColor
                     )
                 }
-                Text(
-                    text = stringResource(statusTextRes),
-                    style = MaterialTheme.typography.headlineSmall,
-                    color = contentColor
-                )
             }
 
             if (uiState.peerId.isNotEmpty()) {
@@ -687,12 +695,23 @@ private fun ConnectedOptionsSection(
     }
 }
 
-private data class StatusCardData(
+internal data class StatusCardData(
     val containerColor: Color,
     val contentColor: Color,
     val textRes: Int,
     val icon: ImageVector?
 )
+
+// REV62: during an AnimatedContent crossfade both the fading-out and fading-in rows are
+// composed against the *current* UiState. The spinner / VPN indicator must therefore be
+// derived from the per-row target StatusCardData (the AnimatedContent lambda parameter),
+// NOT from the shared uiState — otherwise the fading-out row briefly renders a spinner /
+// indicator that belongs to the new state, disagreeing with its own icon and text.
+// (Previously the spinner read `uiState.mqttState == Connecting` and the VPN indicator
+// read `uiState.isVpnEnabled`; both produced a ~300ms mismatch during transitions.)
+internal fun StatusCardData.showsSpinner(): Boolean = icon == null
+
+internal fun StatusCardData.isVpnRunning(): Boolean = textRes == R.string.vpn_running
 
 @Composable
 private fun VpnStatusCard(uiState: UiState) {
@@ -717,47 +736,52 @@ private fun VpnStatusCard(uiState: UiState) {
     val statusTextRes = vpnData.textRes
     val icon = vpnData.icon
 
+    val animatedContainerColor by animateColorAsState(targetValue = containerColor, label = "VpnContainerColor")
+    val animatedContentColor by animateColorAsState(targetValue = contentColor, label = "VpnContentColor")
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = containerColor,
-            contentColor = contentColor
+            containerColor = animatedContainerColor,
+            contentColor = animatedContentColor
         )
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            if (icon != null) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    modifier = Modifier.size(24.dp),
-                    tint = contentColor
-                )
-            }
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = stringResource(R.string.vpn_tunnel),
-                    style = MaterialTheme.typography.titleSmall,
-                    color = contentColor
-                )
-                Text(
-                    text = stringResource(statusTextRes),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = contentColor
-                )
-            }
-            Box(
-                modifier = Modifier.size(12.dp),
-                contentAlignment = Alignment.Center
+        AnimatedContent(targetState = vpnData, label = "VpnStatusAnimated") { targetVpnData ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                val indicatorColor = if (uiState.isVpnEnabled) statusColors.success else MaterialTheme.colorScheme.outline
-                androidx.compose.foundation.Canvas(modifier = Modifier.fillMaxSize()) {
-                    drawCircle(color = indicatorColor)
+                if (targetVpnData.icon != null) {
+                    Icon(
+                        imageVector = targetVpnData.icon,
+                        contentDescription = null,
+                        modifier = Modifier.size(24.dp),
+                        tint = animatedContentColor
+                    )
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(R.string.vpn_tunnel),
+                        style = MaterialTheme.typography.titleSmall,
+                        color = animatedContentColor
+                    )
+                    Text(
+                        text = stringResource(targetVpnData.textRes),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = animatedContentColor
+                    )
+                }
+                Box(
+                    modifier = Modifier.size(12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    val indicatorColor = if (targetVpnData.isVpnRunning()) statusColors.success else MaterialTheme.colorScheme.outline
+                    androidx.compose.foundation.Canvas(modifier = Modifier.fillMaxSize()) {
+                        drawCircle(color = indicatorColor)
+                    }
                 }
             }
         }
