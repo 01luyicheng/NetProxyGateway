@@ -97,4 +97,24 @@ class IpAddressUtilsTest {
         assertTrue(result.isSuccess())
         assertTrue(result.getOrNull()!!)
     }
+
+    @Test
+    fun isPrivateIpv4Rfc1918_handlesSpecialEdgeCases() {
+        // As noted in review, the original behavior accepted leading + and treated 010 as 10
+        // We preserve this behavior for now as a baseline
+        assertTrue(IpAddressUtils.isPrivateIpv4Rfc1918("+10.0.0.1"))
+        assertTrue(IpAddressUtils.isPrivateIpv4Rfc1918("010.0.0.1"))
+
+        val result = IpAddressUtils.validateIpv4WithResult("1.2.3.+4")
+        assertTrue(result.isSuccess())
+        assertTrue(result.getOrNull() ?: false)
+
+        // These throw in split(".").map { it.toInt() }
+        assertFalse(IpAddressUtils.validateIpv4WithResult("10.0.0.1.").isSuccess())
+        assertFalse(IpAddressUtils.validateIpv4WithResult(".10.0.0.1").isSuccess())
+        assertFalse(IpAddressUtils.validateIpv4WithResult("10..0.0.1").isSuccess())
+        assertFalse(IpAddressUtils.validateIpv4WithResult("10. 0.0.1").isSuccess())
+        assertFalse(IpAddressUtils.validateIpv4WithResult("99999999999.0.0.1").isSuccess())
+        assertFalse(IpAddressUtils.validateIpv4WithResult("-2147483649.0.0.1").isSuccess())
+    }
 }
