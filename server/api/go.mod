@@ -2,6 +2,8 @@ module github.com/netproxy/api
 
 go 1.25.0
 
+toolchain go1.25.12
+
 require (
 	github.com/gin-gonic/gin v1.9.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
