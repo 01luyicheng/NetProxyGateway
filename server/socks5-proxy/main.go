@@ -177,17 +177,25 @@ func (s *APISessionStore) validateWithAPI(deviceID, token string) (bool, error) 
 
 // IPFilter filters allowed destination IPs.
 type IPFilter struct {
-	allowedCIDRs []string
+	allowedCIDRs []*net.IPNet
 }
 
 // NewIPFilter creates a new IP filter.
 func NewIPFilter() *IPFilter {
+	cidrs := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+	}
+	var allowedCIDRs []*net.IPNet
+	for _, cidr := range cidrs {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err == nil {
+			allowedCIDRs = append(allowedCIDRs, ipNet)
+		}
+	}
 	return &IPFilter{
-		allowedCIDRs: []string{
-			"10.0.0.0/8",
-			"172.16.0.0/12",
-			"192.168.0.0/16",
-		},
+		allowedCIDRs: allowedCIDRs,
 	}
 }
 
@@ -205,11 +213,7 @@ func (f *IPFilter) IsAllowed(ip string) bool {
 		return false
 	}
 
-	for _, cidr := range f.allowedCIDRs {
-		_, ipNet, err := net.ParseCIDR(cidr)
-		if err != nil {
-			continue
-		}
+	for _, ipNet := range f.allowedCIDRs {
 		if ipNet.Contains(parsedIP) {
 			return true
 		}
