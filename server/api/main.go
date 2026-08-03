@@ -154,15 +154,7 @@ func NewServer() (*Server, error) {
 			if os.Getenv("ENABLE_TLS") == "true" {
 				log.Fatalf("FATAL: Cannot use APP_ENV=development when ENABLE_TLS is true. Development mode is not allowed in production configurations.")
 			}
-
-			log.Println("============================================================")
-			log.Println("  WARNING: DEVELOPMENT MODE - AUTO-GENERATED INTERNAL API KEY")
-			log.Println("  This key is ephemeral and will change on every restart.")
-			log.Println("  Internal service calls (e.g. SOCKS5 proxy) will NOT work")
-			log.Println("  unless you set INTERNAL_API_KEY explicitly.")
-			log.Println("  NEVER use APP_ENV=development in production!")
-			log.Println("============================================================")
-			key, err := generateSecureRandomString(32)
+			key, err := initDevModeInternalAPIKey()
 			if err != nil {
 				log.Fatalf("FATAL: failed to generate random INTERNAL_API_KEY: %v", err)
 			}
@@ -328,6 +320,26 @@ func generateUniquePairingCode(
 	}
 
 	return "", errPairingCodeConflictRetryLimitReached
+}
+
+// initDevModeInternalAPIKey emits the development-mode warning banner and generates an
+// ephemeral INTERNAL_API_KEY for APP_ENV=development.
+//
+// Security: the generated key (and any prefix of it) MUST NOT be written to logs. This is a
+// regression guard for PR #178 ("移除日志中的 INTERNAL_API_KEY 输出") — see docs/ISSUES.md REV43.
+// PR #181 commit 99a6594 silently re-introduced `log.Printf("  INTERNAL_API_KEY generated
+// (first 4 chars: %s...)", prefix)`; do not bring that line back. The warning banner below
+// contains no key material and is intentional.
+// Returns an error only if the CSPRNG fails; the caller is responsible for fatal-handling.
+func initDevModeInternalAPIKey() (string, error) {
+	log.Println("============================================================")
+	log.Println("  WARNING: DEVELOPMENT MODE - AUTO-GENERATED INTERNAL API KEY")
+	log.Println("  This key is ephemeral and will change on every restart.")
+	log.Println("  Internal service calls (e.g. SOCKS5 proxy) will NOT work")
+	log.Println("  unless you set INTERNAL_API_KEY explicitly.")
+	log.Println("  NEVER use APP_ENV=development in production!")
+	log.Println("============================================================")
+	return generateSecureRandomString(32)
 }
 
 // generateSecureRandomString generates a cryptographically secure random string for sensitive use cases like API keys.

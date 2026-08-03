@@ -1500,3 +1500,24 @@
 - **风险**: **高**。工程师可通过域名访问公网资源，完全绕过私有网络访问策略
 - **修复方式**: 对域名目标返回 `false`，拒绝所有域名连接，确保安全策略一致。更新注释说明拒绝原因
 
+### REV43: PR #181 提交 99a6594 静默回退 #178，重新泄露 INTERNAL_API_KEY 前缀到日志 [待修复]
+- **状态**: 待修复（缺陷存在于 PR #181 特性分支，未合入 main；main 已含 #178 修复）
+- **提交哈希**: `99a6594`（仅存在于 `origin/perf/ip-utils-opt-7933761447848654574`，不在 `origin/main`）
+- **修复提交**: 由本纠偏 PR 提供（在 main 上保留 #178 行为，并新增 `TestInitDevModeInternalAPIKeyDoesNotLogKeyOrPrefix` 回归测试）
+- **修复难度**: 低
+- **位置**: `server/api/main.go`（`NewServer` 内 dev-mode 分支，原 L168-L172 附近的 `log.Printf("  INTERNAL_API_KEY generated (first 4 chars: %s...)", prefix)`）
+- **问题描述**: PR #181 的提交 `99a6594` 标题为 "perf(utils): optimize ipv4 parsing"，却夹带了与 IPv4 解析无关的改动——逐字回退了一天前刚合入的安全修复 #178（提交 `0f70d67`，"🔒 修复: 移除日志中的 INTERNAL_API_KEY 输出"）。回退后重新执行 `log.Printf("  INTERNAL_API_KEY generated (first 4 chars: %s...)", internalAPIKey[:4])`，将自动生成的 INTERNAL_API_KEY 前 4 个字符写入日志。触发条件：`INTERNAL_API_KEY` 未设置 且 `APP_ENV=development` 且 `ENABLE_TLS != "true"`（仅 dev 路径可达，生产不可达）。密钥由 `generateSecureRandomString(32)` 从 62 字符表生成（约 190.5 bit 熵），泄露 4 字符约损失 23.8 bit。直接暴力破解仍不可行，但属于对已合入安全修复的静默回退 + 提交信息误导（review 绕过），违反仓库自身的脱敏规范（TECH_DEBT C22 最小脱敏长度 6）。
+- **风险**: **中**（dev 路径可达、熵损失有限，但属安全修复被静默回退 + 日志泄露密钥材料，日志常被聚合到 ELK/Loki/CloudWatch）
+- **修复方式**: 在纠偏 PR 中将 dev-mode 密钥生成抽取为 `initDevModeInternalAPIKey()`（仅打印不含密钥的警告横幅，返回密钥，绝不记录密钥或其前缀），新增 `TestInitDevModeInternalAPIKeyDoesNotLogKeyOrPrefix` 断言日志不含密钥/前缀/泄露标记。PR #181 合入前必须删除其 `server/api/main.go` 中重新加入的 5 行。
+
+### REV44: PR #181 提交 99a6594 静默回退 #179，在 debug 构建重新启用 TLS 证书验证绕过 [待修复]
+- **状态**: 待修复（缺陷存在于 PR #181 特性分支，未合入 main；main 已含 #179 修复）
+- **提交哈希**: `99a6594`（仅存在于 `origin/perf/ip-utils-opt-7933761447848654574`，不在 `origin/main`）
+- **修复提交**: 由本纠偏 PR 提供（main 保留 #179 的 `return false`，并在 `shouldTrustAllCertificatesForCurrentBuild_debugBuildAlwaysFalse` 测试上加注释锁死）
+- **修复难度**: 低
+- **位置**: `android/app/src/main/java/com/netproxy/gateway/connection/MqttConnectionManager.kt` (`shouldTrustAllCertificatesForCurrentBuild` L143-L145) 及对应测试 `MqttConnectionManagerTlsPolicyTest.kt`
+- **问题描述**: PR #181 提交 `99a6594`（标题 "perf(utils): optimize ipv4 parsing"）逐字回退了一天前刚合入的安全修复 #179（提交 `e8352ce`，"🔒 修复 TLS 证书验证绕过漏洞"）。`shouldTrustAllCertificatesForCurrentBuild` 由 #179 的恒 `return false` 被改回 `if (!isDebugBuild) return false; return DebugSettingsStore.isSkipMqttCertValidationEnabled(context)`，并同步把测试 `..._debugBuildAlwaysFalse`（assertFalse）改回 `..._debugBuildUsesSettingValue`（assertTrue），使 CI 仍绿。当返回 `true` 时，`createDevSocketFactory()` 安装空实现的 `X509TrustManager.checkServerTrusted`，**完全跳过证书链校验**并**绕过 `MQTT_TLS_PUBLIC_KEY_PINS` 证书固定**。可达性：release 安全（`BuildConfig.DEBUG=false`、`DebugSettingsStore` 自带 DEBUG 门控、`createSecureSocketFactory` 的 IllegalStateException、Gradle `validateReleaseConfig` 四道防线）；debug 默认关闭（`MQTT_TRUST_ALL_CERTS` 在 build.gradle.kts 中硬编码 `"false"`），需开发者显式开启 `skip_mqtt_cert_validation`。但属对已合入安全修复的静默回退 + 提交信息误导 + 测试被同步篡改以掩盖回退，正是代码审查要拦截的模式。
+- **风险**: **中**（release 不可达；debug 下 opt-in 启用后可被任意 CA 受信/自签名 + DNS 控制的证书 MITM MQTT 连接，绕过证书固定）
+- **修复方式**: 纠偏 PR 在 main 保留 #179 的 `return false`，并在 `shouldTrustAllCertificatesForCurrentBuild_debugBuildAlwaysFalse` 测试注释中明确标注不得改回 assertTrue。若确需恢复 debug 绕过，必须在独立 PR 中提出并附安全论证与文档更新（注意 `docs/DECISIONS.md` L189 "debug 默认为 true" 已与代码实际默认 `false` 矛盾，需一并修正）。PR #181 合入前必须撤销其对 `MqttConnectionManager.kt` 与 `MqttConnectionManagerTlsPolicyTest.kt` 的改动。
+- **关联**: IPv4 解析性能优化本身（`IpAddressUtils.parseIpv4Octets` 重写）经多 subagent 交叉验证为行为等价、无缺陷，可在剔除上述两处安全回退后独立推进。
+
