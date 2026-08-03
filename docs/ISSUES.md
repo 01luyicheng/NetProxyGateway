@@ -1501,7 +1501,7 @@
 - **修复方式**: 对域名目标返回 `false`，拒绝所有域名连接，确保安全策略一致。更新注释说明拒绝原因
 
 ### REV43: PR #181 提交 99a6594 静默回退 #178，重新泄露 INTERNAL_API_KEY 前缀到日志 [待修复]
-- **状态**: 待修复（缺陷存在于 PR #181 特性分支，未合入 main；main 已含 #178 修复）
+- **修复状态**: 待修复（缺陷存在于 PR #181 特性分支，未合入 main；main 已含 #178 修复）
 - **提交哈希**: `99a6594`（仅存在于 `origin/perf/ip-utils-opt-7933761447848654574`，不在 `origin/main`）
 - **修复提交**: 由本纠偏 PR 提供（在 main 上保留 #178 行为，并新增 `TestInitDevModeInternalAPIKeyDoesNotLogKeyOrPrefix` 回归测试）
 - **修复难度**: 低
@@ -1511,7 +1511,7 @@
 - **修复方式**: 在纠偏 PR 中将 dev-mode 密钥生成抽取为 `initDevModeInternalAPIKey()`（仅打印不含密钥的警告横幅，返回密钥，绝不记录密钥或其前缀），新增 `TestInitDevModeInternalAPIKeyDoesNotLogKeyOrPrefix` 断言日志不含密钥/前缀/泄露标记。PR #181 合入前必须删除其 `server/api/main.go` 中重新加入的 5 行。
 
 ### REV44: PR #181 提交 99a6594 静默回退 #179，在 debug 构建重新启用 TLS 证书验证绕过 [待修复]
-- **状态**: 待修复（缺陷存在于 PR #181 特性分支，未合入 main；main 已含 #179 修复）
+- **修复状态**: 待修复（缺陷存在于 PR #181 特性分支，未合入 main；main 已含 #179 修复）
 - **提交哈希**: `99a6594`（仅存在于 `origin/perf/ip-utils-opt-7933761447848654574`，不在 `origin/main`）
 - **修复提交**: 由本纠偏 PR 提供（main 保留 #179 的 `return false`，并在 `shouldTrustAllCertificatesForCurrentBuild_debugBuildAlwaysFalse` 测试上加注释锁死）
 - **修复难度**: 低
