@@ -642,6 +642,49 @@ func TestValidateSessionExpiredTokenDeleteFailureDoesNotLogRawToken(t *testing.T
 	}
 }
 
+// TestInitDevModeInternalAPIKeyDoesNotLogKeyOrPrefix is a regression guard for PR #178
+// ("移除日志中的 INTERNAL_API_KEY 输出") and docs/ISSUES.md REV43. PR #181 commit 99a6594
+// silently re-introduced logging the first 4 chars of the generated INTERNAL_API_KEY; this
+// test fails if the key (or the known leak markers) ever reappear in dev-mode setup logs.
+func TestInitDevModeInternalAPIKeyDoesNotLogKeyOrPrefix(t *testing.T) {
+	var logBuf bytes.Buffer
+	originalWriter := log.Writer()
+	originalFlags := log.Flags()
+	log.SetOutput(&logBuf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(originalWriter)
+		log.SetFlags(originalFlags)
+	})
+
+	key, err := initDevModeInternalAPIKey()
+	if err != nil {
+		t.Fatalf("initDevModeInternalAPIKey failed: %v", err)
+	}
+	if len(key) != 32 {
+		t.Fatalf("expected 32-char INTERNAL_API_KEY, got %d chars", len(key))
+	}
+
+	logOutput := logBuf.String()
+
+	// The full generated key must never appear in logs (32 random alphanumeric chars
+	// cannot collide with the fixed dev-mode banner, so this is non-flaky).
+	if strings.Contains(logOutput, key) {
+		t.Fatalf("dev-mode setup leaked the full INTERNAL_API_KEY into logs; got: %q", logOutput)
+	}
+	// Direct guards against the exact regression from PR #181 commit 99a6594.
+	if strings.Contains(logOutput, "first 4 chars") {
+		t.Fatalf("dev-mode setup logged an INTERNAL_API_KEY prefix marker; got: %q", logOutput)
+	}
+	if strings.Contains(logOutput, "INTERNAL_API_KEY generated") {
+		t.Fatalf("dev-mode setup logged an INTERNAL_API_KEY generation statement; got: %q", logOutput)
+	}
+	// Sanity: the non-secret dev-mode warning banner should still be emitted.
+	if !strings.Contains(logOutput, "DEVELOPMENT MODE") {
+		t.Fatalf("expected dev-mode warning banner in logs, got: %q", logOutput)
+	}
+}
+
 func TestGenerateUniquePairingCodeConflictThenSuccess(t *testing.T) {
 	codes := []string{"111111", "222222"}
 	codeIndex := 0

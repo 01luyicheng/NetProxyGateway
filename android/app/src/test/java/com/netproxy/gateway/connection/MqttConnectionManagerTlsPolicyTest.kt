@@ -65,6 +65,13 @@ class MqttConnectionManagerTlsPolicyTest {
 
     @Test
     fun shouldTrustAllCertificatesForCurrentBuild_debugBuildAlwaysFalse() {
+        // Regression guard for PR #179 ("🔒 修复 TLS 证书验证绕过漏洞") and docs/ISSUES.md REV44.
+        // shouldTrustAllCertificatesForCurrentBuild MUST return false even in debug builds, even when
+        // the DebugSettingsStore toggle is enabled. PR #181 commit 99a6594 silently reverted this to
+        // `DebugSettingsStore.isSkipMqttCertValidationEnabled(context)`, re-enabling an empty
+        // X509TrustManager (chain validation + MQTT TLS pinning bypass) in debug builds. Do NOT
+        // change these assertions back to assertTrue; if the debug bypass is genuinely needed it
+        // must be re-proposed in a dedicated, security-justified PR with a docs update.
         DebugSettingsStore.setSkipMqttCertValidationEnabled(context, true)
         assertFalse(manager.shouldTrustAllCertificatesForCurrentBuild(isDebugBuild = true))
 

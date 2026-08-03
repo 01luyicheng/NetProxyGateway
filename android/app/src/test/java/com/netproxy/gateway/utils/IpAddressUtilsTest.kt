@@ -97,4 +97,26 @@ class IpAddressUtilsTest {
         assertTrue(result.isSuccess())
         assertTrue(result.getOrNull()!!)
     }
+
+    @Test
+    fun parseIpv4Octets_preservesToIntSemanticsAcrossEdgeCases() {
+        // Regression guard for the perf rewrite of parseIpv4Octets (PR #181).
+        // The manual parser must remain behaviorally equivalent to the old
+        // `ip.split(".").map { it.toInt() }` for every input class, so that the
+        // SOCKS5 target validation / DNS-rebinding defense (ISSUES.md H4) and
+        // IPv4 boundary validation (ISSUES.md M1) are not weakened.
+
+        // Inputs accepted by toInt() and still accepted (signs / leading zeros).
+        assertTrue(IpAddressUtils.isPrivateIpv4Rfc1918("+10.0.0.1"))
+        assertTrue(IpAddressUtils.isPrivateIpv4Rfc1918("010.0.0.1"))
+        assertTrue(IpAddressUtils.validateIpv4WithResult("1.2.3.+4").isSuccess())
+
+        // Inputs rejected by toInt() and still rejected.
+        assertFalse(IpAddressUtils.validateIpv4WithResult("10.0.0.1.").isSuccess())
+        assertFalse(IpAddressUtils.validateIpv4WithResult(".10.0.0.1").isSuccess())
+        assertFalse(IpAddressUtils.validateIpv4WithResult("10..0.0.1").isSuccess())
+        assertFalse(IpAddressUtils.validateIpv4WithResult("10. 0.0.1").isSuccess())
+        assertFalse(IpAddressUtils.validateIpv4WithResult("99999999999.0.0.1").isSuccess())
+        assertFalse(IpAddressUtils.validateIpv4WithResult("-2147483649.0.0.1").isSuccess())
+    }
 }
