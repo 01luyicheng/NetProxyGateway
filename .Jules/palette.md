@@ -6,3 +6,6 @@
 ## 2024-05-XX - Smooth transitions for state swaps
 **Learning:** Abrupt state swaps in status cards (like VPN or MQTT connection status) can feel jarring. Applying `animateColorAsState` for background colors and `AnimatedContent` for icons/text creates a much smoother, polished micro-interaction. Computing derived state inside the animation lambda is critical so fade-outs display correctly.
 **Action:** Use `animateColorAsState` and `AnimatedContent` for status cards, ensuring target states compute their own icons/text within the lambda.
+## 2024-05-24 - Smooth Loading Button Transitions
+**Learning:** For Jetpack Compose buttons displaying loading spinners, abrupt visual swaps (if/else) cause poor UX. When wrapping with AnimatedContent, the implicit RowScope is lost, breaking layouts. Additionally, hardcoding `MaterialTheme.colorScheme.onPrimary` for indicators breaks contrast in disabled states.
+**Action:** Always wrap inner button elements in AnimatedContent containing an explicit Row, and use LocalContentColor.current for spinners to ensure smooth transitions, preserved side-by-side layouts, and correct contrast in disabled states.
