@@ -605,16 +605,23 @@ fun PairingSection(
                 modifier = Modifier.fillMaxWidth(),
                 enabled = pairingCode.length >= 6 && !uiState.isPairingInProgress
             ) {
-                if (uiState.isPairingInProgress) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        strokeWidth = 2.dp
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(stringResource(R.string.pairing_in_progress))
-                } else {
-                    Text(stringResource(R.string.pair))
+                AnimatedContent(targetState = uiState.isPairingInProgress, label = "pairing_button_transition") { inProgress ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        if (inProgress) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                color = LocalContentColor.current,
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(stringResource(R.string.pairing_in_progress))
+                        } else {
+                            Text(stringResource(R.string.pair))
+                        }
+                    }
                 }
             }
 
