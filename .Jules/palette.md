@@ -6,3 +6,7 @@
 ## 2024-05-XX - Smooth transitions for state swaps
 **Learning:** Abrupt state swaps in status cards (like VPN or MQTT connection status) can feel jarring. Applying `animateColorAsState` for background colors and `AnimatedContent` for icons/text creates a much smoother, polished micro-interaction. Computing derived state inside the animation lambda is critical so fade-outs display correctly.
 **Action:** Use `animateColorAsState` and `AnimatedContent` for status cards, ensuring target states compute their own icons/text within the lambda.
+
+## 2024-05-24 - Smooth transitions and contrast in loading buttons
+**Learning:** Abrupt state swaps in buttons during async operations feel jarring. Also, hardcoding `MaterialTheme.colorScheme.onPrimary` for a `CircularProgressIndicator` inside a disabled button leads to poor visual contrast.
+**Action:** Wrap button content in `AnimatedContent` (and explicitly in a `Row` to preserve layout) for smooth transitions. Always use `LocalContentColor.current` for the spinner to ensure proper contrast in disabled states.
