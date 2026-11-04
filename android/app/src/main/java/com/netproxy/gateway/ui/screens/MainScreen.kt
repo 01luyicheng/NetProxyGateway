@@ -69,6 +69,7 @@ import com.netproxy.gateway.ui.viewmodel.MqttUiState
 import com.netproxy.gateway.ui.viewmodel.UiState
 import com.netproxy.gateway.vpn.VpnState
 import com.netproxy.gateway.wifi.WifiNetwork
+import androidx.compose.material3.LocalContentColor
 
 private enum class MainPage {
     Home,
@@ -605,16 +606,26 @@ fun PairingSection(
                 modifier = Modifier.fillMaxWidth(),
                 enabled = pairingCode.length >= 6 && !uiState.isPairingInProgress
             ) {
-                if (uiState.isPairingInProgress) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        strokeWidth = 2.dp
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(stringResource(R.string.pairing_in_progress))
-                } else {
-                    Text(stringResource(R.string.pair))
+                AnimatedContent(
+                    targetState = uiState.isPairingInProgress,
+                    label = "pairing_button_content"
+                ) { isPairing ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        if (isPairing) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                color = LocalContentColor.current,
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(stringResource(R.string.pairing_in_progress))
+                        } else {
+                            Text(stringResource(R.string.pair))
+                        }
+                    }
                 }
             }
 
