@@ -6,3 +6,7 @@
 ## 2024-05-XX - Smooth transitions for state swaps
 **Learning:** Abrupt state swaps in status cards (like VPN or MQTT connection status) can feel jarring. Applying `animateColorAsState` for background colors and `AnimatedContent` for icons/text creates a much smoother, polished micro-interaction. Computing derived state inside the animation lambda is critical so fade-outs display correctly.
 **Action:** Use `animateColorAsState` and `AnimatedContent` for status cards, ensuring target states compute their own icons/text within the lambda.
+
+## 2024-11-08 - 在 Compose Button 中使用 AnimatedContent
+**Learning:** 当在 Button 中添加 AnimatedContent 以实现状态过渡（例如加载指示器）时，它会移除隐式的 RowScope，导致布局问题。而且，硬编码加载指示器的颜色会破坏禁用状态下的对比度。
+**Action:** 必须显式地将动画按钮内容包装在 Row（居中对齐）中，并且加载指示器应该使用 LocalContentColor.current 以确保在不同状态（特别是禁用状态）下具有正确的视觉对比度。
