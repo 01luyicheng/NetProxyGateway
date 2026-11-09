@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -605,16 +606,26 @@ fun PairingSection(
                 modifier = Modifier.fillMaxWidth(),
                 enabled = pairingCode.length >= 6 && !uiState.isPairingInProgress
             ) {
-                if (uiState.isPairingInProgress) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        strokeWidth = 2.dp
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(stringResource(R.string.pairing_in_progress))
-                } else {
-                    Text(stringResource(R.string.pair))
+                AnimatedContent(
+                    targetState = uiState.isPairingInProgress,
+                    label = "pairing_button_content"
+                ) { isPairing ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        if (isPairing) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                color = LocalContentColor.current,
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(stringResource(R.string.pairing_in_progress))
+                        } else {
+                            Text(stringResource(R.string.pair))
+                        }
+                    }
                 }
             }
 
@@ -682,14 +693,37 @@ private fun ConnectedOptionsSection(
 
             Spacer(modifier = Modifier.height(16.dp))
 
+            var showDisconnectConfirm by rememberSaveable { mutableStateOf(false) }
             Button(
-                onClick = { viewModel.disconnect() },
+                onClick = { showDisconnectConfirm = true },
                 modifier = Modifier.fillMaxWidth(),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.error
                 )
             ) {
                 Text(stringResource(R.string.disconnect))
+            }
+            if (showDisconnectConfirm) {
+                AlertDialog(
+                    onDismissRequest = { showDisconnectConfirm = false },
+                    title = { Text(stringResource(R.string.disconnect)) },
+                    text = { Text(stringResource(R.string.disconnect_confirm_message)) },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                showDisconnectConfirm = false
+                                viewModel.disconnect()
+                            }
+                        ) {
+                            Text(stringResource(R.string.disconnect))
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showDisconnectConfirm = false }) {
+                            Text(stringResource(R.string.action_cancel))
+                        }
+                    }
+                )
             }
         }
     }
