@@ -1,0 +1,129 @@
+# .github/workflows/android-ci.yml
+# GitHub Actions 工作流 — Android 远程构建
+
+name: Android CI
+
+on:
+  push:
+    branches: [ ci/build ]
+  
+  workflow_dispatch:
+    inputs:
+      gradle_task:
+        description: 'Gradle task to run'
+        required: false
+        default: 'assembleDebug'
+        type: choice
+        options:
+          - assembleDebug
+          - assembleRelease
+          - testDebugUnitTest
+          - lintDebug
+
+env:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.parallel=true"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.ref }}
+        fetch-depth: 0
+    
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+    
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+    
+    - name: Cache Gradle packages
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+        key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+        restore-keys: |
+          ${{ runner.os }}-gradle-
+    
+    - name: Grant execute permission for gradlew
+      run: chmod +x gradlew
+    
+    - name: Run Gradle task
+      run: |
+        TASK="${{ github.event.inputs.gradle_task || 'assembleDebug' }}"
+        echo "Running: ./gradlew $TASK"
+        ./gradlew $TASK --no-daemon --stacktrace
+    
+    - name: Upload Debug APK
+      if: contains(github.event.inputs.gradle_task || 'assembleDebug', 'Debug')
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-debug
+        path: app/build/outputs/apk/debug/*.apk
+        retention-days: 7
+    
+    - name: Upload Release APK
+      if: contains(github.event.inputs.gradle_task || '', 'Release')
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-release
+        path: |
+          app/build/outputs/apk/release/*.apk
+          app/build/outputs/bundle/release/*.aab
+        retention-days: 30
+    
+    - name: Upload Test Results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results
+        path: |
+          **/build/reports/tests/
+          **/build/reports/androidTests/
+        retention-days: 7
+    
+    - name: Upload Lint Report
+      if: contains(github.event.inputs.gradle_task || '', 'lint')
+      uses: actions/upload-artifact@v4
+      with:
+        name: lint-report
+        path: app/build/reports/lint-results*.html
+        retention-days: 7
+
+  test:
+    needs: build
+    if: contains(github.event.inputs.gradle_task || 'assembleDebug', 'test')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+    
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+    
+    - name: Run Unit Tests
+      run: ./gradlew testDebugUnitTest --no-daemon
+    
+    - name: Upload Test Report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: unit-test-report
+        path: app/build/reports/tests/testDebugUnitTest/
